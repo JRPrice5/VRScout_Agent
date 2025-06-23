@@ -20,8 +20,10 @@ class ACTPolicy(nn.Module):
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
         image = normalize(image)
+        # Convert inputs to float32 to match model weights
+        qpos = qpos.float()
         if actions is not None: # training time
-            actions = actions[:, :self.model.num_queries]
+            actions = actions[:, :self.model.num_queries].float()
             is_pad = is_pad[:, :self.model.num_queries]
 
             a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, actions, is_pad)
@@ -53,8 +55,10 @@ class CNNMLPPolicy(nn.Module):
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
         image = normalize(image)
+        # Convert inputs to float32 to match model weights
+        qpos = qpos.float()
         if actions is not None: # training time
-            actions = actions[:, 0]
+            actions = actions[:, 0].float()
             a_hat = self.model(qpos, image, env_state, actions)
             mse = F.mse_loss(actions, a_hat)
             loss_dict = dict()

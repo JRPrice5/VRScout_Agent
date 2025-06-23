@@ -87,23 +87,28 @@ def get_norm_stats(dataset_dir, num_episodes):
             action = root['/action'][()]
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))
-    all_qpos_data = torch.stack(all_qpos_data)
-    all_action_data = torch.stack(all_action_data)
-    all_action_data = all_action_data
+    
+    # Concatenate instead of stack to handle different episode lengths
+    all_qpos_data = torch.cat(all_qpos_data, dim=0)
+    all_action_data = torch.cat(all_action_data, dim=0)
 
     # normalize action data
-    action_mean = all_action_data.mean(dim=[0, 1], keepdim=True)
-    action_std = all_action_data.std(dim=[0, 1], keepdim=True)
+    action_mean = all_action_data.mean(dim=0, keepdim=True)
+    action_std = all_action_data.std(dim=0, keepdim=True)
     action_std = torch.clip(action_std, 1e-2, np.inf) # clipping
 
     # normalize qpos data
-    qpos_mean = all_qpos_data.mean(dim=[0, 1], keepdim=True)
-    qpos_std = all_qpos_data.std(dim=[0, 1], keepdim=True)
+    qpos_mean = all_qpos_data.mean(dim=0, keepdim=True)
+    qpos_std = all_qpos_data.std(dim=0, keepdim=True)
     qpos_std = torch.clip(qpos_std, 1e-2, np.inf) # clipping
+
+    # Get example qpos from first episode
+    with h5py.File(os.path.join(dataset_dir, 'episode_0.hdf5'), 'r') as root:
+        example_qpos = root['/observations/qpos'][()]
 
     stats = {"action_mean": action_mean.numpy().squeeze(), "action_std": action_std.numpy().squeeze(),
              "qpos_mean": qpos_mean.numpy().squeeze(), "qpos_std": qpos_std.numpy().squeeze(),
-             "example_qpos": qpos}
+             "example_qpos": example_qpos}
 
     return stats
 
@@ -119,11 +124,16 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     # obtain normalization stats for qpos and action
     norm_stats = get_norm_stats(dataset_dir, num_episodes)
 
+    # import custom collate function
+    from custom_collate import custom_collate_fn
+
     # construct dataset and dataloader
     train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats)
     val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, 
+                                 num_workers=1, prefetch_factor=1, collate_fn=custom_collate_fn)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, 
+                               num_workers=1, prefetch_factor=1, collate_fn=custom_collate_fn)
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
 
