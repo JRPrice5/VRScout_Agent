@@ -444,6 +444,7 @@ public class ACTPolicyClient : MonoBehaviour
     [SerializeField] private VirtualKeySimulator keySimulator;
     [SerializeField] private bool enableHeadControl = true;
     [SerializeField] private bool enableControllerPositionControl = true;
+    [SerializeField] private bool enableControllerRotationControl = true;
     [SerializeField] private bool enableControllerButtonControl = true;
     [SerializeField] private PoseSpace headPoseSpace = PoseSpace.World;
     [SerializeField] private PoseSpace controllerPoseSpace = PoseSpace.Local;
@@ -488,7 +489,7 @@ public class ACTPolicyClient : MonoBehaviour
                 currentRot = headTransform.rotation;
                 
                 // Apply deltas using SetPositionAndRotation (more efficient)
-                headTransform.SetPositionAndRotation(currentPos + headPosDelta, currentRot * headRotDelta);
+                headTransform.SetPositionAndRotation(currentPos + headPosDelta, headRotDelta * currentRot);
             }
             else
             {
@@ -497,7 +498,7 @@ public class ACTPolicyClient : MonoBehaviour
                 
                 // For local transforms, we still need to set properties separately
                 headTransform.localPosition = currentPos + headPosDelta;
-                headTransform.localRotation = currentRot * headRotDelta;
+                headTransform.localRotation = headRotDelta * currentRot;
             }
         }
         else
@@ -522,8 +523,17 @@ public class ACTPolicyClient : MonoBehaviour
                 currentPos = leftControllerTransform.position;
                 currentRot = leftControllerTransform.rotation;
                 
-                // Apply deltas using SetPositionAndRotation (more efficient)
-                leftControllerTransform.SetPositionAndRotation(currentPos + leftPosDelta, currentRot * leftRotDelta);
+                // Apply position delta
+                if (enableControllerRotationControl)
+                {
+                    // Apply both position and rotation deltas
+                    leftControllerTransform.SetPositionAndRotation(currentPos + leftPosDelta, leftRotDelta * currentRot);
+                }
+                else
+                {
+                    // Apply position delta only
+                    leftControllerTransform.position = currentPos + leftPosDelta;
+                }
             }
             else
             {
@@ -532,7 +542,12 @@ public class ACTPolicyClient : MonoBehaviour
                 
                 // For local transforms, we still need to set properties separately
                 leftControllerTransform.localPosition = currentPos + leftPosDelta;
-                leftControllerTransform.localRotation = currentRot * leftRotDelta;
+                
+                // Only apply rotation if rotation control is enabled
+                if (enableControllerRotationControl)
+                {
+                    leftControllerTransform.localRotation = leftRotDelta * currentRot;
+                }
             }
         }
         else
@@ -557,8 +572,17 @@ public class ACTPolicyClient : MonoBehaviour
                 currentPos = rightControllerTransform.position;
                 currentRot = rightControllerTransform.rotation;
                 
-                // Apply deltas using SetPositionAndRotation (more efficient)
-                rightControllerTransform.SetPositionAndRotation(currentPos + rightPosDelta, currentRot * rightRotDelta);
+                // Apply position delta
+                if (enableControllerRotationControl)
+                {
+                    // Apply both position and rotation deltas
+                    rightControllerTransform.SetPositionAndRotation(currentPos + rightPosDelta, rightRotDelta * currentRot);
+                }
+                else
+                {
+                    // Apply position delta only
+                    rightControllerTransform.position = currentPos + rightPosDelta;
+                }
             }
             else
             {
@@ -567,7 +591,12 @@ public class ACTPolicyClient : MonoBehaviour
                 
                 // For local transforms, we still need to set properties separately
                 rightControllerTransform.localPosition = currentPos + rightPosDelta;
-                rightControllerTransform.localRotation = currentRot * rightRotDelta;
+                
+                // Only apply rotation if rotation control is enabled
+                if (enableControllerRotationControl)
+                {
+                    rightControllerTransform.localRotation = rightRotDelta * currentRot;
+                }
             }
         }
         else

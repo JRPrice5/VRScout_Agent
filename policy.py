@@ -19,13 +19,13 @@ class ACTPolicy(nn.Module):
         env_state = None
         # Print image shape and info before normalization
         print(f"[Policy] Input image shape: {image.shape}, dtype: {image.dtype}")
-        print(f"[Policy] Image min: {image.min()}, max: {image.max()}, mean: {image.mean()}")
+        # print(f"[Policy] Image min: {image.min()}, max: {image.max()}, mean: {image.mean()}")
         
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
         try:
             image = normalize(image)
-            print("[Policy] Normalization successful")
+            # print("[Policy] Normalization successful")
         except Exception as e:
             print(f"[Policy] Normalization error: {e}")
             raise

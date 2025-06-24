@@ -37,7 +37,7 @@ class UnityVRInterface:
     def __init__(self, 
                  policy_class='ACT',
                  host='127.0.0.1', 
-                 port=5555,
+                 port=5556,
                  camera_names=['camera1'],
                  temporal_agg=False,
                  ckpt_dir=None,
@@ -451,7 +451,7 @@ class UnityVRInterface:
                 all_cam_images = np.repeat(all_cam_images, 3, axis=-1)
         
         # Make sure the shape is [batch, height, width, 3]
-        print(f"NumPy image shape: {all_cam_images.shape}")
+        # print(f"NumPy image shape: {all_cam_images.shape}")
         
         # Convert to tensor
         image_data = torch.from_numpy(all_cam_images).float()
@@ -459,7 +459,7 @@ class UnityVRInterface:
         # Permute to channel-first format expected by PyTorch: [batch, channels, height, width]
         image_data = image_data.permute(0, 3, 1, 2).contiguous()
         
-        print(f"Final tensor shape (before adding camera dim): {image_data.shape}")
+        # print(f"Final tensor shape (before adding camera dim): {image_data.shape}")
         
         # CRITICAL FIX: Reshape to add camera dimension expected by DETR model
         # The model expects [batch, num_cam, channel, height, width]
@@ -474,7 +474,7 @@ class UnityVRInterface:
             # Need to reshape: [1, C, H, W] -> [1, 1, C, H, W]
             image_data = image_data.unsqueeze(1)
         
-        print(f"Final tensor shape (with camera dim): {image_data.shape}")
+        # print(f"Final tensor shape (with camera dim): {image_data.shape}")
         
         # Normalize pixel values to [0,1]
         image_data = image_data / 255.0
@@ -486,7 +486,7 @@ def main():
     parser = argparse.ArgumentParser(description='Unity VR Interface for ACT Policy')
     parser.add_argument('--policy_class', type=str, default='ACT', choices=['ACT', 'CNNMLP'], help='Policy class')
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Server host address')
-    parser.add_argument('--port', type=int, default=5555, help='Server port')
+    parser.add_argument('--port', type=int, default=5556, help='Server port')
     parser.add_argument('--temporal_agg', action='store_true', help='Use temporal aggregation')
     parser.add_argument('--camera_names', type=str, nargs='+', default=['camera1'], help='Camera names')
     
