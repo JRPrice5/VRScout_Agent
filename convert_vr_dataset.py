@@ -16,27 +16,33 @@ import pandas as pd
 import argparse
 from PIL import Image
 from tqdm import tqdm
+import numpy as np
+from pyquaternion import Quaternion
 
 
-def calculate_quaternion_delta(q1, q2):
+def calculate_quaternion_delta(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     """
-    Calculate the delta between two quaternions.
-    
-    Args:
-        q1: First quaternion [x, y, z, w]
-        q2: Second quaternion [x, y, z, w]
-        
+    Calculate the delta quaternion that rotates from q1 to q2.
+
+    Both q1 and q2 are arrays in [x, y, z, w] format.
+
     Returns:
-        Quaternion delta as numpy array
+        A numpy array [x, y, z, w] representing the rotation delta.
     """
-    q1_array = np.array([q1[0], q1[1], q1[2], q1[3]])
-    q2_array = np.array([q2[0], q2[1], q2[2], q2[3]])
-    
-    # Ensure we're taking the shortest path
-    if np.dot(q1_array, q2_array) < 0:
-        q2_array = -q2_array
-        
-    return q2_array - q1_array
+    # Convert input arrays [x, y, z, w] → pyquaternion’s (w, x, y, z)
+    q1_py = Quaternion(w=q1[3], x=q1[0], y=q1[1], z=q1[2]).normalised
+    q2_py = Quaternion(w=q2[3], x=q2[0], y=q2[1], z=q2[2]).normalised
+
+    # Enforce shortest path: if dot < 0, flip one quaternion
+    if np.dot(q1_py.elements, q2_py.elements) < 0:
+        q2_py = -q2_py
+
+    # Delta is the rotation that takes q1 → q2
+    delta = q2_py * q1_py.inverse
+    delta = delta.normalised
+
+    # pyquaternion stores elements as [w, x, y, z]; reorder for [x, y, z, w]
+    return np.array([delta.x, delta.y, delta.z, delta.w])
 
 
 def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0):
@@ -124,10 +130,16 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                 
                 # Calculate quaternion delta for head rotation
                 head_rot_delta = calculate_quaternion_delta(
-                    [current_row['head_dir_x'], current_row['head_dir_y'], 
-                     current_row['head_dir_z'], current_row['head_dir_w']],
-                    [next_row['head_dir_x'], next_row['head_dir_y'], 
-                     next_row['head_dir_z'], next_row['head_dir_w']]
+                    np.array([
+                    current_row['head_dir_x'], 
+                    current_row['head_dir_y'], 
+                    current_row['head_dir_z'], 
+                    current_row['head_dir_w']]),
+                    np.array([
+                    next_row['head_dir_x'], 
+                    next_row['head_dir_y'], 
+                    next_row['head_dir_z'], 
+                    next_row['head_dir_w']])
                 )
                 
                 # Left controller deltas
@@ -139,10 +151,18 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                 
                 # Calculate quaternion delta for left controller rotation
                 left_rot_delta = calculate_quaternion_delta(
-                    [current_row['left_controller_dir_x'], current_row['left_controller_dir_y'], 
-                     current_row['left_controller_dir_z'], current_row['left_controller_dir_w']],
-                    [next_row['left_controller_dir_x'], next_row['left_controller_dir_y'], 
-                     next_row['left_controller_dir_z'], next_row['left_controller_dir_w']]
+                    np.array([
+                        current_row['left_controller_dir_x'],
+                        current_row['left_controller_dir_y'],
+                        current_row['left_controller_dir_z'],
+                        current_row['left_controller_dir_w']
+                    ]),
+                    np.array([
+                        next_row['left_controller_dir_x'],
+                        next_row['left_controller_dir_y'],
+                        next_row['left_controller_dir_z'],
+                        next_row['left_controller_dir_w']
+                    ])
                 )
                 
                 # Right controller deltas
@@ -154,10 +174,18 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                 
                 # Calculate quaternion delta for right controller rotation
                 right_rot_delta = calculate_quaternion_delta(
-                    [current_row['right_controller_dir_x'], current_row['right_controller_dir_y'], 
-                     current_row['right_controller_dir_z'], current_row['right_controller_dir_w']],
-                    [next_row['right_controller_dir_x'], next_row['right_controller_dir_y'], 
-                     next_row['right_controller_dir_z'], next_row['right_controller_dir_w']]
+                    np.array([
+                        current_row['right_controller_dir_x'],
+                        current_row['right_controller_dir_y'],
+                        current_row['right_controller_dir_z'],
+                        current_row['right_controller_dir_w']
+                    ]),
+                    np.array([
+                        next_row['right_controller_dir_x'],
+                        next_row['right_controller_dir_y'],
+                        next_row['right_controller_dir_z'],
+                        next_row['right_controller_dir_w']
+                    ])
                 )
                 
                 # Controller inputs (next state)

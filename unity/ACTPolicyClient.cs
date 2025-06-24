@@ -8,6 +8,8 @@ using System.Threading.Tasks;
 using UnityEngine;
 using System.IO;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.XR;
+using UnityEngine.XR.Interaction.Toolkit;
 
 // Key enum for virtual key simulation - matches the one used in VirtualKeySimulator
 
@@ -27,6 +29,12 @@ public class ACTPolicyClient : MonoBehaviour
     [SerializeField] private Camera observationCamera;
     [SerializeField] private int imageWidth = 224;
     [SerializeField] private int imageHeight = 224;
+
+    [Header("Update Frequency Settings")]
+    [SerializeField] [Range(1, 120)] private int targetFrameRate = 30;
+    [SerializeField] [Tooltip("How frequently to send state and apply actions (in seconds)")]
+    private float updateInterval = 0.033f; // Default for ~30Hz
+    private float updateTimer = 0f;
 
     [Header("VR Components")]
     [SerializeField] private Transform headTransform;
@@ -63,8 +71,31 @@ public class ACTPolicyClient : MonoBehaviour
     private byte[] receiveBuffer = new byte[8192];
     private string dataBuffer = "";
 
+    // Define the TrackedPoseDriver and Action Based Controllers
+    private TrackedPoseDriver trackedPoseDriver;
+    private ActionBasedController leftABC;
+    private ActionBasedController rightABC;
+
     private void Start()
     {
+        // Set update interval based on target frame rate
+        updateInterval = 1f / targetFrameRate;
+        
+        // Disable tracking from device:
+        var camera = Camera.main;
+        if (camera != null)
+        {
+            trackedPoseDriver = camera.GetComponent<TrackedPoseDriver>();
+            if (trackedPoseDriver != null)
+            {
+                trackedPoseDriver.enabled = false;
+                Debug.Log("[Replayer] Disabled TrackedPoseDriver to allow replay");
+            }
+        }
+
+        // Init Action Based controllers
+        InitializeTriggerControls();
+
         if (observationCamera == null)
         {
             Debug.LogWarning("Observation camera not assigned. Using main camera.");
@@ -79,6 +110,13 @@ public class ACTPolicyClient : MonoBehaviour
     {
         shouldReconnect = false;
         DisconnectFromServer();
+
+        // Re-enable live inputs afterward
+        if (trackedPoseDriver != null)
+        {
+            trackedPoseDriver.enabled = true;
+            Debug.Log("[Replayer] Replay ended - re-enabled TrackedPoseDriver");
+        }
     }
     
     private void Awake()
@@ -96,17 +134,27 @@ public class ACTPolicyClient : MonoBehaviour
 
     private void Update()
     {
-        // If we have a new action, apply it
-        if (newActionReceived)
+        // Update timer
+        updateTimer += Time.deltaTime;
+        
+        // Check if it's time to update based on the target frame rate
+        if (updateTimer >= updateInterval)
         {
-            ApplyAction(latestAction);
-            newActionReceived = false;
-        }
+            // Reset timer
+            updateTimer = 0f;
+            
+            // If we have a new action, apply it
+            if (newActionReceived)
+            {
+                ApplyAction(latestAction);
+                newActionReceived = false;
+            }
 
-        // Send state to server every frame
-        if (isConnected)
-        {
-            SendStateToServer();
+            // Send state to server at the specified frequency
+            if (isConnected)
+            {
+                SendStateToServer();
+            }
         }
     }
 
@@ -411,83 +459,124 @@ public class ACTPolicyClient : MonoBehaviour
             return;
         }
 
-        Debug.Log($"Applying action: {string.Join(", ", action)}");
+        Debug.Log($"Applying action delta: {string.Join(", ", action)}");
         
         // Parse and apply the actions based on our training format
-        // Action format: [0-2]: Head position, [3-6]: Head rotation (quaternion),
-        // [7-9]: Left controller position, [10-13]: Left controller rotation,
-        // [14-16]: Right controller position, [17-20]: Right controller rotation,
-        // [21]: Left trigger, [22]: Right trigger, [23]: Left grip, [24]: Right grip
+        // Action format from Python:
+        // [0-2]: Head position delta, [3-6]: Head rotation delta (quaternion),
+        // [7-9]: Left controller position delta, [10-13]: Left controller rotation delta,
+        // [14-16]: Right controller position delta, [17-20]: Right controller rotation delta,
+        // [21]: Left index trigger, [22]: Right index trigger, [23]: Left hand trigger, [24]: Right hand trigger,
+        // [25-26]: Left thumbstick XY, [27-28]: Right thumbstick XY
         
         int index = 0;
         
-        // Apply head position/rotation
+        // Apply head position/rotation deltas
         if (enableHeadControl && headTransform != null)
         {
-            // Extract position and rotation from action
-            Vector3 headPos = new Vector3(action[index++], action[index++], action[index++]);
-            Quaternion headRot = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
+            // Extract position and rotation deltas from action
+            Vector3 headPosDelta = new Vector3(action[index++], action[index++], action[index++]);
+            Quaternion headRotDelta = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
             
-            // Apply to head transform
+            // Get current position and rotation
+            Vector3 currentPos;
+            Quaternion currentRot;
+            
             if (headPoseSpace == PoseSpace.World)
-                headTransform.SetPositionAndRotation(headPos, headRot);
+            {
+                currentPos = headTransform.position;
+                currentRot = headTransform.rotation;
+                
+                // Apply deltas using SetPositionAndRotation (more efficient)
+                headTransform.SetPositionAndRotation(currentPos + headPosDelta, currentRot * headRotDelta);
+            }
             else
             {
-                headTransform.localPosition = headPos;
-                headTransform.localRotation = headRot;
+                currentPos = headTransform.localPosition;
+                currentRot = headTransform.localRotation;
+                
+                // For local transforms, we still need to set properties separately
+                headTransform.localPosition = currentPos + headPosDelta;
+                headTransform.localRotation = currentRot * headRotDelta;
             }
         }
         else
         {
-            // Skip head position/rotation indices
+            // Skip head position/rotation delta indices
             index += 7;
         }
         
-        // Apply left controller position/rotation
+        // Apply left controller position/rotation deltas
         if (enableControllerPositionControl && leftControllerTransform != null)
         {
-            // Extract position and rotation from action
-            Vector3 leftPos = new Vector3(action[index++], action[index++], action[index++]);
-            Quaternion leftRot = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
+            // Extract position and rotation deltas from action
+            Vector3 leftPosDelta = new Vector3(action[index++], action[index++], action[index++]);
+            Quaternion leftRotDelta = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
             
-            // Apply to left controller transform
+            // Get current position and rotation
+            Vector3 currentPos;
+            Quaternion currentRot;
+            
             if (controllerPoseSpace == PoseSpace.World)
-                leftControllerTransform.SetPositionAndRotation(leftPos, leftRot);
+            {
+                currentPos = leftControllerTransform.position;
+                currentRot = leftControllerTransform.rotation;
+                
+                // Apply deltas using SetPositionAndRotation (more efficient)
+                leftControllerTransform.SetPositionAndRotation(currentPos + leftPosDelta, currentRot * leftRotDelta);
+            }
             else
             {
-                leftControllerTransform.localPosition = leftPos;
-                leftControllerTransform.localRotation = leftRot;
+                currentPos = leftControllerTransform.localPosition;
+                currentRot = leftControllerTransform.localRotation;
+                
+                // For local transforms, we still need to set properties separately
+                leftControllerTransform.localPosition = currentPos + leftPosDelta;
+                leftControllerTransform.localRotation = currentRot * leftRotDelta;
             }
         }
         else
         {
-            // Skip left controller indices
+            // Skip left controller delta indices
             index += 7;
         }
         
-        // Apply right controller position/rotation
+        // Apply right controller position/rotation deltas
         if (enableControllerPositionControl && rightControllerTransform != null)
         {
-            // Extract position and rotation from action
-            Vector3 rightPos = new Vector3(action[index++], action[index++], action[index++]);
-            Quaternion rightRot = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
+            // Extract position and rotation deltas from action
+            Vector3 rightPosDelta = new Vector3(action[index++], action[index++], action[index++]);
+            Quaternion rightRotDelta = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
             
-            // Apply to right controller transform
+            // Get current position and rotation
+            Vector3 currentPos;
+            Quaternion currentRot;
+            
             if (controllerPoseSpace == PoseSpace.World)
-                rightControllerTransform.SetPositionAndRotation(rightPos, rightRot);
+            {
+                currentPos = rightControllerTransform.position;
+                currentRot = rightControllerTransform.rotation;
+                
+                // Apply deltas using SetPositionAndRotation (more efficient)
+                rightControllerTransform.SetPositionAndRotation(currentPos + rightPosDelta, currentRot * rightRotDelta);
+            }
             else
             {
-                rightControllerTransform.localPosition = rightPos;
-                rightControllerTransform.localRotation = rightRot;
+                currentPos = rightControllerTransform.localPosition;
+                currentRot = rightControllerTransform.localRotation;
+                
+                // For local transforms, we still need to set properties separately
+                rightControllerTransform.localPosition = currentPos + rightPosDelta;
+                rightControllerTransform.localRotation = currentRot * rightRotDelta;
             }
         }
         else
         {
-            // Skip right controller indices
+            // Skip right controller delta indices
             index += 7;
         }
         
-        // Apply controller button states if needed
+        // Apply controller button states (these are absolute values from next state, not deltas)
         if (enableControllerButtonControl && keySimulator != null && index + 3 < action.Length)
         {
             // Store controller input values for use in future state collection
@@ -505,11 +594,9 @@ public class ACTPolicyClient : MonoBehaviour
                 this.rightThumbstickY = action[index++];
             }
             
-            // Simulate key presses based on trigger values (same keys as in LocalDiskPoint3Replayer)
-            // Left grab
-            keySimulator.SetKeyState(Key.Y, this.leftHandTrigger > 0.1f);
-            // Right grab
-            keySimulator.SetKeyState(Key.B, this.rightHandTrigger > 0.1f);
+            // Simulate key presses based on trigger values
+            keySimulator.SetKeyState(Key.Y, this.leftHandTrigger > 0.1f);  // Left grab
+            keySimulator.SetKeyState(Key.B, this.rightHandTrigger > 0.1f);  // Right grab
             
             // You can add additional key mappings for the index triggers if needed
             // For example:
@@ -531,5 +618,16 @@ public class ACTPolicyClient : MonoBehaviour
     {
         public float[] action;
         public int timestep;
+    }
+
+    // Helper function to activate controller objects
+    void InitializeTriggerControls()
+    {
+        // LEFT
+        leftABC = leftControllerTransform.GetComponent<ActionBasedController>();
+        rightABC = rightControllerTransform.GetComponent<ActionBasedController>();
+
+        leftABC.gameObject.SetActive(true);
+        rightABC.gameObject.SetActive(true);
     }
 }
