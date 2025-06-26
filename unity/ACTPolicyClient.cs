@@ -43,6 +43,9 @@ public class ACTPolicyClient : MonoBehaviour
     
     [Header("Automation Settings")]
     [Tooltip("Set to true to have the policy control VR components")]
+    [SerializeField] private bool enableMovementControl = true;
+    
+    [SerializeField] private UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets.DynamicMoveProvider dynamicMoveProvider;
 
     // Socket and connection variables
     private TcpClient client;
@@ -55,7 +58,11 @@ public class ACTPolicyClient : MonoBehaviour
     // Action data received from Python
     private float[] latestAction;
     private int latestTimestep = -1;
-    private bool newActionReceived = false;
+    
+    // Timestep synchronization
+    private int clientTimestep = 0;
+    private Dictionary<int, float[]> actionQueue = new Dictionary<int, float[]>();
+    private int maxQueueSize = 10; // Limit queue size to prevent memory issues
     
     // Track controller input values from latest action
     private float leftIndexTrigger = 0f;
@@ -66,6 +73,12 @@ public class ACTPolicyClient : MonoBehaviour
     private float leftThumbstickY = 0f;
     private float rightThumbstickX = 0f;
     private float rightThumbstickY = 0f;
+    
+    // Public properties to access thumbstick values
+    public float LeftThumbstickX => leftThumbstickX;
+    public float LeftThumbstickY => leftThumbstickY;
+    public float RightThumbstickX => rightThumbstickX;
+    public float RightThumbstickY => rightThumbstickY;
 
     // Buffer for receiving data
     private byte[] receiveBuffer = new byte[8192];
@@ -95,6 +108,24 @@ public class ACTPolicyClient : MonoBehaviour
 
         // Init Action Based controllers
         InitializeTriggerControls();
+
+        // Initialize DynamicMoveProvider if not already set
+        if (dynamicMoveProvider == null)
+        {
+            dynamicMoveProvider = FindObjectOfType<UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets.DynamicMoveProvider>();
+            if (dynamicMoveProvider != null)
+            {
+                Debug.Log("Found DynamicMoveProvider for movement control");
+            }
+        }
+
+        // Configure DynamicMoveProvider to use our input if available
+        if (dynamicMoveProvider != null)
+        {
+            dynamicMoveProvider.ActPolicyClient = this;
+            dynamicMoveProvider.UseActPolicyInput = enableMovementControl;
+            Debug.Log($"Set DynamicMoveProvider.UseActPolicyInput = {enableMovementControl}");
+        }
 
         if (observationCamera == null)
         {
@@ -143,11 +174,17 @@ public class ACTPolicyClient : MonoBehaviour
             // Reset timer
             updateTimer = 0f;
             
-            // If we have a new action, apply it
-            if (newActionReceived)
+            lock (lockObject)
             {
-                ApplyAction(latestAction);
-                newActionReceived = false;
+                // Check if we have an action for the current timestep in the queue
+                if (actionQueue.ContainsKey(clientTimestep))
+                {
+                    ApplyAction(actionQueue[clientTimestep]);
+                    Debug.Log($"Applied action for timestep {clientTimestep}");
+                    actionQueue.Remove(clientTimestep); // Remove used action
+                    // Increment client timestep
+                    clientTimestep++;
+                }
             }
 
             // Send state to server at the specified frequency
@@ -291,12 +328,22 @@ public class ACTPolicyClient : MonoBehaviour
             
             lock (lockObject)
             {
-                latestAction = actionData.action;
-                latestTimestep = actionData.timestep;
-                newActionReceived = true;
+                // Add action to queue based on timestep
+                if (!actionQueue.ContainsKey(actionData.timestep))
+                {
+                    actionQueue[actionData.timestep] = actionData.action;
+                    
+                    // Clean up old entries if queue gets too large
+                    if (actionQueue.Count > maxQueueSize)
+                    {
+                        var oldestTimestep = actionQueue.Keys.Min();
+                        actionQueue.Remove(oldestTimestep);
+                        Debug.LogWarning($"Removed old action for timestep {oldestTimestep} from queue");
+                    }
+                }
             }
             
-            Debug.Log($"Received action for timestep {latestTimestep}");
+            Debug.Log($"Received action for timestep {actionData.timestep}, current client timestep: {clientTimestep}");
         }
         catch (Exception e)
         {
@@ -307,12 +354,13 @@ public class ACTPolicyClient : MonoBehaviour
     private void SendStateToServer()
     {
         try
-        {
+        {   
             // Create state data
             var stateData = new StateData
             {
                 qpos = GetCurrentQPos(),
                 image = CaptureAndEncodeImage()
+                timestep = clientTimestep
             };
 
             // Convert to JSON
@@ -621,6 +669,17 @@ public class ACTPolicyClient : MonoBehaviour
                 this.leftThumbstickY = action[index++];
                 this.rightThumbstickX = action[index++];
                 this.rightThumbstickY = action[index++];
+                
+                // Log thumbstick status if values exceed threshold
+                if (Mathf.Abs(this.leftThumbstickX) > 0.1f || Mathf.Abs(this.leftThumbstickY) > 0.1f)
+                {
+                    Debug.Log($"Left thumbstick active: X={this.leftThumbstickX:F2}, Y={this.leftThumbstickY:F2}");
+                }
+                
+                if (Mathf.Abs(this.rightThumbstickX) > 0.1f || Mathf.Abs(this.rightThumbstickY) > 0.1f)
+                {
+                    Debug.Log($"Right thumbstick active: X={this.rightThumbstickX:F2}, Y={this.rightThumbstickY:F2}");
+                }
             }
             
             // Simulate key presses based on trigger values
@@ -640,6 +699,7 @@ public class ACTPolicyClient : MonoBehaviour
     {
         public float[] qpos;
         public string image;
+        public int timestep; // Added timestep field for synchronization
     }
 
     [Serializable]

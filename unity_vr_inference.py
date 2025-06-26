@@ -125,7 +125,7 @@ class UnityVRInterface:
             self.state_dim = len(self.stats['qpos_mean'])
             self.all_time_actions = None
             self.max_timesteps = 1000  # Can be adjusted based on expected episode length
-            self.num_queries = self.chunk_size  # Use chunk_size for consistency
+
         
         # Initialize socket
         self.socket = None
@@ -265,7 +265,7 @@ class UnityVRInterface:
             # Reset timestep counter when a new client connects
             self.timestep = 0
             if self.temporal_agg:
-                self.all_time_actions = torch.zeros([self.max_timesteps, self.max_timesteps + self.num_queries, self.state_dim]).cuda()
+                self.all_time_actions = torch.zeros([self.max_timesteps, self.max_timesteps + self.chunk_size, self.state_dim]).cuda()
             
             buffer_size = 4096
             data_buffer = b""
@@ -294,13 +294,16 @@ class UnityVRInterface:
                         # Process the message
                         try:
                             state_data = json.loads(message.decode('utf-8'))
+                            
+                            # Use client timestep for synchronization if available
+                            if 'timestep' in state_data:
+                                self.timestep = state_data['timestep']
+                                
                             action = self._process_state_and_get_action(state_data)
                             
                             # Send action back to Unity
                             response = json.dumps(action) + "END_OF_MESSAGE"
                             self.client_socket.sendall(response.encode('utf-8'))
-                            
-                            self.timestep += 1
                         except json.JSONDecodeError:
                             print("Error decoding JSON from Unity")
                         except Exception as e:
@@ -339,6 +342,7 @@ class UnityVRInterface:
                 Expected keys:
                 - 'qpos': List of joint positions/state variables
                 - 'image': Base64 encoded image data or dictionary of images
+                - 'timestep': Client timestep for synchronization
                 
         Returns:
             Dictionary containing action data to send back to Unity
@@ -357,7 +361,8 @@ class UnityVRInterface:
             # Get action from policy
             if self.policy_class == 'ACT':
                 # Only query the policy when needed based on query_frequency
-                if self.timestep % self.query_frequency == 0:
+                time_index = self.timestep % self.query_frequency
+                if time_index == 0:
                     all_actions = self.policy(qpos, curr_image)
                     self.last_actions = all_actions  # Store for future timesteps
                 else:
@@ -366,11 +371,12 @@ class UnityVRInterface:
                         # First timestep or in case there's no previous action
                         all_actions = self.policy(qpos, curr_image)
                         self.last_actions = all_actions
+                        time_index = 0
                     else:
                         all_actions = self.last_actions
                 
                 if self.temporal_agg:
-                    self.all_time_actions[[self.timestep], self.timestep:self.timestep+self.num_queries] = all_actions
+                    self.all_time_actions[[self.timestep], self.timestep:self.timestep+self.chunk_size] = all_actions
                     actions_for_curr_step = self.all_time_actions[:, self.timestep]
                     actions_populated = torch.all(actions_for_curr_step != 0, axis=1)
                     actions_for_curr_step = actions_for_curr_step[actions_populated]
@@ -382,8 +388,6 @@ class UnityVRInterface:
                     exp_weights = torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
                     raw_action = (actions_for_curr_step * exp_weights).sum(dim=0, keepdim=True)
                 else:
-                    # Safe indexing - ensure we're not accessing beyond bounds
-                    time_index = self.timestep % self.chunk_size
                     raw_action = all_actions[:, time_index]
             elif self.policy_class == 'CNNMLP':
                 raw_action = self.policy(qpos, curr_image)
@@ -391,9 +395,6 @@ class UnityVRInterface:
             # Post-process action
             raw_action = raw_action.squeeze(0).cpu().numpy()
             action = self.post_process(raw_action)
-            
-            # Increment timestep
-            self.timestep += 1
             
             # Convert to list for JSON serialization
             action_list = action.tolist()
