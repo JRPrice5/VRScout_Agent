@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections;
 using System.Collections.Generic;
 using System.Net.Sockets;
@@ -45,7 +46,7 @@ public class ACTPolicyClient : MonoBehaviour
     [Tooltip("Set to true to have the policy control VR components")]
     [SerializeField] private bool enableMovementControl = true;
     
-    [SerializeField] private UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets.DynamicMoveProvider dynamicMoveProvider;
+    [SerializeField] private UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets.CustomDynamicMoveProvider dynamicMoveProvider;
 
     // Socket and connection variables
     private TcpClient client;
@@ -108,16 +109,6 @@ public class ACTPolicyClient : MonoBehaviour
 
         // Init Action Based controllers
         InitializeTriggerControls();
-
-        // Initialize DynamicMoveProvider if not already set
-        if (dynamicMoveProvider == null)
-        {
-            dynamicMoveProvider = FindObjectOfType<UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets.DynamicMoveProvider>();
-            if (dynamicMoveProvider != null)
-            {
-                Debug.Log("Found DynamicMoveProvider for movement control");
-            }
-        }
 
         // Configure DynamicMoveProvider to use our input if available
         if (dynamicMoveProvider != null)
@@ -359,7 +350,7 @@ public class ACTPolicyClient : MonoBehaviour
             var stateData = new StateData
             {
                 qpos = GetCurrentQPos(),
-                image = CaptureAndEncodeImage()
+                image = CaptureAndEncodeImage(),
                 timestep = clientTimestep
             };
 
