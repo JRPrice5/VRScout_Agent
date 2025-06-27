@@ -676,7 +676,11 @@ public class ACTPolicyClient : MonoBehaviour
             // Simulate key presses based on trigger values
             keySimulator.SetKeyState(Key.Y, this.leftHandTrigger > 0.1f);  // Left grab
             keySimulator.SetKeyState(Key.B, this.rightHandTrigger > 0.1f);  // Right grab
-            
+
+            if (this.leftHandTrigger > 0.1f || this.rightHandTrigger > 0.1f)
+            {
+                Debug.Log($"HandTrigger active: L={this.leftHandTrigger:F2}, R={this.rightHandTrigger:F2}");
+            }
             // You can add additional key mappings for the index triggers if needed
             // For example:
             // keySimulator.SetKeyState(Key.T, this.leftIndexTrigger > 0.1f); 

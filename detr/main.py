@@ -64,6 +64,9 @@ def get_args_parser():
     parser.add_argument('--chunk_size', action='store', type=int, help='chunk_size', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
 
+    # custom args
+    parser.add_argument('--query_frequency', type=int, default=1, help='How often to query the policy (in timesteps)', required=False)
+
     return parser
 
 
