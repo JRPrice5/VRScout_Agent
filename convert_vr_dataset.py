@@ -88,17 +88,20 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
         with h5py.File(output_file, 'w') as f:
             # Define qpos columns (all state variables)
             qpos_columns = [
-                # Head
+                # Head (local position)
                 'head_pos_x', 'head_pos_y', 'head_pos_z',
                 'head_dir_x', 'head_dir_y', 'head_dir_z', 'head_dir_w',
                 
-                # Left controller
+                # Left controller (local position)
                 'left_controller_pos_x', 'left_controller_pos_y', 'left_controller_pos_z',
                 'left_controller_dir_x', 'left_controller_dir_y', 'left_controller_dir_z', 'left_controller_dir_w',
                 
-                # Right controller
+                # Right controller (local position)
                 'right_controller_pos_x', 'right_controller_pos_y', 'right_controller_pos_z',
                 'right_controller_dir_x', 'right_controller_dir_y', 'right_controller_dir_z', 'right_controller_dir_w',
+                
+                # XR Origin (world position)
+                'xr_origin_pos_x', 'xr_origin_pos_y', 'xr_origin_pos_z',
                 
                 # Controller inputs
                 'IndexTrigger_0', 'IndexTrigger_1',
@@ -188,6 +191,13 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     ])
                 )
                 
+                # XR Origin position deltas
+                xr_origin_pos_delta = [
+                    next_row['xr_origin_pos_x'] - current_row['xr_origin_pos_x'],
+                    next_row['xr_origin_pos_y'] - current_row['xr_origin_pos_y'],
+                    next_row['xr_origin_pos_z'] - current_row['xr_origin_pos_z']
+                ]
+                
                 # Controller inputs (next state)
                 controller_inputs = [
                     next_row['IndexTrigger_0'], next_row['IndexTrigger_1'],
@@ -201,6 +211,7 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     head_pos_delta + head_rot_delta.tolist() + 
                     left_pos_delta + left_rot_delta.tolist() + 
                     right_pos_delta + right_rot_delta.tolist() +
+                    xr_origin_pos_delta +
                     controller_inputs
                 )
                 

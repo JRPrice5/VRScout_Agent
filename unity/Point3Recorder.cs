@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using UnityEngine;
 using UnityEngine.XR;
@@ -10,6 +10,7 @@ public class Point3Recorder : MonoBehaviour
     public Transform mainCamera;
     public Transform leftController;
     public Transform rightController;
+    public Transform xrOrigin;
 
     [Header("Input Actions")]
     public InputActionReference toggleRecordAction;
@@ -17,8 +18,12 @@ public class Point3Recorder : MonoBehaviour
     [Header("RGB Capture")]
     [Tooltip("Camera used for RGB snapshots.")]
     public Camera rgbCamera;
-    [Tooltip("Desired frame height in pixels (e.g. 480 for 480p). Width is calculated by aspect ratio.")]
+    [Tooltip("Desired frame width in pixels.")]
+    public int captureWidth = 640;
+    [Tooltip("Desired frame height in pixels.")]
     public int captureHeight = 480;
+    [Tooltip("Fixed aspect ratio for the capture (width/height). Set to 0 to use actual camera aspect ratio.")]
+    public float fixedAspectRatio = 4f/3f;
 
     [Header("Recording Settings")]
     [Tooltip("Frames per second to record poses and images.")]
@@ -83,6 +88,7 @@ public class Point3Recorder : MonoBehaviour
             "head_pos_x,head_pos_y,head_pos_z,head_dir_x,head_dir_y,head_dir_z,head_dir_w," +
             "left_controller_pos_x,left_controller_pos_y,left_controller_pos_z,left_controller_dir_x,left_controller_dir_y,left_controller_dir_z,left_controller_dir_w," +
             "right_controller_pos_x,right_controller_pos_y,right_controller_pos_z,right_controller_dir_x,right_controller_dir_y,right_controller_dir_z,right_controller_dir_w," +
+            "xr_origin_pos_x,xr_origin_pos_y,xr_origin_pos_z," +
             "IndexTrigger_0,IndexTrigger_1,HandTrigger_0,HandTrigger_1,Thumbstick_0_x,Thumbstick_0_y,Thumbstick_1_x,Thumbstick_1_y");
 
         isRecording = true;
@@ -107,13 +113,16 @@ public class Point3Recorder : MonoBehaviour
 
     private void RecordFrame(float timestamp)
     {
-        // Poses
-        Vector3 headPos = mainCamera.position;
+        // Poses (using local positions for controllers and camera)
+        Vector3 headPos = mainCamera.localPosition;
         Quaternion headRot = mainCamera.rotation;
-        Vector3 leftPos = leftController.position;
+        Vector3 leftPos = leftController.localPosition;
         Quaternion leftRot = leftController.rotation;
-        Vector3 rightPos = rightController.position;
+        Vector3 rightPos = rightController.localPosition;
         Quaternion rightRot = rightController.rotation;
+        
+        // XR Origin world position
+        Vector3 xrOriginPos = xrOrigin.position;
 
         // XR inputs
         leftDevice.TryGetFeatureValue(UnityEngine.XR.CommonUsages.trigger, out float idx0);
@@ -128,6 +137,7 @@ public class Point3Recorder : MonoBehaviour
             $"{headPos.x:F4},{headPos.y:F4},{headPos.z:F4},{headRot.x:F4},{headRot.y:F4},{headRot.z:F4},{headRot.w:F4}," +
             $"{leftPos.x:F4},{leftPos.y:F4},{leftPos.z:F4},{leftRot.x:F4},{leftRot.y:F4},{leftRot.z:F4},{leftRot.w:F4}," +
             $"{rightPos.x:F4},{rightPos.y:F4},{rightPos.z:F4},{rightRot.x:F4},{rightRot.y:F4},{rightRot.z:F4},{rightRot.w:F4}," +
+            $"{xrOriginPos.x:F4},{xrOriginPos.y:F4},{xrOriginPos.z:F4}," +
             $"{idx0:F4},{idx1:F4},{grip0:F4},{grip1:F4},{stick0.x:F4},{stick0.y:F4},{stick1.x:F4},{stick1.y:F4}");
         writer.WriteLine();
         writer.Flush();
@@ -140,8 +150,15 @@ public class Point3Recorder : MonoBehaviour
 
     private void CaptureRGBImage(int key)
     {
+        int width = captureWidth;
         int height = captureHeight;
-        int width = Mathf.RoundToInt(rgbCamera.aspect * height);
+        
+        // If a fixed aspect ratio is specified (not 0), adjust the camera's aspect ratio
+        if (fixedAspectRatio > 0)
+        {
+            rgbCamera.aspect = fixedAspectRatio;
+        }
+        
         RenderTexture rt = RenderTexture.GetTemporary(width, height, 24);
         RenderTexture prev = rgbCamera.targetTexture;
         rgbCamera.targetTexture = rt;
