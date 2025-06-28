@@ -123,14 +123,29 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
     
     # Update constants.py if requested
     if update_constants and total_episodes > 0:
-        # Get episode length from first episode
-        first_episode = os.path.join(output_dir, f'episode_{start_episode_idx}.hdf5')
+        # Get maximum episode length from all episodes
         import h5py
-        with h5py.File(first_episode, 'r') as f:
-            episode_len = f['/action'].shape[0]
+        max_episode_len = 0
         
-        # Update constants.py
-        update_constants_file(output_dir, task_name, total_episodes, episode_len)
+        # Iterate through all episodes to find the maximum length
+        for ep_idx in range(start_episode_idx, start_episode_idx + total_episodes):
+            episode_path = os.path.join(output_dir, f'episode_{ep_idx}.hdf5')
+            try:
+                with h5py.File(episode_path, 'r') as f:
+                    current_len = f['/action'].shape[0]
+                    max_episode_len = max(max_episode_len, current_len)
+            except Exception as e:
+                print(f"Warning: Could not read episode {ep_idx}: {e}")
+                continue
+        
+        if max_episode_len == 0:
+            print("Warning: Could not determine maximum episode length, using default value of 100")
+            max_episode_len = 100
+        else:
+            print(f"Maximum episode length across all episodes: {max_episode_len}")
+        
+        # Update constants.py with the maximum episode length
+        update_constants_file(output_dir, task_name, total_episodes, max_episode_len)
         
         print(f"\nTo train with this dataset, run:")
         print(f"python imitate_episodes.py --ckpt_dir ./ckpts/{task_name} --policy_class ACT --task_name {task_name} --batch_size 16 --seed 0 --num_epochs 500 --lr 1e-5 --kl_weight 5 --chunk_size 64 --hidden_dim 512 --dim_feedforward 2048")
