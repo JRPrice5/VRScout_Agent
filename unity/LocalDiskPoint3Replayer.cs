@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -22,6 +22,7 @@ public class LocalDiskPoint3Replayer : MonoBehaviour
     public Transform mainCamera;
     public Transform leftController;
     public Transform rightController;
+    public Transform xrOrigin;
 
     [Header("Data Paths")]
     public string csvFilePath = "Assets/point_3_log.csv";
@@ -76,6 +77,7 @@ public class LocalDiskPoint3Replayer : MonoBehaviour
         public Vector3 headPos; public Quaternion headRot;
         public Vector3 leftPos; public Quaternion leftRot;
         public Vector3 rightPos; public Quaternion rightRot;
+        public Vector3 xrOriginPos; // XR Origin world position
         public float indexTrigger0, indexTrigger1;
         public float handTrigger0, handTrigger1;
     }
@@ -480,6 +482,17 @@ public class LocalDiskPoint3Replayer : MonoBehaviour
             rightRot.y = SafeF("right_controller_dir_y", rightRot.y);
             rightRot.z = SafeF("right_controller_dir_z", rightRot.z);
             rightRot.w = SafeF("right_controller_dir_w", rightRot.w);
+            
+            // Parse XR Origin position
+            Vector3 xrOriginPos = Vector3.zero;
+            if (lastGood != null)
+            {
+                xrOriginPos = lastGood.xrOriginPos;
+            }
+            
+            xrOriginPos.x = SafeF("xr_origin_pos_x", xrOriginPos.x);
+            xrOriginPos.y = SafeF("xr_origin_pos_y", xrOriginPos.y);
+            xrOriginPos.z = SafeF("xr_origin_pos_z", xrOriginPos.z);
 
             // build and store the record
             var rec = new Record
@@ -492,6 +505,7 @@ public class LocalDiskPoint3Replayer : MonoBehaviour
                 leftRot = leftRot,
                 rightPos = rightPos,
                 rightRot = rightRot,
+                xrOriginPos = xrOriginPos,
                 indexTrigger0 = SafeF("IndexTrigger_0", 0f),
                 indexTrigger1 = SafeF("IndexTrigger_1", 0f),
                 handTrigger0 = SafeF("HandTrigger_0", 0f),
@@ -563,6 +577,13 @@ public class LocalDiskPoint3Replayer : MonoBehaviour
     }
     void ApplyPose(Record r)
     {
+        // — XR ORIGIN —
+        if (xrOrigin != null)
+        {
+            // Always apply XR Origin world position
+            xrOrigin.position = r.xrOriginPos;
+        }
+        
         // — HEAD —
         if (mainCamera != null)
         {
