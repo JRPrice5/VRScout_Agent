@@ -191,13 +191,6 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     ])
                 )
                 
-                # XR Origin position deltas
-                xr_origin_pos_delta = [
-                    next_row['xr_origin_pos_x'] - current_row['xr_origin_pos_x'],
-                    next_row['xr_origin_pos_y'] - current_row['xr_origin_pos_y'],
-                    next_row['xr_origin_pos_z'] - current_row['xr_origin_pos_z']
-                ]
-                
                 # Controller inputs (next state)
                 controller_inputs = [
                     next_row['IndexTrigger_0'], next_row['IndexTrigger_1'],
@@ -211,7 +204,6 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     head_pos_delta + head_rot_delta.tolist() + 
                     left_pos_delta + left_rot_delta.tolist() + 
                     right_pos_delta + right_rot_delta.tolist() +
-                    xr_origin_pos_delta +
                     controller_inputs
                 )
                 

@@ -28,25 +28,43 @@ public class ACTPolicyClient : MonoBehaviour
 
     [Header("Camera Settings")]
     [SerializeField] private Camera observationCamera;
+    [Tooltip("Desired frame width in pixels.")]
     [SerializeField] private int imageWidth = 224;
+    [Tooltip("Desired frame height in pixels.")]
     [SerializeField] private int imageHeight = 224;
+    [Tooltip("Fixed aspect ratio for the capture (width/height). Set to 0 to use actual camera aspect ratio.")]
+    [SerializeField] private float fixedAspectRatio = 1f;  // Default square aspect ratio (224x224)
 
     [Header("Update Frequency Settings")]
     [SerializeField] [Range(1, 120)] private int targetFrameRate = 30;
     [SerializeField] [Tooltip("How frequently to send state and apply actions (in seconds)")]
     private float updateInterval = 0.033f; // Default for ~30Hz
     private float updateTimer = 0f;
+    private int updatesSinceLastAction = 0; // Counter for updates without action
+    [SerializeField] [Tooltip("Number of updates to wait before retrying state send")]
+    private int maxUpdatesBetweenSends = 3; // Retry sending state after this many updates
 
     [Header("VR Components")]
     [SerializeField] private Transform headTransform;
     [SerializeField] private Transform leftControllerTransform;
     [SerializeField] private Transform rightControllerTransform;
-    
+    [SerializeField] private Transform xrOriginTransform;
+
     [Header("Automation Settings")]
     [Tooltip("Set to true to have the policy control VR components")]
     [SerializeField] private bool enableMovementControl = true;
-    
+
     [SerializeField] private UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets.CustomDynamicMoveProvider dynamicMoveProvider;
+
+    [SerializeField] private VirtualKeySimulator keySimulator;
+    [SerializeField] private bool enableHeadControl = true;
+    [SerializeField] private bool enableControllerPositionControl = true;
+    [SerializeField] private bool enableControllerRotationControl = true;
+    [SerializeField] private bool enableControllerButtonControl = true;
+    [SerializeField] private bool enableXROriginControl = true;
+    [SerializeField] private PoseSpace headPoseSpace = PoseSpace.World;
+    [SerializeField] private PoseSpace controllerPoseSpace = PoseSpace.Local;
+    [SerializeField] private PoseSpace xrOriginPoseSpace = PoseSpace.World;
 
     // Socket and connection variables
     private TcpClient client;
@@ -55,11 +73,13 @@ public class ACTPolicyClient : MonoBehaviour
     private Thread receiveThread;
     private readonly object lockObject = new object();
     private bool shouldReconnect = true;
+    
+    // Camera original aspect ratio
+    private float originalCameraAspect;
 
     // Action data received from Python
     private float[] latestAction;
-    private int latestTimestep = -1;
-    
+
     // Timestep synchronization
     private int clientTimestep = 0;
     private Dictionary<int, float[]> actionQueue = new Dictionary<int, float[]>();
@@ -123,6 +143,16 @@ public class ACTPolicyClient : MonoBehaviour
             Debug.LogWarning("Observation camera not assigned. Using main camera.");
             observationCamera = Camera.main;
         }
+        
+        // Store original camera aspect ratio
+        originalCameraAspect = observationCamera.aspect;
+        
+        // If a fixed aspect ratio is specified (not 0), adjust the camera's aspect ratio
+        if (fixedAspectRatio > 0)
+        {
+            observationCamera.aspect = fixedAspectRatio;
+            Debug.Log($"[ACT Client] Applied fixed aspect ratio {fixedAspectRatio} to camera");
+        }
 
         // Start connection in a separate thread to avoid blocking the main thread
         Task.Run(() => ConnectToServer());
@@ -138,6 +168,13 @@ public class ACTPolicyClient : MonoBehaviour
         {
             trackedPoseDriver.enabled = true;
             Debug.Log("[Replayer] Replay ended - re-enabled TrackedPoseDriver");
+        }
+        
+        // Restore original camera aspect ratio
+        if (observationCamera != null && fixedAspectRatio > 0)
+        {
+            observationCamera.aspect = originalCameraAspect;
+            Debug.Log($"[ACT Client] Restored original aspect ratio {originalCameraAspect}");
         }
     }
     
@@ -165,6 +202,7 @@ public class ACTPolicyClient : MonoBehaviour
             // Reset timer
             updateTimer = 0f;
             
+            bool actionApplied = false;
             lock (lockObject)
             {
                 // Check if we have an action for the current timestep in the queue
@@ -175,13 +213,35 @@ public class ACTPolicyClient : MonoBehaviour
                     actionQueue.Remove(clientTimestep); // Remove used action
                     // Increment client timestep
                     clientTimestep++;
+                    // Flag that we applied an action this update
+                    actionApplied = true;
                 }
             }
 
-            // Send state to server at the specified frequency
             if (isConnected)
             {
-                SendStateToServer();
+                // Send state to server when:
+                // 1. An action was just applied, OR
+                // 2. We've gone maxUpdatesBetweenSends updates without applying an action
+                if (actionApplied)
+                {
+                    // Reset counter when action is applied
+                    updatesSinceLastAction = 0;
+                    SendStateToServer();
+                }
+                else
+                {
+                    // Increment counter when no action is applied
+                    updatesSinceLastAction++;
+                    
+                    // After maxUpdatesBetweenSends updates without an action, retry sending state
+                    if (updatesSinceLastAction >= maxUpdatesBetweenSends)
+                    {
+                        SendStateToServer();
+                        Debug.Log($"Retry sending state after {maxUpdatesBetweenSends} updates without action");
+                        updatesSinceLastAction = 0; // Reset counter after retry
+                    }
+                }
             }
         }
     }
@@ -390,9 +450,20 @@ public class ACTPolicyClient : MonoBehaviour
         // This should match the format used during training
         List<float> qpos = new List<float>();
         
-        // Head position and rotation
-        Vector3 headPos = headTransform.position;
-        Quaternion headRot = headTransform.rotation;
+        // Head position and rotation - respect pose space setting
+        Vector3 headPos;
+        Quaternion headRot;
+        
+        if (headPoseSpace == PoseSpace.World)
+        {
+            headPos = headTransform.position;
+            headRot = headTransform.rotation;
+        }
+        else
+        {
+            headPos = headTransform.localPosition;
+            headRot = headTransform.localRotation;
+        }
         
         // Add head position
         qpos.Add(headPos.x);
@@ -405,9 +476,20 @@ public class ACTPolicyClient : MonoBehaviour
         qpos.Add(headRot.z);
         qpos.Add(headRot.w);
         
-        // Left controller position and rotation
-        Vector3 leftPos = leftControllerTransform.position;
-        Quaternion leftRot = leftControllerTransform.rotation;
+        // Left controller position and rotation - respect pose space setting
+        Vector3 leftPos;
+        Quaternion leftRot;
+        
+        if (controllerPoseSpace == PoseSpace.World)
+        {
+            leftPos = leftControllerTransform.position;
+            leftRot = leftControllerTransform.rotation;
+        }
+        else
+        {
+            leftPos = leftControllerTransform.localPosition;
+            leftRot = leftControllerTransform.localRotation;
+        }
         
         // Add left controller position
         qpos.Add(leftPos.x);
@@ -420,9 +502,20 @@ public class ACTPolicyClient : MonoBehaviour
         qpos.Add(leftRot.z);
         qpos.Add(leftRot.w);
         
-        // Right controller position and rotation
-        Vector3 rightPos = rightControllerTransform.position;
-        Quaternion rightRot = rightControllerTransform.rotation;
+        // Right controller position and rotation - respect pose space setting
+        Vector3 rightPos;
+        Quaternion rightRot;
+        
+        if (controllerPoseSpace == PoseSpace.World)
+        {
+            rightPos = rightControllerTransform.position;
+            rightRot = rightControllerTransform.rotation;
+        }
+        else
+        {
+            rightPos = rightControllerTransform.localPosition;
+            rightRot = rightControllerTransform.localRotation;
+        }
         
         // Add right controller position
         qpos.Add(rightPos.x);
@@ -434,6 +527,33 @@ public class ACTPolicyClient : MonoBehaviour
         qpos.Add(rightRot.y);
         qpos.Add(rightRot.z);
         qpos.Add(rightRot.w);
+        
+        // XR Origin position - respect pose space setting
+        if (xrOriginTransform != null)
+        {
+            Vector3 xrOriginPos;
+            
+            if (xrOriginPoseSpace == PoseSpace.World)
+            {
+                xrOriginPos = xrOriginTransform.position;
+            }
+            else
+            {
+                xrOriginPos = xrOriginTransform.localPosition;
+            }
+            
+            // Add XR Origin position
+            qpos.Add(xrOriginPos.x);
+            qpos.Add(xrOriginPos.y);
+            qpos.Add(xrOriginPos.z);
+        }
+        else
+        {
+            // Add zeros if XR Origin transform is not available
+            qpos.Add(0f);
+            qpos.Add(0f);
+            qpos.Add(0f);
+        }
         
         // Use tracked controller input values from previously applied action
         // This ensures the state includes the current virtual controller state
@@ -479,18 +599,9 @@ public class ACTPolicyClient : MonoBehaviour
         // Convert to base64 string
         return Convert.ToBase64String(bytes);
     }
-
-    [SerializeField] private VirtualKeySimulator keySimulator;
-    [SerializeField] private bool enableHeadControl = true;
-    [SerializeField] private bool enableControllerPositionControl = true;
-    [SerializeField] private bool enableControllerRotationControl = true;
-    [SerializeField] private bool enableControllerButtonControl = true;
-    [SerializeField] private PoseSpace headPoseSpace = PoseSpace.World;
-    [SerializeField] private PoseSpace controllerPoseSpace = PoseSpace.Local;
     
     // Enum for pose space matching the one in Point3Replayer
-    public enum PoseSpace { World, Local }
-    
+    public enum PoseSpace { World, Local }    
     private void ApplyAction(float[] action)
     {
         if (action == null || action.Length == 0)
@@ -506,8 +617,9 @@ public class ACTPolicyClient : MonoBehaviour
         // [0-2]: Head position delta, [3-6]: Head rotation delta (quaternion),
         // [7-9]: Left controller position delta, [10-13]: Left controller rotation delta,
         // [14-16]: Right controller position delta, [17-20]: Right controller rotation delta,
-        // [21]: Left index trigger, [22]: Right index trigger, [23]: Left hand trigger, [24]: Right hand trigger,
-        // [25-26]: Left thumbstick XY, [27-28]: Right thumbstick XY
+        // [21-23]: XR Origin position delta,
+        // [24]: Left index trigger, [25]: Right index trigger, [26]: Left hand trigger, [27]: Right hand trigger,
+        // [28-29]: Left thumbstick XY, [30-31]: Right thumbstick XY
         
         int index = 0;
         
@@ -644,6 +756,36 @@ public class ACTPolicyClient : MonoBehaviour
             index += 7;
         }
         
+        // Apply XR Origin position deltas
+        if (enableXROriginControl && xrOriginTransform != null)
+        {
+            // Extract position deltas from action
+            Vector3 xrOriginPosDelta = new Vector3(action[index++], action[index++], action[index++]);
+            
+            // Get current position
+            Vector3 currentPos;
+            
+            if (xrOriginPoseSpace == PoseSpace.World)
+            {
+                currentPos = xrOriginTransform.position;
+                
+                // Apply position delta
+                xrOriginTransform.position = currentPos + xrOriginPosDelta;
+            }
+            else
+            {
+                currentPos = xrOriginTransform.localPosition;
+                
+                // For local transforms
+                xrOriginTransform.localPosition = currentPos + xrOriginPosDelta;
+            }
+        }
+        else
+        {
+            // Skip XR Origin position delta indices
+            // index += 3;
+        }
+        
         // Apply controller button states (these are absolute values from next state, not deltas)
         if (enableControllerButtonControl && keySimulator != null && index + 3 < action.Length)
         {
@@ -674,10 +816,10 @@ public class ACTPolicyClient : MonoBehaviour
             }
             
             // Simulate key presses based on trigger values
-            keySimulator.SetKeyState(Key.Y, this.leftHandTrigger > 0.1f);  // Left grab
-            keySimulator.SetKeyState(Key.B, this.rightHandTrigger > 0.1f);  // Right grab
+            keySimulator.SetKeyState(Key.Y, this.leftHandTrigger > 0.02f);  // Left grab
+            keySimulator.SetKeyState(Key.B, this.rightHandTrigger > 0.02f);  // Right grab
 
-            if (this.leftHandTrigger > 0.1f || this.rightHandTrigger > 0.1f)
+            if (this.leftHandTrigger > 0.02f || this.rightHandTrigger > 0.02f)
             {
                 Debug.Log($"HandTrigger active: L={this.leftHandTrigger:F2}, R={this.rightHandTrigger:F2}");
             }
