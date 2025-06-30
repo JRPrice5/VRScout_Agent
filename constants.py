@@ -37,7 +37,7 @@ SIM_TASK_CONFIGS = {
         'camera_names': ['camera1']
     },
     'sim_vr_task_2': {
-        'dataset_dir': r'E:\vr-data\q3_data_2\HDF5',
+        'dataset_dir': r'E:\vr-data\q3_data_2\HDF5_abs',
         'num_episodes': 20,
         'episode_len': 565,
         'camera_names': ['camera1']

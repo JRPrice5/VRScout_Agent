@@ -118,80 +118,61 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
             qvel_data = np.zeros((len(episode_df), len(qpos_columns)))
             f.create_dataset('/observations/qvel', data=qvel_data)
             
-            # Create action data (deltas for positions, rotations, and controller inputs)
+            # Create action data (using next row values directly instead of deltas)
             action_data = []
             for i in range(len(episode_df) - 1):
-                current_row = episode_df.iloc[i]
                 next_row = episode_df.iloc[i + 1]
                 
-                # Head deltas
-                head_pos_delta = [
-                    next_row['head_pos_x'] - current_row['head_pos_x'],
-                    next_row['head_pos_y'] - current_row['head_pos_y'],
-                    next_row['head_pos_z'] - current_row['head_pos_z']
+                # Head position and rotation from next row
+                head_pos = [
+                    next_row['head_pos_x'],
+                    next_row['head_pos_y'],
+                    next_row['head_pos_z']
                 ]
                 
-                # Calculate quaternion delta for head rotation
-                head_rot_delta = calculate_quaternion_delta(
-                    np.array([
-                    current_row['head_dir_x'], 
-                    current_row['head_dir_y'], 
-                    current_row['head_dir_z'], 
-                    current_row['head_dir_w']]),
-                    np.array([
-                    next_row['head_dir_x'], 
-                    next_row['head_dir_y'], 
-                    next_row['head_dir_z'], 
-                    next_row['head_dir_w']])
-                )
-                
-                # Left controller deltas
-                left_pos_delta = [
-                    next_row['left_controller_pos_x'] - current_row['left_controller_pos_x'],
-                    next_row['left_controller_pos_y'] - current_row['left_controller_pos_y'],
-                    next_row['left_controller_pos_z'] - current_row['left_controller_pos_z']
+                head_rot = [
+                    next_row['head_dir_x'],
+                    next_row['head_dir_y'],
+                    next_row['head_dir_z'],
+                    next_row['head_dir_w']
                 ]
                 
-                # Calculate quaternion delta for left controller rotation
-                left_rot_delta = calculate_quaternion_delta(
-                    np.array([
-                        current_row['left_controller_dir_x'],
-                        current_row['left_controller_dir_y'],
-                        current_row['left_controller_dir_z'],
-                        current_row['left_controller_dir_w']
-                    ]),
-                    np.array([
-                        next_row['left_controller_dir_x'],
-                        next_row['left_controller_dir_y'],
-                        next_row['left_controller_dir_z'],
-                        next_row['left_controller_dir_w']
-                    ])
-                )
-                
-                # Right controller deltas
-                right_pos_delta = [
-                    next_row['right_controller_pos_x'] - current_row['right_controller_pos_x'],
-                    next_row['right_controller_pos_y'] - current_row['right_controller_pos_y'],
-                    next_row['right_controller_pos_z'] - current_row['right_controller_pos_z']
+                # Left controller position and rotation from next row
+                left_pos = [
+                    next_row['left_controller_pos_x'],
+                    next_row['left_controller_pos_y'],
+                    next_row['left_controller_pos_z']
                 ]
                 
-                # Calculate quaternion delta for right controller rotation
-                right_rot_delta = calculate_quaternion_delta(
-                    np.array([
-                        current_row['right_controller_dir_x'],
-                        current_row['right_controller_dir_y'],
-                        current_row['right_controller_dir_z'],
-                        current_row['right_controller_dir_w']
-                    ]),
-                    np.array([
-                        next_row['right_controller_dir_x'],
-                        next_row['right_controller_dir_y'],
-                        next_row['right_controller_dir_z'],
-                        next_row['right_controller_dir_w']
-                    ])
-                )
+                left_rot = [
+                    next_row['left_controller_dir_x'],
+                    next_row['left_controller_dir_y'],
+                    next_row['left_controller_dir_z'],
+                    next_row['left_controller_dir_w']
+                ]
                 
-                # Controller inputs (next state)
+                # Right controller position and rotation from next row
+                right_pos = [
+                    next_row['right_controller_pos_x'],
+                    next_row['right_controller_pos_y'],
+                    next_row['right_controller_pos_z']
+                ]
+                
+                right_rot = [
+                    next_row['right_controller_dir_x'],
+                    next_row['right_controller_dir_y'],
+                    next_row['right_controller_dir_z'],
+                    next_row['right_controller_dir_w']
+                ]
+                
+                # XR Origin position from next row
+                xr_origin_pos = [
+                    next_row['xr_origin_pos_x'],
+                    next_row['xr_origin_pos_y'],
+                    next_row['xr_origin_pos_z']
+                ]
+
+                # Controller inputs from next row
                 controller_inputs = [
                     next_row['IndexTrigger_0'], next_row['IndexTrigger_1'],
                     next_row['HandTrigger_0'], next_row['HandTrigger_1'],
@@ -199,11 +180,12 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     next_row['Thumbstick_1_x'], next_row['Thumbstick_1_y']
                 ]
                 
-                # Combine all deltas and controls into action vector
+                # Combine all next state values into action vector
                 action = (
-                    head_pos_delta + head_rot_delta.tolist() + 
-                    left_pos_delta + left_rot_delta.tolist() + 
-                    right_pos_delta + right_rot_delta.tolist() +
+                    head_pos + head_rot + 
+                    left_pos + left_rot + 
+                    right_pos + right_rot +
+                    xr_origin_pos +
                     controller_inputs
                 )
                 

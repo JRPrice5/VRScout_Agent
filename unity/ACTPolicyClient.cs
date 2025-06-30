@@ -53,6 +53,9 @@ public class ACTPolicyClient : MonoBehaviour
     [Header("Automation Settings")]
     [Tooltip("Set to true to have the policy control VR components")]
     [SerializeField] private bool enableMovementControl = true;
+    
+    [Tooltip("Set to true to use absolute positions, false to use deltas")]
+    [SerializeField] private bool useAbsolutePositions = false;
 
     [SerializeField] private UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets.CustomDynamicMoveProvider dynamicMoveProvider;
 
@@ -208,8 +211,18 @@ public class ACTPolicyClient : MonoBehaviour
                 // Check if we have an action for the current timestep in the queue
                 if (actionQueue.ContainsKey(clientTimestep))
                 {
-                    ApplyAction(actionQueue[clientTimestep]);
-                    Debug.Log($"Applied action for timestep {clientTimestep}");
+                    // Choose between delta or absolute position mode based on the toggle
+                    if (useAbsolutePositions)
+                    {
+                        ApplyActionAbsPos(actionQueue[clientTimestep]);
+                        Debug.Log($"Applied absolute action for timestep {clientTimestep}");
+                    }
+                    else
+                    {
+                        ApplyAction(actionQueue[clientTimestep]);
+                        Debug.Log($"Applied delta action for timestep {clientTimestep}");
+                    }
+                    
                     actionQueue.Remove(clientTimestep); // Remove used action
                     // Increment client timestep
                     clientTimestep++;
@@ -783,10 +796,206 @@ public class ACTPolicyClient : MonoBehaviour
         else
         {
             // Skip XR Origin position delta indices
-            // index += 3;
+            index += 3;
         }
         
         // Apply controller button states (these are absolute values from next state, not deltas)
+        if (enableControllerButtonControl && keySimulator != null && index + 3 < action.Length)
+        {
+            // Store controller input values for use in future state collection
+            this.leftIndexTrigger = action[index++];
+            this.rightIndexTrigger = action[index++];
+            this.leftHandTrigger = action[index++];
+            this.rightHandTrigger = action[index++];
+            
+            // Read thumbstick values if available in the action vector
+            if (index + 3 < action.Length)
+            {
+                this.leftThumbstickX = action[index++];
+                this.leftThumbstickY = action[index++];
+                this.rightThumbstickX = action[index++];
+                this.rightThumbstickY = action[index++];
+                
+                // Log thumbstick status if values exceed threshold
+                if (Mathf.Abs(this.leftThumbstickX) > 0.1f || Mathf.Abs(this.leftThumbstickY) > 0.1f)
+                {
+                    Debug.Log($"Left thumbstick active: X={this.leftThumbstickX:F2}, Y={this.leftThumbstickY:F2}");
+                }
+                
+                if (Mathf.Abs(this.rightThumbstickX) > 0.1f || Mathf.Abs(this.rightThumbstickY) > 0.1f)
+                {
+                    Debug.Log($"Right thumbstick active: X={this.rightThumbstickX:F2}, Y={this.rightThumbstickY:F2}");
+                }
+            }
+            
+            // Simulate key presses based on trigger values
+            keySimulator.SetKeyState(Key.Y, this.leftHandTrigger > 0.02f);  // Left grab
+            keySimulator.SetKeyState(Key.B, this.rightHandTrigger > 0.02f);  // Right grab
+
+            if (this.leftHandTrigger > 0.02f || this.rightHandTrigger > 0.02f)
+            {
+                Debug.Log($"HandTrigger active: L={this.leftHandTrigger:F2}, R={this.rightHandTrigger:F2}");
+            }
+            // You can add additional key mappings for the index triggers if needed
+            // For example:
+            // keySimulator.SetKeyState(Key.T, this.leftIndexTrigger > 0.1f); 
+            // keySimulator.SetKeyState(Key.G, this.rightIndexTrigger > 0.1f);
+        }
+    }
+    
+    /// <summary>
+    /// Apply action with absolute positions and rotations instead of deltas.
+    /// This function is designed to work with the modified dataset format where
+    /// actions are the next absolute positions rather than deltas.
+    /// </summary>
+    /// <param name="action">Array of absolute position and rotation values</param>
+    private void ApplyActionAbsPos(float[] action)
+    {
+        if (action == null || action.Length == 0)
+        {
+            Debug.LogWarning("Received empty action array");
+            return;
+        }
+
+        Debug.Log($"Applying absolute action: {string.Join(", ", action)}");
+        
+        // Parse and apply the actions based on our training format
+        // Action format from Python (absolute positions/rotations):
+        // [0-2]: Head position, [3-6]: Head rotation (quaternion),
+        // [7-9]: Left controller position, [10-13]: Left controller rotation,
+        // [14-16]: Right controller position, [17-20]: Right controller rotation,
+        // [21-23]: XR Origin position,
+        // [24]: Left index trigger, [25]: Right index trigger, [26]: Left hand trigger, [27]: Right hand trigger,
+        // [28-29]: Left thumbstick XY, [30-31]: Right thumbstick XY
+        
+        int index = 0;
+        
+        // Apply head absolute position/rotation
+        if (enableHeadControl && headTransform != null)
+        {
+            // Extract absolute position and rotation from action
+            Vector3 headPos = new Vector3(action[index++], action[index++], action[index++]);
+            Quaternion headRot = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
+            
+            // Apply absolute position and rotation
+            if (headPoseSpace == PoseSpace.World)
+            {
+                // Apply using SetPositionAndRotation (more efficient)
+                headTransform.SetPositionAndRotation(headPos, headRot);
+            }
+            else
+            {
+                // For local transforms
+                headTransform.localPosition = headPos;
+                headTransform.localRotation = headRot;
+            }
+        }
+        else
+        {
+            // Skip head position/rotation indices
+            index += 7;
+        }
+        
+        // Apply left controller absolute position/rotation
+        if (enableControllerPositionControl && leftControllerTransform != null)
+        {
+            // Extract absolute position and rotation from action
+            Vector3 leftPos = new Vector3(action[index++], action[index++], action[index++]);
+            Quaternion leftRot = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
+            
+            if (controllerPoseSpace == PoseSpace.World)
+            {
+                if (enableControllerRotationControl)
+                {
+                    // Apply both position and rotation
+                    leftControllerTransform.SetPositionAndRotation(leftPos, leftRot);
+                }
+                else
+                {
+                    // Apply position only
+                    leftControllerTransform.position = leftPos;
+                }
+            }
+            else
+            {
+                // For local transforms
+                leftControllerTransform.localPosition = leftPos;
+                
+                // Only apply rotation if rotation control is enabled
+                if (enableControllerRotationControl)
+                {
+                    leftControllerTransform.localRotation = leftRot;
+                }
+            }
+        }
+        else
+        {
+            // Skip left controller indices
+            index += 7;
+        }
+        
+        // Apply right controller absolute position/rotation
+        if (enableControllerPositionControl && rightControllerTransform != null)
+        {
+            // Extract absolute position and rotation from action
+            Vector3 rightPos = new Vector3(action[index++], action[index++], action[index++]);
+            Quaternion rightRot = new Quaternion(action[index++], action[index++], action[index++], action[index++]);
+            
+            if (controllerPoseSpace == PoseSpace.World)
+            {
+                if (enableControllerRotationControl)
+                {
+                    // Apply both position and rotation
+                    rightControllerTransform.SetPositionAndRotation(rightPos, rightRot);
+                }
+                else
+                {
+                    // Apply position only
+                    rightControllerTransform.position = rightPos;
+                }
+            }
+            else
+            {
+                // For local transforms
+                rightControllerTransform.localPosition = rightPos;
+                
+                // Only apply rotation if rotation control is enabled
+                if (enableControllerRotationControl)
+                {
+                    rightControllerTransform.localRotation = rightRot;
+                }
+            }
+        }
+        else
+        {
+            // Skip right controller indices
+            index += 7;
+        }
+        
+        // Apply XR Origin absolute position
+        if (enableXROriginControl && xrOriginTransform != null)
+        {
+            // Extract absolute position from action
+            Vector3 xrOriginPos = new Vector3(action[index++], action[index++], action[index++]);
+            
+            if (xrOriginPoseSpace == PoseSpace.World)
+            {
+                // Apply absolute position
+                xrOriginTransform.position = xrOriginPos;
+            }
+            else
+            {
+                // For local transforms
+                xrOriginTransform.localPosition = xrOriginPos;
+            }
+        }
+        else
+        {
+            // Skip XR Origin position indices
+            index += 3;
+        }
+        
+        // Apply controller button states (these are absolute values)
         if (enableControllerButtonControl && keySimulator != null && index + 3 < action.Length)
         {
             // Store controller input values for use in future state collection
