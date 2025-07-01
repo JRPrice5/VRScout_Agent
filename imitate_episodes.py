@@ -47,8 +47,8 @@ def main(args):
     camera_names = task_config['camera_names']
 
     # fixed parameters
-    state_dim = 29  # Updated from 14 to match actual dimension
-    lr_backbone = 1e-5
+    state_dim = 32  # Updated from 14 to match actual dimension
+    lr_backbone = args.get('lr_backbone', 1e-6)
     # Use backbone from args if provided, otherwise default to resnet18
     backbone = args.get('backbone', 'resnet18')
     if policy_class == 'ACT':
@@ -426,7 +426,8 @@ if __name__ == '__main__':
     parser.add_argument('--num_epochs', action='store', type=int, help='num_epochs', required=True)
     parser.add_argument('--lr', action='store', type=float, help='lr', required=True)
     parser.add_argument('--backbone', action='store', type=str, help='Backbone model (resnet18, resnet34, resnet50, dino_vits16, dino_vitb16)', default='resnet18')
-
+    parser.add_argument('--lr_backbone', action='store', type=float, help='lr_backbone', required=False)
+    
     # for ACT
     parser.add_argument('--kl_weight', action='store', type=int, help='KL Weight', required=False)
     parser.add_argument('--chunk_size', action='store', type=int, help='chunk_size', required=False)
