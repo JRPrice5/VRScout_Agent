@@ -188,8 +188,19 @@ class DINOBackbone(nn.Module):
         # Remove CLS token
         x = x[:, 1:, :]
         
-        # Calculate H and W based on the number of patches
-        H = W = int(N ** 0.5)
+        # For ViT with patch_size=16, calculate the feature map dimensions
+        # The number of patches should equal (H/patch_size) * (W/patch_size)
+        # Get original image dimensions from the input tensor
+        _, _, orig_H, orig_W = tensor.shape
+        
+        # Calculate feature map dimensions
+        H = orig_H // self.patch_size
+        W = orig_W // self.patch_size
+        
+        # Calculate the actual number of patches
+        num_patches = (H * W)
+        
+        # Reshape to [B, D, H, W] format for compatibility with DETR
         x = x.permute(0, 2, 1).reshape(B, D, H, W)
         
         # Create output dictionary
@@ -201,10 +212,17 @@ class DINOBackbone(nn.Module):
                 # Remove CLS token
                 feat = feat[:, 1:, :]
                 B, N, D = feat.shape
-                # Calculate H and W based on the number of patches
-                # Make sure it's a perfect square
-                H = W = int(N ** 0.5)
-                # Reshape to [B, D, H, W] format
+                
+                # Calculate feature map dimensions based on original image size
+                _, _, orig_H, orig_W = tensor.shape
+                # Calculate feature map dimensions
+                H = orig_H // self.patch_size
+                W = orig_W // self.patch_size
+                
+                # Verify that H*W equals the number of patches
+                assert H * W == num_patches, f"Calculated dimensions {H}x{W} don't match number of patches {num_patches}"
+                
+                # Reshape to [B, D, H, W] format for compatibility with DETR
                 reshaped_feat = feat.permute(0, 2, 1).reshape(B, D, H, W)
                 
                 # Create NestedTensor if mask is provided
@@ -218,6 +236,7 @@ class DINOBackbone(nn.Module):
         # Add final layer features
         if mask is not None:
             # Downsample mask to match feature map size
+            # Use the calculated H and W from original image dimensions
             final_mask = F.interpolate(mask[None].float(), size=(H, W)).to(torch.bool)[0]
             out["0" if not self.return_interm_layers else str(len(self.intermediate_features))] = NestedTensor(x, final_mask)
         else:
