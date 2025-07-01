@@ -23,9 +23,9 @@ def get_args_parser():
     # Model parameters
     # * Backbone
     parser.add_argument('--backbone', default='resnet18', type=str, # will be overridden
-                        help="Name of the convolutional backbone to use")
+                        help="Name of the convolutional backbone to use (resnet18, resnet34, resnet50, dino_vits16, dino_vitb16)")
     parser.add_argument('--dilation', action='store_true',
-                        help="If true, we replace stride with dilation in the last convolutional block (DC5)")
+                        help="If true, we replace stride with dilation in the last convolutional block (DC5) - only applies to ResNet")
     parser.add_argument('--position_embedding', default='sine', type=str, choices=('sine', 'learned'),
                         help="Type of positional embedding to use on top of the image features")
     parser.add_argument('--camera_names', default=[], type=list, # will be overridden
