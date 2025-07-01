@@ -246,7 +246,7 @@ class DINOBackbone(nn.Module):
 
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
-    train_backbone = args.lr_backbone > 0
+    train_backbone = args.lr_backbone > 0 if args.lr_backbone is not None else False
     return_interm_layers = args.masks
     
     if args.backbone.startswith('dino'):
