@@ -66,6 +66,8 @@ def get_args_parser():
 
     # custom args
     parser.add_argument('--query_frequency', type=int, default=1, help='How often to query the policy (in timesteps)', required=False)
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='Server host address', required=False)
+    parser.add_argument('--port', type=int, default=5556, help='Server port', required=False)
 
     return parser
 
