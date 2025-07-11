@@ -1038,22 +1038,22 @@ public class ACTPolicyClient : MonoBehaviour
             
             // Update trigger active states based on slopes
             // Activate when slope is positive (increasing), deactivate when slope is negative (decreasing)
-            // Also ensure a minimum pressure threshold of 0.1 is met
-            if (leftHandTriggerSlope > 0.01f && this.leftHandTrigger >= 0.1f) // Small threshold to avoid noise
+            // Also ensure a minimum pressure threshold of 0.2 is met
+            if (leftHandTriggerSlope > 0.01f && this.leftHandTrigger >= 0.2f) // Small threshold to avoid noise
             {
                 leftHandTriggerActive = true;
             }
-            else if (leftHandTriggerSlope < -0.01f || this.leftHandTrigger < 0.1f)
+            else if (leftHandTriggerSlope < -0.01f || this.leftHandTrigger < 0.2f)
             {
                 leftHandTriggerActive = false;
             }
             // else maintain previous state when slope is near zero and above minimum threshold
             
-            if (rightHandTriggerSlope > 0.01f && this.rightHandTrigger >= 0.1f)
+            if (rightHandTriggerSlope > 0.01f && this.rightHandTrigger >= 0.2f)
             {
                 rightHandTriggerActive = true;
             }
-            else if (rightHandTriggerSlope < -0.01f || this.rightHandTrigger < 0.1f)
+            else if (rightHandTriggerSlope < -0.01f || this.rightHandTrigger < 0.2f)
             {
                 rightHandTriggerActive = false;
             }
