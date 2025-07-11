@@ -98,6 +98,14 @@ public class ACTPolicyClient : MonoBehaviour
     private float rightThumbstickX = 0f;
     private float rightThumbstickY = 0f;
     
+    // Track previous trigger values for slope calculation
+    private float prevLeftHandTrigger = 0f;
+    private float prevRightHandTrigger = 0f;
+    
+    // Track active state of triggers based on slope
+    private bool leftHandTriggerActive = false;
+    private bool rightHandTriggerActive = false;
+    
     // Public properties to access thumbstick values
     public float LeftThumbstickX => leftThumbstickX;
     public float LeftThumbstickY => leftThumbstickY;
@@ -1024,9 +1032,40 @@ public class ACTPolicyClient : MonoBehaviour
                 }
             }
             
-            // Simulate key presses based on trigger values
-            keySimulator.SetKeyState(Key.Y, this.leftHandTrigger > 0.2f);  // Left grab
-            keySimulator.SetKeyState(Key.B, this.rightHandTrigger > 0.2f);  // Right grab
+            // Calculate slopes for trigger values
+            float leftHandTriggerSlope = this.leftHandTrigger - this.prevLeftHandTrigger;
+            float rightHandTriggerSlope = this.rightHandTrigger - this.prevRightHandTrigger;
+            
+            // Update trigger active states based on slopes
+            // Activate when slope is positive (increasing), deactivate when slope is negative (decreasing)
+            // Also ensure a minimum pressure threshold of 0.1 is met
+            if (leftHandTriggerSlope > 0.01f && this.leftHandTrigger >= 0.1f) // Small threshold to avoid noise
+            {
+                leftHandTriggerActive = true;
+            }
+            else if (leftHandTriggerSlope < -0.01f || this.leftHandTrigger < 0.1f)
+            {
+                leftHandTriggerActive = false;
+            }
+            // else maintain previous state when slope is near zero and above minimum threshold
+            
+            if (rightHandTriggerSlope > 0.01f && this.rightHandTrigger >= 0.1f)
+            {
+                rightHandTriggerActive = true;
+            }
+            else if (rightHandTriggerSlope < -0.01f || this.rightHandTrigger < 0.1f)
+            {
+                rightHandTriggerActive = false;
+            }
+            // else maintain previous state when slope is near zero and above minimum threshold
+            
+            // Simulate key presses based on trigger active states
+            keySimulator.SetKeyState(Key.Y, leftHandTriggerActive);  // Left grab
+            keySimulator.SetKeyState(Key.B, rightHandTriggerActive);  // Right grab
+            
+            // Store current values as previous for next frame
+            this.prevLeftHandTrigger = this.leftHandTrigger;
+            this.prevRightHandTrigger = this.rightHandTrigger;
 
             if (this.leftHandTrigger > 0.1f || this.rightHandTrigger > 0.1f)
             {
