@@ -42,6 +42,12 @@ SIM_TASK_CONFIGS = {
         'episode_len': 565,
         'camera_names': ['camera1']
     },
+    'sim_vr_task_3': {
+        'dataset_dir': r'E:\vr-data\q3_data_3\HDF5',
+        'num_episodes': 11,
+        'episode_len': 9266,
+        'camera_names': ['camera1']
+    },
 }
 
 ### Simulation envs fixed constants

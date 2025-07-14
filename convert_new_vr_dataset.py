@@ -147,7 +147,7 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
     # Determine episode splits before loading full data
     if episode_length is None:
         # Treat entire dataset as one episode
-        episode_indices = [(0, row_count-1)]  # -1 to exclude header
+        episode_indices = [(1, row_count-1)]  # 1 to skip header
     else:
         # Split into episodes of specified length
         episode_indices = [(i, min(i + episode_length, row_count-1)) 
@@ -225,9 +225,6 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
         col_indices = {col: header_fields.index(col) for col in required_cols if col in header_fields}
         
         with open(csv_file, encoding='utf-8') as f:
-            # Skip the header row first
-            next(f)
-            
             # Skip to the start of this episode
             for _ in range(start_idx):
                 next(f)
