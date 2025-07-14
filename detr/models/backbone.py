@@ -107,6 +107,22 @@ class Joiner(nn.Sequential):
         for name, x in xs.items():
             out.append(x)
             # position encoding
+            pos.append(self[1](x).to(x.dtype))
+
+        return out, pos
+
+
+class DINOJoiner(nn.Sequential):
+    def __init__(self, backbone, position_embedding):
+        super().__init__(backbone, position_embedding)
+
+    def forward(self, tensor_list: NestedTensor):
+        xs = self[0](tensor_list)
+        out: List[NestedTensor] = []
+        pos = []
+        for name, x in xs.items():
+            out.append(x)
+            # position encoding
             if isinstance(x, NestedTensor):
                 # Extract tensors for position encoding
                 pos.append(self[1](x.tensors).to(x.tensors.dtype))
@@ -251,9 +267,10 @@ def build_backbone(args):
     
     if args.backbone.startswith('dino'):
         backbone = DINOBackbone(args.backbone, train_backbone, return_interm_layers)
+        model = DINOJoiner(backbone, position_embedding)
     else:
         backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
-        
-    model = Joiner(backbone, position_embedding)
+        model = Joiner(backbone, position_embedding)
+    
     model.num_channels = backbone.num_channels
     return model
