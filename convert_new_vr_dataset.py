@@ -28,6 +28,7 @@ from PIL import Image
 from tqdm import tqdm
 from pyquaternion import Quaternion
 from datetime import datetime
+import matplotlib.pyplot as plt
 import re
 
 
@@ -311,11 +312,25 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                 if image_timestamps:
                     closest_image_path = find_closest_image(float(row['timestamp']), image_timestamps)
                     if closest_image_path and os.path.exists(closest_image_path):
-                        # Load image, resize if needed, and convert to array more efficiently
+                        # Load image and convert to array more efficiently
                         with Image.open(closest_image_path) as img:
-                            # Convert directly to numpy array with correct dtype
+                            # Fix inverted image by flipping vertically only (horizontal flip was not needed)
+                            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                            
+                            # Convert to numpy array with correct dtype
                             img_array = np.array(img, dtype=np.uint8)
                             image_data.append(img_array)
+                            
+                            # Debug: Plot the first converted image
+                            if len(image_data) == 1:
+                                plt.figure(figsize=(10, 8))
+                                plt.imshow(img_array)
+                                plt.title(f"First converted image (corrected): {os.path.basename(closest_image_path)}")
+                                plt.axis('on')
+                                debug_output_path = os.path.join(os.path.dirname(output_file), 'debug_first_image.png')
+                                plt.savefig(debug_output_path)
+                                plt.close()
+                                print(f"Debug image saved to: {debug_output_path}")
                     else:
                         # Create a blank image if no match found
                         if image_data:
