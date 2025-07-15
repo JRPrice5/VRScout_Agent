@@ -414,6 +414,9 @@ class UnityVRInterface:
         Returns:
             Processed image tensor ready for the policy
         """
+        # Check if we're receiving raw texture data or encoded images
+        is_raw_format = 'imageFormat' in state_data and state_data['imageFormat'] == 'raw'
+        
         # Check if we have multiple cameras or just one
         if 'images' in state_data:
             images_dict = state_data['images']
@@ -423,8 +426,20 @@ class UnityVRInterface:
                 if cam_name in images_dict:
                     # Decode base64 image
                     img_data = base64.b64decode(images_dict[cam_name])
-                    img = Image.open(io.BytesIO(img_data)).convert('RGB')
-                    img_array = np.array(img)
+                    
+                    if is_raw_format:
+                        # Process raw texture data
+                        width = state_data.get('imageWidth', 224)
+                        height = state_data.get('imageHeight', 224)
+                        
+                        # Reshape the raw bytes into a numpy array (RGB24 format - 3 bytes per pixel)
+                        img_array = np.frombuffer(img_data, dtype=np.uint8).reshape(height, width, 3)
+                        print(f"Received raw texture data: {width}x{height} pixels")
+                    else:
+                        # Process encoded image (PNG/JPG)
+                        img = Image.open(io.BytesIO(img_data)).convert('RGB')
+                        img_array = np.array(img)
+                    
                     all_cam_images.append(img_array)
                 else:
                     print(f"Warning: Camera {cam_name} not found in Unity data")
@@ -434,8 +449,20 @@ class UnityVRInterface:
         else:
             # Single camera case
             img_data = base64.b64decode(state_data['image'])
-            img = Image.open(io.BytesIO(img_data)).convert('RGB')
-            img_array = np.array(img)
+            
+            if is_raw_format:
+                # Process raw texture data
+                width = state_data.get('imageWidth', 224)
+                height = state_data.get('imageHeight', 224)
+                
+                # Reshape the raw bytes into a numpy array (RGB24 format - 3 bytes per pixel)
+                img_array = np.frombuffer(img_data, dtype=np.uint8).reshape(height, width, 3)
+                print(f"Received raw texture data: {width}x{height} pixels")
+            else:
+                # Process encoded image (PNG/JPG)
+                img = Image.open(io.BytesIO(img_data)).convert('RGB')
+                img_array = np.array(img)
+                
             all_cam_images = [img_array]
         
         # Stack images and convert to tensor
