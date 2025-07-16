@@ -437,14 +437,10 @@ class UnityVRInterface:
                         # Process raw texture data
                         # Reshape the raw bytes into a numpy array (RGB24 format - 3 bytes per pixel)
                         img_array = np.frombuffer(img_data, dtype=np.uint8).reshape(height, width, 3)
-                        if self.verbose:
-                            print(f"Received raw texture data: {width}x{height} pixels")
                     else:
                         # Process encoded image (JPG/PNG)
                         img = Image.open(io.BytesIO(img_data)).convert('RGB')
                         img_array = np.array(img)
-                        if self.verbose:
-                            print(f"Received {image_format} image: {img.width}x{img.height} pixels")
                     
                     all_cam_images.append(img_array)
                 else:
@@ -460,14 +456,10 @@ class UnityVRInterface:
                 # Process raw texture data
                 # Reshape the raw bytes into a numpy array (RGB24 format - 3 bytes per pixel)
                 img_array = np.frombuffer(img_data, dtype=np.uint8).reshape(height, width, 3)
-                if self.verbose:
-                    print(f"Received raw texture data: {width}x{height} pixels")
             else:
                 # Process encoded image (JPG/PNG)
                 img = Image.open(io.BytesIO(img_data)).convert('RGB')
                 img_array = np.array(img)
-                if self.verbose:
-                    print(f"Received {image_format} image: {img.width}x{img.height} pixels")
                 
             all_cam_images = [img_array]
         
