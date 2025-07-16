@@ -414,8 +414,14 @@ class UnityVRInterface:
         Returns:
             Processed image tensor ready for the policy
         """
-        # Check if we're receiving raw texture data or encoded images
-        is_raw_format = 'imageFormat' in state_data and state_data['imageFormat'] == 'raw'
+        # Check the image format (raw, jpg, png, etc.)
+        image_format = state_data.get('imageFormat', 'raw')
+        is_raw_format = image_format == 'raw'
+        is_jpg_format = image_format == 'jpg'
+        
+        # Get image dimensions from state data
+        width = state_data.get('imageWidth', 224)
+        height = state_data.get('imageHeight', 224)
         
         # Check if we have multiple cameras or just one
         if 'images' in state_data:
@@ -429,22 +435,22 @@ class UnityVRInterface:
                     
                     if is_raw_format:
                         # Process raw texture data
-                        width = state_data.get('imageWidth', 224)
-                        height = state_data.get('imageHeight', 224)
-                        
                         # Reshape the raw bytes into a numpy array (RGB24 format - 3 bytes per pixel)
                         img_array = np.frombuffer(img_data, dtype=np.uint8).reshape(height, width, 3)
-                        print(f"Received raw texture data: {width}x{height} pixels")
+                        if self.verbose:
+                            print(f"Received raw texture data: {width}x{height} pixels")
                     else:
-                        # Process encoded image (PNG/JPG)
+                        # Process encoded image (JPG/PNG)
                         img = Image.open(io.BytesIO(img_data)).convert('RGB')
                         img_array = np.array(img)
+                        if self.verbose:
+                            print(f"Received {image_format} image: {img.width}x{img.height} pixels")
                     
                     all_cam_images.append(img_array)
                 else:
                     print(f"Warning: Camera {cam_name} not found in Unity data")
                     # Create a blank image
-                    blank_img = np.zeros((224, 224, 3), dtype=np.uint8)
+                    blank_img = np.zeros((height, width, 3), dtype=np.uint8)
                     all_cam_images.append(blank_img)
         else:
             # Single camera case
@@ -452,16 +458,16 @@ class UnityVRInterface:
             
             if is_raw_format:
                 # Process raw texture data
-                width = state_data.get('imageWidth', 224)
-                height = state_data.get('imageHeight', 224)
-                
                 # Reshape the raw bytes into a numpy array (RGB24 format - 3 bytes per pixel)
                 img_array = np.frombuffer(img_data, dtype=np.uint8).reshape(height, width, 3)
-                print(f"Received raw texture data: {width}x{height} pixels")
+                if self.verbose:
+                    print(f"Received raw texture data: {width}x{height} pixels")
             else:
-                # Process encoded image (PNG/JPG)
+                # Process encoded image (JPG/PNG)
                 img = Image.open(io.BytesIO(img_data)).convert('RGB')
                 img_array = np.array(img)
+                if self.verbose:
+                    print(f"Received {image_format} image: {img.width}x{img.height} pixels")
                 
             all_cam_images = [img_array]
         
