@@ -116,7 +116,7 @@ def find_closest_image(timestamp, image_timestamps):
     return image_timestamps[closest_ts]
 
 
-def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0):
+def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False):
     """
     Convert VR dataset to HDF5 format for ACT training.
     
@@ -311,8 +311,8 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     if closest_image_path and os.path.exists(closest_image_path):
                         # Load image and convert to array more efficiently
                         with Image.open(closest_image_path) as img:
-                            # Fix inverted image by flipping vertically only (horizontal flip was not needed)
-                            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                            if flip_vertical:
+                                img = img.transpose(Image.FLIP_TOP_BOTTOM)
                             
                             # Convert to numpy array with correct dtype
                             img_array = np.array(img, dtype=np.uint8)
