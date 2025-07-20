@@ -123,8 +123,11 @@ class UnityVRInterface:
         # Initialize temporal aggregation variables if needed
         if self.temporal_agg:
             self.state_dim = len(self.stats['qpos_mean'])
-            self.all_time_actions = None
-            self.max_timesteps = 1000  # Can be adjusted based on expected episode length
+            self.window_size = 100  # Size of the sliding window for temporal aggregation
+            self.action_buffer = None  # Will be initialized with proper dimensions in _handle_client
+            self.timestep_buffer = None  # To track which timesteps are stored in the buffer
+            self.buffer_index = 0  # Current position in the circular buffer
+            self.last_unique_timestep = -1  # Track the last unique timestep to handle repeats
 
         
         # Initialize socket
@@ -265,7 +268,11 @@ class UnityVRInterface:
             # Reset timestep counter when a new client connects
             self.timestep = 0
             if self.temporal_agg:
-                self.all_time_actions = torch.zeros([self.max_timesteps, self.max_timesteps + self.chunk_size, self.state_dim]).cuda()
+                # Initialize action buffer with sliding window approach
+                # [window_size, state_dim] - each entry stores one action prediction
+                self.action_buffer = torch.zeros([self.window_size, self.state_dim]).cuda()
+                # Track which timestep each buffer entry corresponds to
+                self.timestep_buffer = torch.full([self.window_size], -1, dtype=torch.long).cuda()
             
             buffer_size = 4096
             data_buffer = b""
@@ -376,17 +383,43 @@ class UnityVRInterface:
                         all_actions = self.last_actions
                 
                 if self.temporal_agg:
-                    self.all_time_actions[[self.timestep], self.timestep:self.timestep+self.chunk_size] = all_actions
-                    actions_for_curr_step = self.all_time_actions[:, self.timestep]
-                    actions_populated = torch.all(actions_for_curr_step != 0, axis=1)
-                    actions_for_curr_step = actions_for_curr_step[actions_populated]
+                    # Check if this is a new timestep or a repeated one
+                    is_new_timestep = self.timestep > self.last_unique_timestep
+                    if is_new_timestep:
+                        self.last_unique_timestep = self.timestep
                     
-                    # Apply exponential weighting
-                    k = 0.01
-                    exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
-                    exp_weights = exp_weights / exp_weights.sum()
-                    exp_weights = torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
-                    raw_action = (actions_for_curr_step * exp_weights).sum(dim=0, keepdim=True)
+                    # Get the action for the current timestep
+                    current_action = all_actions[:, time_index].squeeze(0)
+                    
+                    # Store the action in the circular buffer
+                    self.action_buffer[self.buffer_index] = current_action
+                    self.timestep_buffer[self.buffer_index] = self.timestep
+                    
+                    # Update buffer index for circular buffer behavior
+                    self.buffer_index = (self.buffer_index + 1) % self.window_size
+                    
+                    # Find all valid entries in the buffer (timestep >= 0)
+                    valid_indices = (self.timestep_buffer >= 0)
+                    valid_actions = self.action_buffer[valid_indices]
+                    valid_timesteps = self.timestep_buffer[valid_indices]
+                    
+                    if len(valid_actions) > 0:
+                        # Sort by timestep (most recent first)
+                        sorted_indices = torch.argsort(valid_timesteps, descending=True)
+                        sorted_actions = valid_actions[sorted_indices]
+                        
+                        # Apply stronger exponential weighting to focus more on recent actions
+                        k = 0.05  # Increased from 0.01 to focus more on recent actions
+                        weights = torch.exp(-k * torch.arange(len(sorted_actions), device=sorted_actions.device))
+                        weights = weights / weights.sum()
+                        
+                        # Apply weighted average
+                        raw_action = torch.zeros_like(current_action).unsqueeze(0)
+                        for i, (action, weight) in enumerate(zip(sorted_actions, weights)):
+                            raw_action += action * weight[None]
+                    else:
+                        # If no valid actions yet, just use the current action
+                        raw_action = current_action.unsqueeze(0)
                 else:
                     raw_action = all_actions[:, time_index]
             elif self.policy_class == 'CNNMLP':
