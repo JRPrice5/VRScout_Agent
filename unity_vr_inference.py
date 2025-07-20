@@ -123,12 +123,13 @@ class UnityVRInterface:
         # Initialize temporal aggregation variables if needed
         if self.temporal_agg:
             self.state_dim = len(self.stats['qpos_mean'])
-            self.window_size = 100  # Size of the sliding window for temporal aggregation
-            self.action_buffer = None  # Will be initialized with proper dimensions in _handle_client
-            self.timestep_buffer = None  # To track which timesteps are stored in the buffer
+            self.window_size = 30  # Number of past predictions to store
+            self.prediction_buffer = None  # Will store predictions from past policy calls
+            self.prediction_timesteps = None  # Will store the timestep when each prediction was made
             self.buffer_index = 0  # Current position in the circular buffer
             self.last_unique_timestep = -1  # Track the last unique timestep to handle repeats
-
+            self.decay_factor = 0.5  # Decay factor for exponential weighting (higher = more focus on recent)
+            self.current_weight = 0.7  # Weight given to the current prediction (0-1)
         
         # Initialize socket
         self.socket = None
@@ -268,11 +269,11 @@ class UnityVRInterface:
             # Reset timestep counter when a new client connects
             self.timestep = 0
             if self.temporal_agg:
-                # Initialize action buffer with sliding window approach
-                # [window_size, state_dim] - each entry stores one action prediction
-                self.action_buffer = torch.zeros([self.window_size, self.state_dim]).cuda()
-                # Track which timestep each buffer entry corresponds to
-                self.timestep_buffer = torch.full([self.window_size], -1, dtype=torch.long).cuda()
+                # Initialize prediction buffer with sliding window approach
+                # [window_size, chunk_size, state_dim] - each entry stores chunk_size predictions
+                self.prediction_buffer = torch.zeros([self.window_size, self.chunk_size, self.state_dim]).cuda()
+                # Track which timestep each buffer entry was made at
+                self.prediction_timesteps = torch.full([self.window_size], -1, dtype=torch.long).cuda()
             
             buffer_size = 4096
             data_buffer = b""
@@ -388,37 +389,71 @@ class UnityVRInterface:
                     if is_new_timestep:
                         self.last_unique_timestep = self.timestep
                     
-                    # Get the action for the current timestep
-                    current_action = all_actions[:, time_index].squeeze(0)
-                    
-                    # Store the action in the circular buffer
-                    self.action_buffer[self.buffer_index] = current_action
-                    self.timestep_buffer[self.buffer_index] = self.timestep
+                    # Store the full chunk of predictions in the circular buffer
+                    self.prediction_buffer[self.buffer_index] = all_actions.squeeze(0)  # Remove batch dimension
+                    self.prediction_timesteps[self.buffer_index] = self.timestep
                     
                     # Update buffer index for circular buffer behavior
                     self.buffer_index = (self.buffer_index + 1) % self.window_size
                     
                     # Find all valid entries in the buffer (timestep >= 0)
-                    valid_indices = (self.timestep_buffer >= 0)
-                    valid_actions = self.action_buffer[valid_indices]
-                    valid_timesteps = self.timestep_buffer[valid_indices]
+                    valid_indices = (self.prediction_timesteps >= 0)
                     
-                    if len(valid_actions) > 0:
-                        # Sort by timestep (most recent first)
-                        sorted_indices = torch.argsort(valid_timesteps, descending=True)
-                        sorted_actions = valid_actions[sorted_indices]
-                        
-                        # Apply stronger exponential weighting to focus more on recent actions
-                        k = 0.05  # Increased from 0.01 to focus more on recent actions
-                        weights = torch.exp(-k * torch.arange(len(sorted_actions), device=sorted_actions.device))
-                        weights = weights / weights.sum()
-                        
-                        # Apply weighted average
-                        raw_action = torch.zeros_like(current_action).unsqueeze(0)
-                        for i, (action, weight) in enumerate(zip(sorted_actions, weights)):
-                            raw_action += action * weight[None]
+                    # Get the current action from the most recent prediction
+                    current_prediction_idx = (self.buffer_index - 1) % self.window_size
+                    if self.prediction_timesteps[current_prediction_idx] >= 0:
+                        current_action = self.prediction_buffer[current_prediction_idx, time_index]
                     else:
-                        # If no valid actions yet, just use the current action
+                        # Fallback if buffer is not yet populated
+                        current_action = all_actions[:, time_index].squeeze(0)
+                    
+                    # For each valid past prediction, extract the action predicted for the current timestep
+                    if torch.any(valid_indices):
+                        valid_timesteps = self.prediction_timesteps[valid_indices]
+                        valid_predictions = self.prediction_buffer[valid_indices]
+                        
+                        # Calculate relative position in each prediction's chunk
+                        # This finds where in each past prediction's chunk our current timestep would be
+                        relative_positions = self.timestep - valid_timesteps
+                        
+                        # Filter to only include predictions that have a valid prediction for current timestep
+                        valid_for_current = (relative_positions >= 0) & (relative_positions < self.chunk_size)
+                        
+                        if torch.any(valid_for_current):
+                            # Get predictions that include the current timestep
+                            usable_timesteps = valid_timesteps[valid_for_current]
+                            usable_predictions = valid_predictions[valid_for_current]
+                            usable_positions = relative_positions[valid_for_current]
+                            
+                            # Sort by recency (most recent first)
+                            sorted_indices = torch.argsort(usable_timesteps, descending=True)
+                            sorted_timesteps = usable_timesteps[sorted_indices]
+                            sorted_predictions = usable_predictions[sorted_indices]
+                            sorted_positions = usable_positions[sorted_indices]
+                            
+                            # Extract the specific action for current timestep from each past prediction
+                            actions_for_current = torch.stack([
+                                pred[pos] for pred, pos in zip(sorted_predictions, sorted_positions)
+                            ])
+                            
+                            # Apply exponential weighting based on how old the prediction is
+                            time_deltas = self.timestep - sorted_timesteps
+                            weights = torch.exp(-self.decay_factor * time_deltas.float())
+                            weights = weights / weights.sum()
+                            
+                            # Compute weighted average of past predictions
+                            history_action = torch.zeros_like(current_action)
+                            for action, weight in zip(actions_for_current, weights):
+                                history_action += action * weight
+                            
+                            # Blend current action with history using the current_weight parameter
+                            raw_action = (self.current_weight * current_action + 
+                                         (1 - self.current_weight) * history_action).unsqueeze(0)
+                        else:
+                            # No valid predictions for current timestep
+                            raw_action = current_action.unsqueeze(0)
+                    else:
+                        # No valid predictions yet
                         raw_action = current_action.unsqueeze(0)
                 else:
                     raw_action = all_actions[:, time_index]
