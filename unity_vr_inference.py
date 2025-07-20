@@ -123,13 +123,13 @@ class UnityVRInterface:
         # Initialize temporal aggregation variables if needed
         if self.temporal_agg:
             self.state_dim = len(self.stats['qpos_mean'])
-            self.window_size = 10  # Number of past predictions to store
+            self.window_size = 16  # Number of past predictions to store
             self.prediction_buffer = None  # Will store predictions from past policy calls
             self.prediction_timesteps = None  # Will store the timestep when each prediction was made
             self.buffer_index = 0  # Current position in the circular buffer
             self.last_unique_timestep = -1  # Track the last unique timestep to handle repeats
-            self.decay_factor = 0.7  # Decay factor for exponential weighting (higher = more focus on recent)
-            self.current_weight = 0.8  # Weight given to the current prediction (0-1)
+            self.decay_factor = 0.01  # Decay factor for exponential weighting (higher = more focus on recent)
+            self.current_weight = 0.0  # Weight given to the current prediction (0-1)
         
         # Initialize socket
         self.socket = None
