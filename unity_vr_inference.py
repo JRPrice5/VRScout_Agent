@@ -128,8 +128,8 @@ class UnityVRInterface:
             self.prediction_timesteps = None  # Will store the timestep when each prediction was made
             self.buffer_index = 0  # Current position in the circular buffer
             self.last_unique_timestep = -1  # Track the last unique timestep to handle repeats
-            self.decay_factor = 0.5  # Decay factor for exponential weighting (higher = more focus on recent)
-            self.current_weight = 0.7  # Weight given to the current prediction (0-1)
+            self.decay_factor = 0.8  # Decay factor for exponential weighting (higher = more focus on recent)
+            self.current_weight = 0.9  # Weight given to the current prediction (0-1)
         
         # Initialize socket
         self.socket = None
