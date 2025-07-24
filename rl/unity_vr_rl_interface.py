@@ -317,8 +317,8 @@ class UnityVRRLInterface(UnityVRInterface):
                         
                     self.episode_log_probs.append(log_prob)
                     
-                    # Store action for episode
-                    self.episode_actions.append(raw_action)
+                    # Store action for episode - convert to CPU tensor for storage
+                    self.episode_actions.append(raw_action.detach().cpu())
                     
                 except Exception as e:
                     print(f"[RL ERROR] Error in PPO policy evaluation: {e}")
@@ -329,8 +329,11 @@ class UnityVRRLInterface(UnityVRInterface):
                 # For CNNMLP, use parent implementation
                 return super()._process_state_and_get_action(state_data)
             
+            # Convert tensor to numpy for post-processing
+            raw_action_np = raw_action.detach().cpu().numpy()
+            
             # Post-process action
-            action = self.post_process(raw_action)
+            action = self.post_process(raw_action_np)
             
             # Convert to list for JSON serialization
             action_list = action.tolist()
