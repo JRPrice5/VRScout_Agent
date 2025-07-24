@@ -424,14 +424,16 @@ class UnityVRRLInterface(UnityVRInterface):
         """
         Override parent method to handle RL-specific messages.
         """
-        print("Waiting for Unity VR client connection...")
+        # Use the client socket that was already accepted by the parent class
+        client_socket = self.client_socket
         
         try:
-            client_socket, address = self.socket.accept()
-            print(f"Connected to Unity VR client: {address}")
+            # Reset timestep counter when a new client connects
+            self.timestep = 0
             
             # Set timeout on client socket for clean shutdown
             client_socket.settimeout(0.5)
+            print("Client connected and ready for RL communication")
             
             # Initialize data buffer for message handling (like parent class)
             buffer_size = 4096
@@ -444,6 +446,8 @@ class UnityVRRLInterface(UnityVRInterface):
                         chunk = client_socket.recv(buffer_size)
                         if not chunk:
                             print("Unity client disconnected")
+                            # Clear memory after client disconnect
+                            self.memory.clear()
                             break
                         
                         data_buffer += chunk
@@ -575,14 +579,9 @@ class UnityVRRLInterface(UnityVRInterface):
                 except:
                     pass  # Socket might already be closed
                 client_socket.close()
-                
-        except socket.timeout:
-            # This is expected when no client connects within the timeout period
-            # The server loop in start_server will handle this and continue waiting
-            pass
+        
         except Exception as e:
-            print(f"Error accepting client connection: {e}")
-            raise
+            print(f"Error handling client: {e}")
 
 
 def main():
