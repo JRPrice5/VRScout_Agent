@@ -425,7 +425,7 @@ class UnityVRRLInterface(UnityVRInterface):
         Override parent method to handle RL-specific messages.
         """
         print("Waiting for Unity VR client connection...")
-        client_socket, address = self.server_socket.accept()
+        client_socket, address = self.socket.accept()
         print(f"Connected to Unity VR client: {address}")
         
         try:
