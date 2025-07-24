@@ -97,6 +97,22 @@ class UnityVRRLInterface(UnityVRInterface):
         self.episode_timesteps = []
         self.episode_start_time = None
         
+        # Initialize additional attributes needed for query frequency and temporal aggregation
+        # These are needed even if temporal_agg is False, to maintain compatibility with parent class logic
+        self.last_actions = None
+        self.last_value = None
+        
+        # Initialize temporal aggregation variables if needed (same as parent class)
+        if self.temporal_agg:
+            self.state_dim = len(self.stats['qpos_mean'])
+            self.window_size = 16  # Number of past predictions to store
+            self.prediction_buffer = None  # Will store predictions from past policy calls
+            self.prediction_timesteps = None  # Will store the timestep when each prediction was made
+            self.buffer_index = 0  # Current position in the circular buffer
+            self.last_unique_timestep = -1  # Track the last unique timestep to handle repeats
+            self.decay_factor = 0.01  # Decay factor for exponential weighting (higher = more focus on recent)
+            self.current_weight = 0.0  # Weight given to the current prediction (0-1)
+        
         # Replace the policy with PPO policy for training
         if self.is_training:
             self.policy = self.ppo_policy
@@ -264,15 +280,105 @@ class UnityVRRLInterface(UnityVRInterface):
             # Get action and value from PPO policy
             if self.policy_class == 'ACT':
                 try:
-                    # Get action from policy
-                    action_tensor, value = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                    print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
-                    print(f"[RL DEBUG] Value: {value}")
+                    # Only query the policy when needed based on query_frequency (same as parent class)
+                    time_index = self.timestep % self.query_frequency
+                    if time_index == 0:
+                        # Get action from policy
+                        action_tensor, value = self.ppo_policy.evaluate_actions(qpos, curr_image)
+                        print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
+                        print(f"[RL DEBUG] Value: {value}")
+                        
+                        all_actions = action_tensor  # Shape: [batch, num_queries, action_dim]
+                        self.last_actions = all_actions  # Store for future timesteps
+                        self.last_value = value  # Store value for reuse
+                    else:
+                        # Use previously computed actions if not querying on this timestep
+                        if self.last_actions is None:
+                            # First timestep or in case there's no previous action
+                            action_tensor, value = self.ppo_policy.evaluate_actions(qpos, curr_image)
+                            all_actions = action_tensor
+                            self.last_actions = all_actions
+                            self.last_value = value
+                            time_index = 0
+                        else:
+                            all_actions = self.last_actions
+                            value = self.last_value
                     
-                    # Handle like parent class
-                    all_actions = action_tensor  # Shape: [batch, num_queries, action_dim]
-                    time_index = 0  # Always use first timestep when no temporal agg
-                    raw_action = all_actions[:, time_index]  # Shape: [batch, action_dim]
+                    # Apply temporal aggregation if enabled (same logic as parent class)
+                    if self.temporal_agg:
+                        # Check if this is a new timestep or a repeated one
+                        is_new_timestep = self.timestep > self.last_unique_timestep
+                        if is_new_timestep:
+                            self.last_unique_timestep = self.timestep
+                        
+                        # Store the full chunk of predictions in the circular buffer
+                        self.prediction_buffer[self.buffer_index] = all_actions.squeeze(0)  # Remove batch dimension
+                        self.prediction_timesteps[self.buffer_index] = self.timestep
+                        
+                        # Update buffer index for circular buffer behavior
+                        self.buffer_index = (self.buffer_index + 1) % self.window_size
+                        
+                        # Find all valid entries in the buffer (timestep >= 0)
+                        valid_indices = (self.prediction_timesteps >= 0)
+                        
+                        # Get the current action from the most recent prediction
+                        current_prediction_idx = (self.buffer_index - 1) % self.window_size
+                        if self.prediction_timesteps[current_prediction_idx] >= 0:
+                            current_action = self.prediction_buffer[current_prediction_idx, time_index]
+                        else:
+                            # Fallback if buffer is not yet populated
+                            current_action = all_actions[:, time_index].squeeze(0)
+                        
+                        # For each valid past prediction, extract the action predicted for the current timestep
+                        if torch.any(valid_indices):
+                            valid_timesteps = self.prediction_timesteps[valid_indices]
+                            valid_predictions = self.prediction_buffer[valid_indices]
+                            
+                            # Calculate relative position in each prediction's chunk
+                            # This finds where in each past prediction's chunk our current timestep would be
+                            relative_positions = self.timestep - valid_timesteps
+                            
+                            # Filter to only include predictions that have a valid prediction for current timestep
+                            valid_for_current = (relative_positions >= 0) & (relative_positions < self.chunk_size)
+                            
+                            if torch.any(valid_for_current):
+                                # Get predictions that include the current timestep
+                                usable_timesteps = valid_timesteps[valid_for_current]
+                                usable_predictions = valid_predictions[valid_for_current]
+                                usable_positions = relative_positions[valid_for_current]
+                                
+                                # Sort by recency (most recent first)
+                                sorted_indices = torch.argsort(usable_timesteps, descending=True)
+                                sorted_timesteps = usable_timesteps[sorted_indices]
+                                sorted_predictions = usable_predictions[sorted_indices]
+                                sorted_positions = usable_positions[sorted_indices]
+                                
+                                # Extract the specific action for current timestep from each past prediction
+                                actions_for_current = torch.stack([
+                                    pred[pos] for pred, pos in zip(sorted_predictions, sorted_positions)
+                                ])
+                                
+                                # Apply exponential weighting based on how old the prediction is
+                                time_deltas = self.timestep - sorted_timesteps
+                                weights = torch.exp(-self.decay_factor * time_deltas.float())
+                                weights = weights / weights.sum()
+                                
+                                # Compute weighted average of past predictions
+                                history_action = torch.zeros_like(current_action)
+                                for action, weight in zip(actions_for_current, weights):
+                                    history_action += action * weight
+                                
+                                # Blend current action with history using the current_weight parameter
+                                raw_action = (self.current_weight * current_action + 
+                                             (1 - self.current_weight) * history_action).unsqueeze(0)
+                            else:
+                                # No valid predictions for current timestep
+                                raw_action = current_action.unsqueeze(0)
+                        else:
+                            # No valid predictions yet
+                            raw_action = current_action.unsqueeze(0)
+                    else:
+                        raw_action = all_actions[:, time_index]
                     
                     # Keep as tensor for log probability computation
                     raw_action = raw_action.squeeze(0)  # Shape: [action_dim]
@@ -510,6 +616,13 @@ class UnityVRRLInterface(UnityVRInterface):
         try:
             # Reset timestep counter when a new client connects
             self.timestep = 0
+
+            if self.temporal_agg:
+                # Initialize prediction buffer with sliding window approach
+                # [window_size, chunk_size, state_dim] - each entry stores chunk_size predictions
+                self.prediction_buffer = torch.zeros([self.window_size, self.chunk_size, self.state_dim]).cuda()
+                # Track which timestep each buffer entry was made at
+                self.prediction_timesteps = torch.full([self.window_size], -1, dtype=torch.long).cuda()
             
             # Set timeout on client socket for clean shutdown
             client_socket.settimeout(0.5)
