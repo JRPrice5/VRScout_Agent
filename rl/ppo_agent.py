@@ -182,10 +182,22 @@ class PPOACTPolicy(nn.Module):
             'dec_layers': pretrained_policy.model.transformer.decoder.num_layers,
             'nheads': pretrained_policy.model.transformer.nhead,
             'chunk_size': pretrained_policy.model.num_queries,
+            # CRITICAL FIX: Copy camera_names and other missing parameters
+            'camera_names': getattr(pretrained_policy.model, 'camera_names', ['camera1']),
+            'state_dim': getattr(pretrained_policy.model, 'state_dim', 32),
+            'latent_dim': getattr(pretrained_policy.model, 'latent_dim', 32),
+            # Add other required parameters with defaults
+            'dropout': 0.1,
+            'pre_norm': False,
+            'weight_decay': 1e-4,
         }
         
-        # Print the extarcted dim_feedforward
-        print(f"Extracted dim_feedforward: {args_override['dim_feedforward']}")
+        # Print the extracted configuration for debugging
+        print(f"PPO Policy Configuration:")
+        print(f"  dim_feedforward: {args_override['dim_feedforward']}")
+        print(f"  camera_names: {args_override['camera_names']}")
+        print(f"  state_dim: {args_override['state_dim']}")
+        print(f"  latent_dim: {args_override['latent_dim']}")
 
         # Create a trainable policy
         self.policy = ACTPolicy(args_override)
@@ -211,7 +223,7 @@ class PPOACTPolicy(nn.Module):
         self.clip_param = clip_param
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
-        
+    
     def forward(self, qpos, image):
         """Forward pass for inference"""
         return self.policy(qpos, image)
@@ -240,6 +252,10 @@ class PPOACTPolicy(nn.Module):
             
             a_hat, is_pad_hat, (mu, logvar) = self.policy.model(qpos, image, env_state, actions, is_pad)
             
+            # Check if mu and logvar are valid
+            if mu is None or logvar is None:
+                raise RuntimeError("Model forward pass returned None for mu or logvar in training mode")
+            
             # Compute log probability of actions using the latent Gaussian distribution
             std = torch.exp(0.5 * logvar)
             
@@ -250,7 +266,7 @@ class PPOACTPolicy(nn.Module):
             # Compute log probability under multivariate Gaussian
             # log_prob = -0.5 * ((x - mu)^2 / std^2 + log(2*pi*std^2))
             log_prob_per_dim = -0.5 * (((a_hat - mu)**2 / (std**2 + 1e-8)) + 
-                                       torch.log(2 * np.pi * std**2 + 1e-8))
+                                    torch.log(2 * np.pi * std**2 + 1e-8))
             
             # Sum over latent dimensions, mean over sequence length
             action_log_probs = log_prob_per_dim.sum(dim=-1).mean(dim=-1)
@@ -266,9 +282,34 @@ class PPOACTPolicy(nn.Module):
             return action_log_probs, value, entropy, mu, logvar
         else:
             # Inference mode
-            a_hat, _, (mu, logvar) = self.policy.model(qpos, image, env_state)
-            value = self.value_net(mu).squeeze(-1)
-            return a_hat, value
+            try:
+                a_hat, _, (mu, logvar) = self.policy.model(qpos, image, env_state)
+                
+                # Check if mu and logvar are valid
+                if mu is None or logvar is None:
+                    print(f"[PPO ERROR] Model forward pass returned None: mu={mu}, logvar={logvar}")
+                    # Create dummy tensors with correct shape for fallback
+                    batch_size = qpos.shape[0]
+                    latent_dim = getattr(self.policy.model, 'latent_dim', 32)
+                    mu = torch.zeros(batch_size, latent_dim).cuda()
+                    print(f"[PPO ERROR] Using fallback mu with shape: {mu.shape}")
+                
+                value = self.value_net(mu).squeeze(-1)
+                return a_hat, value
+                
+            except Exception as e:
+                print(f"[PPO ERROR] Error in model forward pass: {e}")
+                # Create fallback values
+                batch_size = qpos.shape[0]
+                action_dim = getattr(self.policy.model, 'state_dim', 32)
+                num_queries = getattr(self.policy.model, 'num_queries', 8)
+                
+                # Create dummy action and value
+                dummy_action = torch.zeros(batch_size, num_queries, action_dim).cuda()
+                dummy_value = torch.zeros(batch_size).cuda()
+                
+                print(f"[PPO ERROR] Using fallback action shape: {dummy_action.shape}, value shape: {dummy_value.shape}")
+                return dummy_action, dummy_value
     
     def get_kl_divergence(self, qpos, image, actions=None, is_pad=None):
         """

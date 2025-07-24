@@ -201,6 +201,21 @@ class UnityVRRLInterface(UnityVRInterface):
             # Process image data
             curr_image = self._process_image_data(state_data)
             
+            # DEBUG: Print tensor shapes and model configuration
+            print(f"[RL DEBUG] qpos shape: {qpos.shape}")
+            print(f"[RL DEBUG] curr_image shape: {curr_image.shape}")
+            print(f"[RL DEBUG] self.camera_names: {self.camera_names}")
+            print(f"[RL DEBUG] model.camera_names: {getattr(self.ppo_policy.policy.model, 'camera_names', 'NOT SET')}")
+            
+            # CRITICAL FIX: Ensure the PPO policy model has the correct camera_names
+            if hasattr(self.ppo_policy.policy.model, 'camera_names'):
+                if self.ppo_policy.policy.model.camera_names != self.camera_names:
+                    print(f"[RL DEBUG] Fixing model camera_names: {self.ppo_policy.policy.model.camera_names} -> {self.camera_names}")
+                    self.ppo_policy.policy.model.camera_names = self.camera_names
+            else:
+                print(f"[RL DEBUG] Setting model camera_names to: {self.camera_names}")
+                self.ppo_policy.policy.model.camera_names = self.camera_names
+            
             # Store state and image for episode
             self.episode_states.append(qpos_numpy)
             self.episode_images.append(curr_image)
@@ -208,45 +223,51 @@ class UnityVRRLInterface(UnityVRInterface):
             
             # Get action and value from PPO policy
             if self.policy_class == 'ACT':
-                # Get action from policy
-                action_tensor, value = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                
-                # Convert to numpy for processing
-                raw_action = action_tensor.squeeze(0).cpu().numpy()
-                
-                # Store value for episode
-                self.episode_values.append(value.item())
-                
-                # Compute log probability using the policy's latent distribution
-                # We need to get the latent distribution parameters (mu, logvar) from the policy
-                with torch.no_grad():
-                    # Get the latent distribution parameters from the policy
-                    env_state = None
-                    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                                   std=[0.229, 0.224, 0.225])
-                    normalized_image = normalize(curr_image)
+                try:
+                    # Get action from policy
+                    action_tensor, value = self.ppo_policy.evaluate_actions(qpos, curr_image)
                     
-                    # Forward pass to get latent distribution
-                    _, _, (mu, logvar) = self.ppo_policy.policy.model(qpos, normalized_image, env_state)
+                    # Convert to numpy for processing
+                    raw_action = action_tensor.squeeze(0).cpu().numpy()
                     
-                    # Compute log probability of the sampled action
-                    # For continuous actions, we assume a Gaussian distribution
-                    std = torch.exp(0.5 * logvar)
+                    # Store value for episode
+                    self.episode_values.append(value.item())
                     
-                    # Convert action back to latent space for log prob computation
-                    # This is an approximation - in practice you might want to store the original latent sample
-                    action_flat = torch.from_numpy(raw_action).float().cuda()
+                    # Compute log probability using the policy's latent distribution
+                    # We need to get the latent distribution parameters (mu, logvar) from the policy
+                    with torch.no_grad():
+                        # Get the latent distribution parameters from the policy
+                        env_state = None
+                        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                       std=[0.229, 0.224, 0.225])
+                        normalized_image = normalize(curr_image)
+                        
+                        # Forward pass to get latent distribution
+                        _, _, (mu, logvar) = self.ppo_policy.policy.model(qpos, normalized_image, env_state)
+                        
+                        # Compute log probability of the sampled action
+                        # For continuous actions, we assume a Gaussian distribution
+                        std = torch.exp(0.5 * logvar)
+                        
+                        # Convert action back to latent space for log prob computation
+                        # This is an approximation - in practice you might want to store the original latent sample
+                        action_flat = torch.from_numpy(raw_action).float().cuda()
+                        
+                        # Compute log probability under Gaussian distribution
+                        # log_prob = -0.5 * ((action - mu)^2 / std^2 + log(2*pi*std^2))
+                        log_prob_tensor = -0.5 * (((action_flat.unsqueeze(0) - mu)**2 / (std**2 + 1e-8)) + 
+                                                 torch.log(2 * np.pi * std**2 + 1e-8))
+                        log_prob = log_prob_tensor.sum().item()  # Sum over action dimensions
+                        
+                    self.episode_log_probs.append(log_prob)
                     
-                    # Compute log probability under Gaussian distribution
-                    # log_prob = -0.5 * ((action - mu)^2 / std^2 + log(2*pi*std^2))
-                    log_prob_tensor = -0.5 * (((action_flat.unsqueeze(0) - mu)**2 / (std**2 + 1e-8)) + 
-                                             torch.log(2 * np.pi * std**2 + 1e-8))
-                    log_prob = log_prob_tensor.sum().item()  # Sum over action dimensions
+                    # Store action for episode
+                    self.episode_actions.append(raw_action)
                     
-                self.episode_log_probs.append(log_prob)
-                
-                # Store action for episode
-                self.episode_actions.append(raw_action)
+                except Exception as e:
+                    print(f"[RL ERROR] Error in PPO policy evaluation: {e}")
+                    print(f"[RL ERROR] Falling back to parent implementation")
+                    return super()._process_state_and_get_action(state_data)
                 
             else:
                 # For CNNMLP, use parent implementation
