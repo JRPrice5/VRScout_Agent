@@ -282,19 +282,28 @@ class UnityVRRLInterface(UnityVRInterface):
                         # Forward pass to get latent distribution
                         _, _, (mu, logvar) = self.ppo_policy.policy.model(qpos, normalized_image, env_state)
                         
-                        # Compute log probability of the sampled action
-                        # For continuous actions, we assume a Gaussian distribution
-                        std = torch.exp(0.5 * logvar)
-                        
-                        # Convert action back to latent space for log prob computation
-                        # This is an approximation - in practice you might want to store the original latent sample
-                        action_flat = torch.from_numpy(raw_action).float().cuda()
-                        
-                        # Compute log probability under Gaussian distribution
-                        # log_prob = -0.5 * ((action - mu)^2 / std^2 + log(2*pi*std^2))
-                        log_prob_tensor = -0.5 * (((action_flat.unsqueeze(0) - mu)**2 / (std**2 + 1e-8)) + 
-                                                 torch.log(2 * np.pi * std**2 + 1e-8))
-                        log_prob = log_prob_tensor.sum().item()  # Sum over action dimensions
+                        # In inference mode, mu and logvar are None
+                        if mu is None or logvar is None:
+                            # For inference mode, we can't compute exact log probabilities
+                            # Use a simplified approximation based on action magnitude
+                            action_flat = torch.from_numpy(raw_action).float().cuda()
+                            # Simple approximation: negative squared magnitude as log prob
+                            log_prob = -0.5 * torch.sum(action_flat**2).item()
+                            print(f"[RL DEBUG] Using approximated log_prob in inference mode: {log_prob}")
+                        else:
+                            # Training mode - compute proper log probability
+                            # For continuous actions, we assume a Gaussian distribution
+                            std = torch.exp(0.5 * logvar)
+                            
+                            # Convert action back to latent space for log prob computation
+                            # This is an approximation - in practice you might want to store the original latent sample
+                            action_flat = torch.from_numpy(raw_action).float().cuda()
+                            
+                            # Compute log probability under Gaussian distribution
+                            # log_prob = -0.5 * ((action - mu)^2 / std^2 + log(2*pi*std^2))
+                            log_prob_tensor = -0.5 * (((action_flat.unsqueeze(0) - mu)**2 / (std**2 + 1e-8)) + 
+                                                     torch.log(2 * np.pi * std**2 + 1e-8))
+                            log_prob = log_prob_tensor.sum().item()  # Sum over action dimensions
                         
                     self.episode_log_probs.append(log_prob)
                     

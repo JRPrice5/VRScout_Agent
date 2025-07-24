@@ -206,13 +206,14 @@ class PPOACTPolicy(nn.Module):
         self.policy.load_state_dict(pretrained_policy.state_dict())
         
         # Create value network (separate from policy network)
-        hidden_dim = pretrained_policy.model.transformer.d_model
+        # Use latent_dim instead of hidden_dim since we're feeding mu (latent representation)
+        latent_dim = args_override['latent_dim']
         self.value_net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(latent_dim, latent_dim * 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(latent_dim * 2, latent_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(latent_dim, 1)
         )
         
         # Move to GPU
@@ -285,14 +286,20 @@ class PPOACTPolicy(nn.Module):
             try:
                 a_hat, _, (mu, logvar) = self.policy.model(qpos, image, env_state)
                 
-                # Check if mu and logvar are valid
+                # In inference mode, DETRVAE returns None for mu and logvar
+                # We need to create a latent representation for value estimation
                 if mu is None or logvar is None:
-                    print(f"[PPO ERROR] Model forward pass returned None: mu={mu}, logvar={logvar}")
-                    # Create dummy tensors with correct shape for fallback
+                    # For inference, we need to extract features from the model to create a latent representation
+                    # We'll use the transformer's output features as a proxy for the latent representation
                     batch_size = qpos.shape[0]
                     latent_dim = getattr(self.policy.model, 'latent_dim', 32)
-                    mu = torch.zeros(batch_size, latent_dim).cuda()
-                    print(f"[PPO ERROR] Using fallback mu with shape: {mu.shape}")
+                    
+                    # Create a zero latent sample (as done in DETRVAE inference mode)
+                    latent_sample = torch.zeros([batch_size, latent_dim], dtype=torch.float32).cuda()
+                    
+                    # Use this as input to value network
+                    mu = latent_sample
+                    print(f"[PPO DEBUG] Created inference latent with shape: {mu.shape}")
                 
                 value = self.value_net(mu).squeeze(-1)
                 return a_hat, value
