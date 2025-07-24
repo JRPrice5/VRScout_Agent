@@ -332,6 +332,7 @@ def create_training_config(args):
     """Create training configuration from command line arguments"""
     return {
         'experiment_name': getattr(args, 'experiment_name', None),
+        'max_episode_length': getattr(args, 'max_episode_length', 1000),
         'max_episodes': getattr(args, 'max_episodes', 1000),
         'update_frequency': getattr(args, 'update_frequency', 2048),
         'batch_size': getattr(args, 'batch_size', 64),
