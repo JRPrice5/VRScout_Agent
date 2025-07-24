@@ -53,6 +53,7 @@ def main():
     parser.add_argument('--temporal_agg', action='store_true', help='Use temporal aggregation')
     
     # RL-specific configuration
+    parser.add_argument('--max_episode_length', type=int, default=1000, help='Maximum episode length')
     parser.add_argument('--max_episodes', type=int, default=1000, help='Maximum training episodes')
     parser.add_argument('--update_frequency', type=int, default=2048, help='Policy update frequency (steps)')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for PPO updates')

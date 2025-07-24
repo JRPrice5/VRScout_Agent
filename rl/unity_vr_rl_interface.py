@@ -547,6 +547,7 @@ def main():
     parser.add_argument('--query_frequency', type=int, default=1, help='How often to query the policy')
     
     # RL-specific arguments
+    parser.add_argument('--max_episode_length', type=int, default=1000, help='Maximum episode length')
     parser.add_argument('--max_episodes', type=int, default=1000, help='Maximum number of training episodes')
     parser.add_argument('--update_frequency', type=int, default=2048, help='Update policy every N steps')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for PPO updates')
@@ -572,7 +573,7 @@ def main():
         'value_coef': args.value_coef,
         'entropy_coef': args.entropy_coef,
         'batch_size': args.batch_size,
-        'max_episode_length': 1000,
+        'max_episode_length': args.max_episode_length,
         'gamma': args.gamma,
         'gae_lambda': args.gae_lambda,
         'n_epochs': args.n_epochs,
