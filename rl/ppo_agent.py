@@ -174,7 +174,7 @@ class PPOACTPolicy(nn.Module):
             'num_queries': pretrained_policy.model.num_queries,
             'kl_weight': pretrained_policy.kl_weight,
             'hidden_dim': pretrained_policy.model.transformer.d_model,
-            'dim_feedforward': pretrained_policy.model.transformer.dim_feedforward,
+            'dim_feedforward': pretrained_policy.model.transformer.encoder.layers[0].linear1.out_features,
             'lr': pretrained_policy.optimizer.param_groups[0]['lr'],
             'lr_backbone': pretrained_policy.optimizer.param_groups[1]['lr'],
             'backbone': 'resnet18',  # Assuming resnet18 is used
@@ -184,6 +184,9 @@ class PPOACTPolicy(nn.Module):
             'chunk_size': pretrained_policy.model.num_queries,
         }
         
+        # Print the extarcted dim_feedforward
+        print(f"Extracted dim_feedforward: {args_override['dim_feedforward']}")
+
         # Create a trainable policy
         self.policy = ACTPolicy(args_override)
         
