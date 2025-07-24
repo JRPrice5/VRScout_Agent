@@ -425,99 +425,131 @@ class UnityVRRLInterface(UnityVRInterface):
         Override parent method to handle RL-specific messages.
         """
         print("Waiting for Unity VR client connection...")
-        client_socket, address = self.socket.accept()
-        print(f"Connected to Unity VR client: {address}")
         
         try:
-            while self.running:
-                # Receive data from client
-                data = client_socket.recv(4096)
-                if not data:
-                    break
-                
+            client_socket, address = self.socket.accept()
+            print(f"Connected to Unity VR client: {address}")
+            
+            # Set timeout on client socket for clean shutdown
+            client_socket.settimeout(0.5)
+            
+            try:
+                while self.running:
+                    try:
+                        # Receive data from client with timeout
+                        data = client_socket.recv(4096)
+                        if not data:
+                            print("Unity client disconnected")
+                            break
+                        
+                        try:
+                            # Parse JSON data
+                            message = json.loads(data.decode('utf-8'))
+                            message_type = message.get('type', 'state')
+                            
+                            if message_type == 'state':
+                                # Handle state data (normal inference)
+                                state_data = message.get('data', {})
+                                
+                                # Update timestep
+                                self.timestep = state_data.get('timestep', self.timestep + 1)
+                                
+                                # Process state and get action
+                                response = self._process_state_and_get_action(state_data)
+                                
+                                # Send response back to client
+                                response_json = json.dumps(response)
+                                client_socket.send(response_json.encode('utf-8'))
+                                
+                            elif message_type == 'episode_data':
+                                # Handle episode completion with rewards
+                                episode_data = message.get('data', {})
+                                
+                                # Process episode rewards and update policy
+                                episode_stats = self.process_episode_rewards(episode_data)
+                                
+                                # Send episode statistics back to client
+                                response = {
+                                    'type': 'episode_response',
+                                    'data': episode_stats
+                                }
+                                response_json = json.dumps(response)
+                                client_socket.send(response_json.encode('utf-8'))
+                                
+                                # Start new episode if training continues
+                                if self.is_training and self.current_episode < self.rl_config['max_episodes']:
+                                    self.start_new_episode()
+                                
+                            elif message_type == 'training_stats':
+                                # Handle request for training statistics
+                                stats = self.get_training_stats()
+                                response = {
+                                    'type': 'stats_response',
+                                    'data': stats
+                                }
+                                response_json = json.dumps(response)
+                                client_socket.send(response_json.encode('utf-8'))
+                                
+                            elif message_type == 'start_training':
+                                # Handle start training command
+                                self.start_rl_training()
+                                self.start_new_episode()
+                                response = {
+                                    'type': 'training_started',
+                                    'data': {'status': 'Training started'}
+                                }
+                                response_json = json.dumps(response)
+                                client_socket.send(response_json.encode('utf-8'))
+                                
+                            elif message_type == 'stop_training':
+                                # Handle stop training command
+                                self.stop_rl_training()
+                                response = {
+                                    'type': 'training_stopped',
+                                    'data': {'status': 'Training stopped'}
+                                }
+                                response_json = json.dumps(response)
+                                client_socket.send(response_json.encode('utf-8'))
+                                
+                        except json.JSONDecodeError as e:
+                            print(f"Error parsing JSON: {e}")
+                            error_response = json.dumps({'error': 'Invalid JSON format'})
+                            client_socket.send(error_response.encode('utf-8'))
+                        except Exception as e:
+                            print(f"Error processing request: {e}")
+                            error_response = json.dumps({'error': str(e)})
+                            client_socket.send(error_response.encode('utf-8'))
+                            
+                    except socket.timeout:
+                        # This is expected with the timeout, just continue
+                        continue
+                    except ConnectionResetError:
+                        print("Connection was reset by the client")
+                        break
+                    except ConnectionAbortedError:
+                        print("Connection was aborted")
+                        break
+                    except Exception as e:
+                        print(f"Error receiving data: {e}")
+                        break
+                        
+            except Exception as e:
+                print(f"Client communication error: {e}")
+            finally:
+                print("Closing client connection")
                 try:
-                    # Parse JSON data
-                    message = json.loads(data.decode('utf-8'))
-                    message_type = message.get('type', 'state')
-                    
-                    if message_type == 'state':
-                        # Handle state data (normal inference)
-                        state_data = message.get('data', {})
-                        
-                        # Update timestep
-                        self.timestep = state_data.get('timestep', self.timestep + 1)
-                        
-                        # Process state and get action
-                        response = self._process_state_and_get_action(state_data)
-                        
-                        # Send response back to client
-                        response_json = json.dumps(response)
-                        client_socket.send(response_json.encode('utf-8'))
-                        
-                    elif message_type == 'episode_data':
-                        # Handle episode completion with rewards
-                        episode_data = message.get('data', {})
-                        
-                        # Process episode rewards and update policy
-                        episode_stats = self.process_episode_rewards(episode_data)
-                        
-                        # Send episode statistics back to client
-                        response = {
-                            'type': 'episode_response',
-                            'data': episode_stats
-                        }
-                        response_json = json.dumps(response)
-                        client_socket.send(response_json.encode('utf-8'))
-                        
-                        # Start new episode if training continues
-                        if self.is_training and self.current_episode < self.rl_config['max_episodes']:
-                            self.start_new_episode()
-                        
-                    elif message_type == 'training_stats':
-                        # Handle request for training statistics
-                        stats = self.get_training_stats()
-                        response = {
-                            'type': 'stats_response',
-                            'data': stats
-                        }
-                        response_json = json.dumps(response)
-                        client_socket.send(response_json.encode('utf-8'))
-                        
-                    elif message_type == 'start_training':
-                        # Handle start training command
-                        self.start_rl_training()
-                        self.start_new_episode()
-                        response = {
-                            'type': 'training_started',
-                            'data': {'status': 'Training started'}
-                        }
-                        response_json = json.dumps(response)
-                        client_socket.send(response_json.encode('utf-8'))
-                        
-                    elif message_type == 'stop_training':
-                        # Handle stop training command
-                        self.stop_rl_training()
-                        response = {
-                            'type': 'training_stopped',
-                            'data': {'status': 'Training stopped'}
-                        }
-                        response_json = json.dumps(response)
-                        client_socket.send(response_json.encode('utf-8'))
-                        
-                except json.JSONDecodeError as e:
-                    print(f"Error parsing JSON: {e}")
-                    error_response = json.dumps({'error': 'Invalid JSON format'})
-                    client_socket.send(error_response.encode('utf-8'))
-                except Exception as e:
-                    print(f"Error processing request: {e}")
-                    error_response = json.dumps({'error': str(e)})
-                    client_socket.send(error_response.encode('utf-8'))
-                    
+                    client_socket.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass  # Socket might already be closed
+                client_socket.close()
+                
+        except socket.timeout:
+            # This is expected when no client connects within the timeout period
+            # The server loop in start_server will handle this and continue waiting
+            pass
         except Exception as e:
-            print(f"Client connection error: {e}")
-        finally:
-            client_socket.close()
-            print("Client disconnected")
+            print(f"Error accepting client connection: {e}")
+            raise
 
 
 def main():
