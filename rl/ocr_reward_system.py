@@ -20,6 +20,50 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox
 import re
+import ctypes
+from ctypes import wintypes
+
+
+def make_dpi_aware():
+    """
+    Make the process DPI aware to get accurate screen coordinates.
+    """
+    try:
+        # Try different DPI awareness methods
+        try:
+            # Windows 10 version 1703 and later
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        except:
+            try:
+                # Windows 8.1 and later
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+            except:
+                # Windows Vista and later
+                ctypes.windll.user32.SetProcessDPIAware()
+        print("Process made DPI aware")
+    except Exception as e:
+        print(f"Could not make process DPI aware: {e}")
+
+
+def get_actual_screen_coordinates(tkinter_coords):
+    """
+    Convert tkinter coordinates to actual screen coordinates that mss can use.
+    This method uses a different approach - we'll test the coordinates directly.
+    
+    Args:
+        tkinter_coords: Dictionary with tkinter coordinates
+        
+    Returns:
+        dict: Actual screen coordinates for mss
+    """
+    # For now, let's try using the tkinter coordinates directly
+    # and let the user verify if they work
+    return {
+        'top': tkinter_coords['top'],
+        'left': tkinter_coords['left'], 
+        'width': tkinter_coords['width'],
+        'height': tkinter_coords['height']
+    }
 
 
 class OCRRewardSystem:
@@ -45,6 +89,9 @@ class OCRRewardSystem:
         """
         # Set Tesseract path
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        
+        # Make process DPI aware for accurate coordinates
+        make_dpi_aware()
         
         # Network configuration
         self.unity_host = unity_host
@@ -75,53 +122,116 @@ class OCRRewardSystem:
         print(f"  - Tesseract: {tesseract_path}")
         print(f"  - Unity: {unity_host}:{unity_port}")
         print(f"  - OCR Frequency: {ocr_frequency} Hz")
-        print(f"  - Screen Region: {screen_region}")
+        print(f"  - Screen Region: {self.screen_region}")
         
     def select_screen_region(self):
         """
         Interactive screen region selection using mouse.
         """
-        from tkinter import Tk, Canvas
+        from tkinter import Tk, Canvas, Label
         
         region = {}
+        selection_complete = False
         
         def on_mouse_down(event):
             region['start_x'] = event.x
             region['start_y'] = event.y
             
         def on_mouse_up(event):
+            nonlocal selection_complete
             end_x, end_y = event.x, event.y
             region['top'] = min(region['start_y'], end_y)
             region['left'] = min(region['start_x'], end_x)
             region['width'] = abs(end_x - region['start_x'])
             region['height'] = abs(end_y - region['start_y'])
-            root.destroy()
+            selection_complete = True
+            root.quit()  # Use quit() instead of destroy() to properly exit mainloop
             
-        root = Tk()
-        root.attributes("-fullscreen", True)
-        root.attributes("-alpha", 0.3)
-        root.attributes("-topmost", True)
-        canvas = Canvas(root, cursor="cross", bg='red')
-        canvas.pack(fill="both", expand=True)
-        canvas.bind("<ButtonPress-1>", on_mouse_down)
-        canvas.bind("<ButtonRelease-1>", on_mouse_up)
+        def on_key_press(event):
+            if event.keysym == 'Escape':
+                root.quit()
         
-        # Add instruction text
-        canvas.create_text(
-            root.winfo_screenwidth() // 2, 50,
-            text="Click and drag to select the score area, then release",
-            fill="white", font=("Arial", 16)
-        )
+        try:
+            root = Tk()
+            root.attributes("-fullscreen", True)
+            root.attributes("-alpha", 0.3)
+            root.attributes("-topmost", True)
+            root.focus_force()  # Ensure window gets focus
+            
+            canvas = Canvas(root, cursor="cross", bg='red')
+            canvas.pack(fill="both", expand=True)
+            canvas.bind("<ButtonPress-1>", on_mouse_down)
+            canvas.bind("<ButtonRelease-1>", on_mouse_up)
+            root.bind("<KeyPress>", on_key_press)
+            canvas.focus_set()  # Allow canvas to receive key events
+            
+            # Add instruction text
+            canvas.create_text(
+                root.winfo_screenwidth() // 2, 50,
+                text="Click and drag to select the score area, then release (ESC to cancel)",
+                fill="white", font=("Arial", 16)
+            )
+            
+            # Add crosshair lines for better precision
+            canvas.create_line(0, root.winfo_screenheight()//2, 
+                             root.winfo_screenwidth(), root.winfo_screenheight()//2, 
+                             fill="yellow", width=1)
+            canvas.create_line(root.winfo_screenwidth()//2, 0, 
+                             root.winfo_screenwidth()//2, root.winfo_screenheight(), 
+                             fill="yellow", width=1)
+            
+            root.mainloop()
+            
+        except Exception as e:
+            print(f"Error during region selection: {e}")
+            selection_complete = False
+        finally:
+            try:
+                root.destroy()
+            except:
+                pass
         
-        root.mainloop()
-        
-        if 'width' in region and 'height' in region:
+        if selection_complete and 'width' in region and 'height' in region and region['width'] > 0 and region['height'] > 0:
+            # Use tkinter coordinates directly (DPI awareness should handle the conversion)
             self.screen_region = region
             print(f"Selected region: {region}")
+            
+            # Test the region by capturing a small sample
+            try:
+                test_capture = self.test_screen_capture(region)
+                if test_capture:
+                    print("✓ Region capture test successful")
+                else:
+                    print("⚠ Region capture test failed - coordinates might be incorrect")
+            except Exception as e:
+                print(f"⚠ Region capture test error: {e}")
+            
             return region
         else:
-            print("No region selected")
+            print("No valid region selected")
             return None
+    
+    def test_screen_capture(self, region):
+        """
+        Test if the screen region can be captured successfully.
+        
+        Args:
+            region: Dictionary with screen region coordinates
+            
+        Returns:
+            bool: True if capture successful, False otherwise
+        """
+        try:
+            with mss.mss() as sct:
+                # Try to capture the region
+                screenshot = sct.grab(region)
+                # Convert to numpy array to verify it worked
+                frame = np.array(screenshot)
+                # Check if we got a valid image
+                return frame.size > 0 and frame.shape[0] > 0 and frame.shape[1] > 0
+        except Exception as e:
+            print(f"Test capture failed: {e}")
+            return False
             
     def preprocess_image_for_ocr(self, image):
         """
@@ -283,6 +393,15 @@ class OCRRewardSystem:
             print("No screen region configured. Please select a region first.")
             return False
             
+        # Reinitialize the UDP socket if it was closed
+        try:
+            # Test if socket is still valid
+            self.udp_socket.getpeername()
+        except:
+            # Socket is closed or invalid, create a new one
+            print("Reinitializing UDP socket...")
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            
         self.running = True
         
         # Start OCR thread
@@ -347,11 +466,23 @@ def create_control_gui(ocr_system):
     
     def select_region():
         """Select screen region"""
-        root.withdraw()  # Hide main window
-        region = ocr_system.select_screen_region()
-        root.deiconify()  # Show main window
-        if region:
-            messagebox.showinfo("Region Selected", f"Region: {region}")
+        try:
+            root.withdraw()  # Hide main window
+            region = ocr_system.select_screen_region()
+            if region:
+                messagebox.showinfo("Region Selected", f"Region: {region}")
+            else:
+                messagebox.showwarning("No Selection", "No region was selected")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error during region selection: {e}")
+        finally:
+            # Always ensure main window is restored
+            try:
+                root.deiconify()  # Show main window
+                root.lift()  # Bring window to front
+                root.focus_force()  # Give focus back to main window
+            except:
+                pass
     
     def start_ocr():
         """Start OCR system"""

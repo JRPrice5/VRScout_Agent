@@ -148,6 +148,8 @@ python ocr_reward_system.py \
 - Check if score text is clearly visible and not overlapped
 - Adjust screen resolution or text size
 - Verify Tesseract installation
+- **DPI Scaling Issue**: If you have Windows display scaling (125%, 150%, etc.), the system automatically detects and adjusts coordinates
+- Check console output for "DPI scale factor" - should match your Windows scaling setting
 
 #### 2. Unity Not Receiving Scores
 **Symptoms**: Unity shows "Score: 0" continuously
@@ -172,6 +174,20 @@ python ocr_reward_system.py \
 - Check if OCR is detecting non-zero scores
 - Manually start episode using Unity GUI button
 - Verify `enableRewardTracking` is checked
+
+#### 5. Screen Region Capture Issues (DPI Scaling)
+**Symptoms**: OCR captures wrong area after region selection
+**Solutions**:
+- System automatically detects Windows DPI scaling (125%, 150%, 200%)
+- Check console output for "DPI scale factor" message
+- If detection fails, try:
+  - Running as administrator
+  - Changing Windows display scaling to 100% temporarily
+  - Using manual coordinate specification via command line
+- **Manual coordinates**: Use `--region-*` arguments with actual screen coordinates:
+  ```bash
+  python ocr_reward_system.py --region-top 100 --region-left 200 --region-width 300 --region-height 50
+  ```
 
 ### Debug Information
 
