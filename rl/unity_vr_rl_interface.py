@@ -433,92 +433,125 @@ class UnityVRRLInterface(UnityVRInterface):
             # Set timeout on client socket for clean shutdown
             client_socket.settimeout(0.5)
             
+            # Initialize data buffer for message handling (like parent class)
+            buffer_size = 4096
+            data_buffer = b""
+            
             try:
                 while self.running:
                     try:
                         # Receive data from client with timeout
-                        data = client_socket.recv(4096)
-                        if not data:
+                        chunk = client_socket.recv(buffer_size)
+                        if not chunk:
                             print("Unity client disconnected")
                             break
                         
-                        try:
-                            # Parse JSON data
-                            message = json.loads(data.decode('utf-8'))
-                            message_type = message.get('type', 'state')
+                        data_buffer += chunk
+                        
+                        # Check if we have a complete message (Unity client uses END_OF_MESSAGE delimiter)
+                        if b"END_OF_MESSAGE" in data_buffer:
+                            # Extract the complete message
+                            message_end = data_buffer.find(b"END_OF_MESSAGE")
+                            message_data = data_buffer[:message_end]
+                            data_buffer = data_buffer[message_end + len(b"END_OF_MESSAGE"):]
                             
-                            if message_type == 'state':
-                                # Handle state data (normal inference)
-                                state_data = message.get('data', {})
+                            try:
+                                # Parse JSON data
+                                message = json.loads(message_data.decode('utf-8'))
                                 
-                                # Update timestep
-                                self.timestep = state_data.get('timestep', self.timestep + 1)
-                                
-                                # Process state and get action
-                                response = self._process_state_and_get_action(state_data)
-                                
-                                # Send response back to client
-                                response_json = json.dumps(response)
-                                client_socket.send(response_json.encode('utf-8'))
-                                
-                            elif message_type == 'episode_data':
-                                # Handle episode completion with rewards
-                                episode_data = message.get('data', {})
-                                
-                                # Process episode rewards and update policy
-                                episode_stats = self.process_episode_rewards(episode_data)
-                                
-                                # Send episode statistics back to client
-                                response = {
-                                    'type': 'episode_response',
-                                    'data': episode_stats
-                                }
-                                response_json = json.dumps(response)
-                                client_socket.send(response_json.encode('utf-8'))
-                                
-                                # Start new episode if training continues
-                                if self.is_training and self.current_episode < self.rl_config['max_episodes']:
-                                    self.start_new_episode()
-                                
-                            elif message_type == 'training_stats':
-                                # Handle request for training statistics
-                                stats = self.get_training_stats()
-                                response = {
-                                    'type': 'stats_response',
-                                    'data': stats
-                                }
-                                response_json = json.dumps(response)
-                                client_socket.send(response_json.encode('utf-8'))
-                                
-                            elif message_type == 'start_training':
-                                # Handle start training command
-                                self.start_rl_training()
-                                self.start_new_episode()
-                                response = {
-                                    'type': 'training_started',
-                                    'data': {'status': 'Training started'}
-                                }
-                                response_json = json.dumps(response)
-                                client_socket.send(response_json.encode('utf-8'))
-                                
-                            elif message_type == 'stop_training':
-                                # Handle stop training command
-                                self.stop_rl_training()
-                                response = {
-                                    'type': 'training_stopped',
-                                    'data': {'status': 'Training stopped'}
-                                }
-                                response_json = json.dumps(response)
-                                client_socket.send(response_json.encode('utf-8'))
-                                
-                        except json.JSONDecodeError as e:
-                            print(f"Error parsing JSON: {e}")
-                            error_response = json.dumps({'error': 'Invalid JSON format'})
-                            client_socket.send(error_response.encode('utf-8'))
-                        except Exception as e:
-                            print(f"Error processing request: {e}")
-                            error_response = json.dumps({'error': str(e)})
-                            client_socket.send(error_response.encode('utf-8'))
+                                # Detect message format: check if it has 'type' field (RL format) or direct state data (Unity format)
+                                if 'type' in message:
+                                    # RL-specific message format: {"type": "...", "data": {...}}
+                                    message_type = message.get('type', 'state')
+                                    
+                                    if message_type == 'episode_data':
+                                        # Handle episode completion with rewards
+                                        episode_data = message.get('data', {})
+                                        
+                                        # Process episode rewards and update policy
+                                        episode_stats = self.process_episode_rewards(episode_data)
+                                        
+                                        # Send episode statistics back to client
+                                        response = {
+                                            'type': 'episode_response',
+                                            'data': episode_stats
+                                        }
+                                        response_json = json.dumps(response) + "END_OF_MESSAGE"
+                                        client_socket.sendall(response_json.encode('utf-8'))
+                                        
+                                        # Start new episode if training continues
+                                        if self.is_training and self.current_episode < self.rl_config['max_episodes']:
+                                            self.start_new_episode()
+                                        
+                                    elif message_type == 'training_stats':
+                                        # Handle request for training statistics
+                                        stats = self.get_training_stats()
+                                        response = {
+                                            'type': 'stats_response',
+                                            'data': stats
+                                        }
+                                        response_json = json.dumps(response) + "END_OF_MESSAGE"
+                                        client_socket.sendall(response_json.encode('utf-8'))
+                                        
+                                    elif message_type == 'start_training':
+                                        # Handle start training command
+                                        self.start_rl_training()
+                                        self.start_new_episode()
+                                        response = {
+                                            'type': 'training_started',
+                                            'data': {'status': 'Training started'}
+                                        }
+                                        response_json = json.dumps(response) + "END_OF_MESSAGE"
+                                        client_socket.sendall(response_json.encode('utf-8'))
+                                        
+                                    elif message_type == 'stop_training':
+                                        # Handle stop training command
+                                        self.stop_rl_training()
+                                        response = {
+                                            'type': 'training_stopped',
+                                            'data': {'status': 'Training stopped'}
+                                        }
+                                        response_json = json.dumps(response) + "END_OF_MESSAGE"
+                                        client_socket.sendall(response_json.encode('utf-8'))
+                                        
+                                    else:
+                                        # Default to state handling for RL format
+                                        state_data = message.get('data', {})
+                                        
+                                        # Update timestep
+                                        self.timestep = state_data.get('timestep', self.timestep + 1)
+                                        
+                                        # Process state and get action
+                                        response = self._process_state_and_get_action(state_data)
+                                        
+                                        # Send response back to client
+                                        response_json = json.dumps(response) + "END_OF_MESSAGE"
+                                        client_socket.sendall(response_json.encode('utf-8'))
+                                        
+                                else:
+                                    # Unity client direct format: {"qpos": [...], "image": "...", "timestep": 123}
+                                    # This is the standard format from InferencePoseClient.cs
+                                    state_data = message
+                                    
+                                    # Update timestep
+                                    if 'timestep' in state_data:
+                                        self.timestep = state_data['timestep']
+                                    
+                                    # Process state and get action (same as parent class)
+                                    action = self._process_state_and_get_action(state_data)
+                                    
+                                    # Send action back to Unity (same format as parent class)
+                                    response = json.dumps(action) + "END_OF_MESSAGE"
+                                    client_socket.sendall(response.encode('utf-8'))
+                                    
+                            except json.JSONDecodeError as e:
+                                print(f"Error parsing JSON: {e}")
+                                error_response = json.dumps({'error': 'Invalid JSON format'}) + "END_OF_MESSAGE"
+                                client_socket.sendall(error_response.encode('utf-8'))
+                            except Exception as e:
+                                print(f"Error processing request: {e}")
+                                error_response = json.dumps({'error': str(e)}) + "END_OF_MESSAGE"
+                                client_socket.sendall(error_response.encode('utf-8'))
                             
                     except socket.timeout:
                         # This is expected with the timeout, just continue
