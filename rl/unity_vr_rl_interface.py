@@ -127,31 +127,68 @@ class UnityVRRLInterface(UnityVRInterface):
         """Load the pretrained policy for KL constraint"""
         print(f"Loading pretrained policy from {ckpt_path}")
         
-        # Use the same configuration as the main policy
-        policy_config = {
-            'num_queries': self.chunk_size,
-            'kl_weight': self.kl_weight,
-            'hidden_dim': self.hidden_dim,
-            'dim_feedforward': self.dim_feedforward,
-            'lr': self.lr,
-            'lr_backbone': self.lr_backbone,
-            'backbone': self.backbone,
-            'enc_layers': self.enc_layers,
-            'dec_layers': self.dec_layers,
-            'nheads': self.nheads,
-            'chunk_size': self.chunk_size,
-            'ckpt_dir': self.ckpt_dir,
-            'policy_class': self.policy_class,
-            'task_name': self.task_name,
-            'seed': self.seed,
-            'num_epochs': self.num_epochs,
-            'camera_names': self.camera_names,
-        }
+        # CRITICAL FIX: Load the checkpoint first to get the actual model state
+        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        print(f"Checkpoint keys: {list(checkpoint.keys())}")
         
+        # Try to extract configuration from checkpoint if available
+        if 'config' in checkpoint:
+            saved_config = checkpoint['config']
+            print(f"Found saved config in checkpoint: {saved_config}")
+            policy_config = saved_config
+        else:
+            # Fallback: Use interface configuration but ensure all required fields are present
+            policy_config = {
+                'num_queries': self.chunk_size,
+                'kl_weight': self.kl_weight,
+                'hidden_dim': self.hidden_dim,
+                'dim_feedforward': self.dim_feedforward,
+                'lr': self.lr,
+                'lr_backbone': self.lr_backbone,
+                'backbone': self.backbone,
+                'enc_layers': self.enc_layers,
+                'dec_layers': self.dec_layers,
+                'nheads': self.nheads,
+                'chunk_size': self.chunk_size,
+                'ckpt_dir': self.ckpt_dir,
+                'policy_class': self.policy_class,
+                'task_name': self.task_name,
+                'seed': self.seed,
+                'num_epochs': self.num_epochs,
+                'camera_names': self.camera_names,
+                # Add missing required parameters with defaults
+                'dropout': 0.1,
+                'pre_norm': False,
+                'weight_decay': 1e-4,
+                'state_dim': 32,  # Default robot state dimension
+                'latent_dim': 32,  # Default latent dimension
+            }
+            print(f"Using interface config with defaults: {policy_config}")
+        
+        # Create policy with the configuration
         pretrained_policy = ACTPolicy(policy_config)
-        pretrained_policy.load_state_dict(torch.load(ckpt_path))
+        
+        # Load the state dict
+        if 'model_state_dict' in checkpoint:
+            pretrained_policy.load_state_dict(checkpoint['model_state_dict'])
+            print("Loaded model_state_dict from checkpoint")
+        elif 'state_dict' in checkpoint:
+            pretrained_policy.load_state_dict(checkpoint['state_dict'])
+            print("Loaded state_dict from checkpoint")
+        else:
+            # Assume the entire checkpoint is the state dict
+            pretrained_policy.load_state_dict(checkpoint)
+            print("Loaded checkpoint as state_dict")
+        
         pretrained_policy.cuda()
         pretrained_policy.eval()
+        
+        # Print model info for debugging
+        print(f"Loaded pretrained policy:")
+        print(f"  Model type: {type(pretrained_policy.model)}")
+        print(f"  Camera names: {getattr(pretrained_policy.model, 'camera_names', 'NOT SET')}")
+        print(f"  Num queries: {getattr(pretrained_policy.model, 'num_queries', 'NOT SET')}")
+        print(f"  Hidden dim: {getattr(pretrained_policy.model.transformer, 'd_model', 'NOT SET')}")
         
         return pretrained_policy
     
