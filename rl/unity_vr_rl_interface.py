@@ -316,14 +316,14 @@ class UnityVRRLInterface(UnityVRInterface):
         self.current_episode += 1
         self.total_episodes += 1
         
-        print(f"Episode {self.current_episode} completed: reward={total_reward:.2f}, length={episode_length}")
+        print(f"Episode {self.current_episode} completed: reward={total_reward:.2f}, length={episode_length}, is_training={self.is_training}")
         
         # Check if we should update the policy
-        if len(self.memory.states) >= self.rl_config['update_frequency']:
+        if self.is_training and len(self.memory.states) >= self.rl_config['update_frequency']:
             self.update_policy()
         
         # Check if we should save the model
-        if self.current_episode % self.rl_config['save_frequency'] == 0:
+        if self.is_training and self.current_episode % self.rl_config['save_frequency'] == 0:
             self.save_model()
         
         return {
