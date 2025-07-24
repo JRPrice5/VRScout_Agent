@@ -230,10 +230,13 @@ class UnityVRRLInterface(UnityVRInterface):
         with torch.no_grad():
             # Extract qpos from state data
             qpos_numpy = np.array(state_data['qpos'], dtype=np.float32)
+            print(f"[RL DEBUG] Input qpos_numpy shape: {qpos_numpy.shape}, dtype: {qpos_numpy.dtype}")
+            print(f"[RL DEBUG] Input qpos values (first 10): {qpos_numpy[:10]}")
             
             # Preprocess qpos
             qpos = self.pre_process(qpos_numpy)
             qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
+            print(f"[RL DEBUG] After preprocessing qpos shape: {qpos.shape}")
             
             # Process image data
             curr_image = self._process_image_data(state_data)
@@ -263,9 +266,13 @@ class UnityVRRLInterface(UnityVRInterface):
                 try:
                     # Get action from policy
                     action_tensor, value = self.ppo_policy.evaluate_actions(qpos, curr_image)
+                    print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
+                    print(f"[RL DEBUG] Value: {value}")
                     
                     # Convert to numpy for processing
                     raw_action = action_tensor.squeeze(0).cpu().numpy()
+                    print(f"[RL DEBUG] raw_action shape after squeeze: {raw_action.shape}, dtype: {raw_action.dtype}")
+                    print(f"[RL DEBUG] raw_action values (first 10): {raw_action.flatten()[:10]}")
                     
                     # Store value for episode
                     self.episode_values.append(value.item())
@@ -320,10 +327,16 @@ class UnityVRRLInterface(UnityVRInterface):
                 return super()._process_state_and_get_action(state_data)
             
             # Post-process action
+            print(f"[RL DEBUG] Before post_process - raw_action shape: {raw_action.shape}")
+            print(f"[RL DEBUG] Before post_process - raw_action values: {raw_action}")
             action = self.post_process(raw_action)
+            print(f"[RL DEBUG] After post_process - action shape: {action.shape}")
+            print(f"[RL DEBUG] After post_process - action values: {action}")
             
             # Convert to list for JSON serialization
             action_list = action.tolist()
+            print(f"[RL DEBUG] Final action_list length: {len(action_list)}")
+            print(f"[RL DEBUG] Final action_list: {action_list}")
             
             return {
                 'action': action_list,
