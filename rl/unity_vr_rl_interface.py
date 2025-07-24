@@ -269,10 +269,13 @@ class UnityVRRLInterface(UnityVRInterface):
                     print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
                     print(f"[RL DEBUG] Value: {value}")
                     
-                    # Convert to numpy for processing
-                    raw_action = action_tensor.squeeze(0).cpu().numpy()
-                    print(f"[RL DEBUG] raw_action shape after squeeze: {raw_action.shape}, dtype: {raw_action.dtype}")
-                    print(f"[RL DEBUG] raw_action values (first 10): {raw_action.flatten()[:10]}")
+                    # Handle like parent class
+                    all_actions = action_tensor  # Shape: [batch, num_queries, action_dim]
+                    time_index = 0  # Always use first timestep when no temporal agg
+                    raw_action = all_actions[:, time_index]  # Shape: [batch, action_dim]
+                    
+                    # Keep as tensor for log probability computation
+                    raw_action = raw_action.squeeze(0)  # Shape: [action_dim]
                     
                     # Store value for episode
                     self.episode_values.append(value.item())
@@ -293,7 +296,7 @@ class UnityVRRLInterface(UnityVRInterface):
                         if mu is None or logvar is None:
                             # For inference mode, we can't compute exact log probabilities
                             # Use a simplified approximation based on action magnitude
-                            action_flat = torch.from_numpy(raw_action).float().cuda()
+                            action_flat = raw_action
                             # Simple approximation: negative squared magnitude as log prob
                             log_prob = -0.5 * torch.sum(action_flat**2).item()
                             print(f"[RL DEBUG] Using approximated log_prob in inference mode: {log_prob}")
@@ -304,7 +307,7 @@ class UnityVRRLInterface(UnityVRInterface):
                             
                             # Convert action back to latent space for log prob computation
                             # This is an approximation - in practice you might want to store the original latent sample
-                            action_flat = torch.from_numpy(raw_action).float().cuda()
+                            action_flat = raw_action
                             
                             # Compute log probability under Gaussian distribution
                             # log_prob = -0.5 * ((action - mu)^2 / std^2 + log(2*pi*std^2))
@@ -327,16 +330,10 @@ class UnityVRRLInterface(UnityVRInterface):
                 return super()._process_state_and_get_action(state_data)
             
             # Post-process action
-            print(f"[RL DEBUG] Before post_process - raw_action shape: {raw_action.shape}")
-            print(f"[RL DEBUG] Before post_process - raw_action values: {raw_action}")
             action = self.post_process(raw_action)
-            print(f"[RL DEBUG] After post_process - action shape: {action.shape}")
-            print(f"[RL DEBUG] After post_process - action values: {action}")
             
             # Convert to list for JSON serialization
             action_list = action.tolist()
-            print(f"[RL DEBUG] Final action_list length: {len(action_list)}")
-            print(f"[RL DEBUG] Final action_list: {action_list}")
             
             return {
                 'action': action_list,
