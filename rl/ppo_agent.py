@@ -129,23 +129,46 @@ class PPOMemory:
         """Get batch data for given indices"""
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
+        print(f"[PPOMemory] get_batch_data called with {len(indices)} indices")
+        print(f"[PPOMemory] Memory sizes - states: {len(self.states)}, images: {len(self.images)}, actions: {len(self.actions)}")
+        
         states = torch.tensor(np.array([self.states[i] for i in indices]), dtype=torch.float32).to(device)
+        print(f"[PPOMemory] Loaded states with shape: {states.shape}")
+        
         images = torch.stack([self.images[i] for i in indices]).to(device)
+        print(f"[PPOMemory] Loaded images with shape: {images.shape}")
         
         # Check if actions are already PyTorch tensors
         if isinstance(self.actions[0], torch.Tensor):
             # Stack tensors directly instead of converting to numpy first
+            print(f"[PPOMemory] Actions are PyTorch tensors with shape: {self.actions[0].shape}")
             actions = torch.stack([self.actions[i].to(device) for i in indices])
         else:
             # Original behavior for non-tensor actions
+            print(f"[PPOMemory] Actions are not PyTorch tensors, converting from type: {type(self.actions[0])}")
             actions = torch.tensor(np.array([self.actions[i] for i in indices]), dtype=torch.float32).to(device)
-            
+        
+        print(f"[PPOMemory] Final actions shape: {actions.shape}")
+        
         old_log_probs = torch.tensor(np.array([self.action_log_probs[i] for i in indices]), dtype=torch.float32).to(device)
+        print(f"[PPOMemory] Loaded old_log_probs with shape: {old_log_probs.shape}")
+        
         returns = torch.tensor(np.array([self.returns[i] for i in indices]), dtype=torch.float32).to(device)
+        print(f"[PPOMemory] Loaded returns with shape: {returns.shape}")
+        
         advantages = torch.tensor(np.array([self.advantages[i] for i in indices]), dtype=torch.float32).to(device)
+        print(f"[PPOMemory] Loaded advantages with shape: {advantages.shape}")
         
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        print(f"[PPOMemory] Returning batch data with shapes:")
+        print(f"  - states: {states.shape}")
+        print(f"  - images: {images.shape}")
+        print(f"  - actions: {actions.shape}")
+        print(f"  - old_log_probs: {old_log_probs.shape}")
+        print(f"  - returns: {returns.shape}")
+        print(f"  - advantages: {advantages.shape}")
         
         return states, images, actions, old_log_probs, returns, advantages
     
@@ -264,44 +287,88 @@ class PPOACTPolicy(nn.Module):
                                         std=[0.229, 0.224, 0.225])
         image = normalize(image)
         
-        # Forward pass through policy network
+        # Debug print for input tensor shapes
+        print(f"[evaluate_actions] Input shapes - qpos: {qpos.shape}, image: {image.shape}")
         if actions is not None:
-            # Training mode - we need to compute log probs
-            # Handle both 2D [batch_size, action_dim] and 3D [batch_size, num_queries, action_dim] tensors
+            print(f"[evaluate_actions] Actions shape: {actions.shape}")
+        if is_pad is not None:
+            print(f"[evaluate_actions] is_pad shape: {is_pad.shape}")
+        
+        # Check if actions is provided (training mode)
+        if actions is not None:
+            # Handle 2D actions (batch_size, action_dim)
             if len(actions.shape) == 2:
-                # Actions are 2D [batch_size, action_dim], need to reshape to 3D
                 batch_size, action_dim = actions.shape
+                model_batch_size = qpos.shape[0]
                 num_queries = self.policy.model.num_queries
+                
+                print(f"[evaluate_actions] 2D actions detected - shape: {actions.shape}, model batch size: {model_batch_size}, num_queries: {num_queries}")
+                
+                # Check if batch_size matches model's expected batch size
+                if batch_size != model_batch_size:
+                    print(f"[evaluate_actions] WARNING: Batch size mismatch - actions: {batch_size}, model input: {model_batch_size}")
+                    # Adjust actions tensor to match model's batch size
+                    if batch_size < model_batch_size:
+                        # Pad by repeating the last action
+                        pad_size = model_batch_size - batch_size
+                        padding = actions[-1:].repeat(pad_size, 1)
+                        actions = torch.cat([actions, padding], dim=0)
+                        print(f"[evaluate_actions] After padding: actions shape: {actions.shape}")
+                    else:
+                        # Truncate to match model's batch size
+                        actions = actions[:model_batch_size]
+                        print(f"[evaluate_actions] After truncating: actions shape: {actions.shape}")
+                
                 # Reshape to [batch_size, num_queries, action_dim] by repeating the action
                 actions = actions.unsqueeze(1).repeat(1, num_queries, 1)
+                print(f"[evaluate_actions] After reshaping to 3D: actions shape: {actions.shape}")
             else:
                 # Actions are already 3D, slice to correct number of queries
                 actions = actions[:, :self.policy.model.num_queries]
             
             actions = actions.float()
+            print(f"[evaluate_actions] Actions after float conversion: shape: {actions.shape}")
             
             if is_pad is None:
                 is_pad = torch.zeros_like(actions[:, :, 0], dtype=torch.bool)
+                print(f"[evaluate_actions] Created default is_pad with shape: {is_pad.shape}")
             else:
+                print(f"[evaluate_actions] Processing provided is_pad with shape: {is_pad.shape}")
                 if len(is_pad.shape) == 2:
                     # is_pad is 2D, slice appropriately
+                    original_shape = is_pad.shape
                     is_pad = is_pad[:, :self.policy.model.num_queries]
+                    print(f"[evaluate_actions] Sliced is_pad from {original_shape} to {is_pad.shape}")
                 else:
                     # is_pad might be 1D, expand it
+                    original_shape = is_pad.shape
                     is_pad = is_pad.unsqueeze(1).repeat(1, self.policy.model.num_queries)
+                    print(f"[evaluate_actions] Expanded is_pad from {original_shape} to {is_pad.shape}")
             
+            print(f"[evaluate_actions] Before model call - qpos: {qpos.shape}, image: {image.shape}, actions: {actions.shape}, is_pad: {is_pad.shape}")
             a_hat, is_pad_hat, (mu, logvar) = self.policy.model(qpos, image, env_state, actions, is_pad)
+            print(f"[evaluate_actions] After model call - a_hat: {a_hat.shape}, mu: {mu.shape}, logvar: {logvar.shape}")
             
             # Check if mu and logvar are valid
             if mu is None or logvar is None:
                 raise RuntimeError("Model forward pass returned None for mu or logvar in training mode")
             
             # Compute log probability of actions using the latent Gaussian distribution
+            print(f"[evaluate_actions] Computing log probability with mu: {mu.shape}, logvar: {logvar.shape}")
             std = torch.exp(0.5 * logvar)
             
             # For proper PPO, we need to compute the log probability of the actual actions
             # under the current policy's distribution. Since ACT uses a latent space,
             # we approximate this by computing the log prob in the latent space
+            
+            # Create normal distribution
+            print(f"[evaluate_actions] Creating distribution with mu: {mu.shape}, std: {std.shape}")
+            dist = torch.distributions.Normal(mu, std)
+            
+            # Compute log probability
+            print(f"[evaluate_actions] Computing log_prob with actions: {actions.shape}")
+            action_log_probs = dist.log_prob(actions).sum(dim=-1)
+            print(f"[evaluate_actions] Log probs shape: {action_log_probs.shape}")
             
             # Compute log probability under multivariate Gaussian
             # log_prob = -0.5 * ((x - mu)^2 / std^2 + log(2*pi*std^2))
@@ -319,11 +386,16 @@ class PPOACTPolicy(nn.Module):
             # Get value estimate
             # We'll use the latent representation from the model for value estimation
             # This is a simplification; in practice you might want a separate value network
+            print(f"[evaluate_actions] Computing value with mu: {mu.shape}")
             value = self.value_net(mu).squeeze(-1)
+            print(f"[evaluate_actions] Value shape: {value.shape}")
             
             # Compute entropy (approximation for continuous actions)
+            print(f"[evaluate_actions] Computing entropy with logvar: {logvar.shape}")
             entropy = 0.5 * logvar.sum(dim=-1).mean()
+            print(f"[evaluate_actions] Entropy: {entropy}")
             
+            print(f"[evaluate_actions] Returning - action_log_probs: {action_log_probs.shape}, value: {value.shape}, mu: {mu.shape}, logvar: {logvar.shape}")
             return action_log_probs, value, entropy, mu, logvar
         else:
             # Inference mode
@@ -345,11 +417,18 @@ class PPOACTPolicy(nn.Module):
                     mu = latent_sample
                     print(f"[PPO DEBUG] Created inference latent with shape: {mu.shape}")
                 
+                # Compute value
+                print(f"[evaluate_actions] Computing value with mu: {mu.shape}")
                 value = self.value_net(mu).squeeze(-1)
+                print(f"[evaluate_actions] Value shape: {value.shape}")
                 return a_hat, value
                 
             except Exception as e:
                 print(f"[PPO ERROR] Error in model forward pass: {e}")
+                # Create normal distribution
+                print(f"[evaluate_actions] Creating distribution with mu: {mu.shape}, std: {std.shape}")
+                dist = torch.distributions.Normal(mu, std)
+                
                 # Create fallback values
                 batch_size = qpos.shape[0]
                 action_dim = getattr(self.policy.model, 'state_dim', 32)
@@ -430,17 +509,28 @@ class PPOACTPolicy(nn.Module):
                 # Get batch data
                 states, images, actions, old_log_probs, returns, advantages = memory.get_batch_data(batch_indices)
                 
-                # Debug print for image tensor shape before processing
-                print(f"[PPO Update] Image tensor shape: {images.shape}, dtype: {images.dtype}")
+                # Debug print for all tensor shapes before processing
+                print(f"[PPO Update] Batch data shapes:")
+                print(f"  - states: {states.shape}")
+                print(f"  - images: {images.shape}, dtype: {images.dtype}")
+                print(f"  - actions: {actions.shape}")
+                print(f"  - old_log_probs: {old_log_probs.shape}")
+                print(f"  - returns: {returns.shape}")
+                print(f"  - advantages: {advantages.shape}")
+                print(f"  - batch_indices length: {len(batch_indices)}")
                 
                 # Evaluate actions
+                print(f"[PPO Update] Calling evaluate_actions with states: {states.shape}, images: {images.shape}, actions: {actions.shape}")
                 action_log_probs, values, entropy, mu, logvar = self.evaluate_actions(states, images, actions)
+                print(f"[PPO Update] After evaluate_actions - action_log_probs: {action_log_probs.shape}, values: {values.shape}")
                 
                 # Compute KL divergence to pretrained policy
                 kl_div = self.get_kl_divergence(states, images, actions)
                 
                 # Compute ratio and clipped ratio
+                print(f"[PPO Update] Computing ratio with action_log_probs: {action_log_probs.shape}, old_log_probs: {old_log_probs.shape}")
                 ratio = torch.exp(action_log_probs - old_log_probs)
+                print(f"[PPO Update] Ratio shape: {ratio.shape}")
                 clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
                 
                 # Compute policy loss
