@@ -296,8 +296,9 @@ class PPOACTPolicy(nn.Module):
         
         # Check if actions is provided (training mode)
         if actions is not None:
-            # Handle 2D actions (batch_size, action_dim)
+            print(f"[evaluate_actions] Actions shape: {actions.shape}")
             if len(actions.shape) == 2:
+                # Handle 2D actions (batch_size, action_dim)
                 batch_size, action_dim = actions.shape
                 model_batch_size = qpos.shape[0]
                 num_queries = self.policy.model.num_queries
@@ -322,9 +323,42 @@ class PPOACTPolicy(nn.Module):
                 # Reshape to [batch_size, num_queries, action_dim] by repeating the action
                 actions = actions.unsqueeze(1).repeat(1, num_queries, 1)
                 print(f"[evaluate_actions] After reshaping to 3D: actions shape: {actions.shape}")
-            else:
-                # Actions are already 3D, slice to correct number of queries
-                actions = actions[:, :self.policy.model.num_queries]
+            elif len(actions.shape) == 3:
+                # Actions are already 3D [batch_size, num_queries, action_dim]
+                # Check if batch_size matches model's expected batch size
+                batch_size, curr_queries, action_dim = actions.shape
+                model_batch_size = qpos.shape[0]
+                num_queries = self.policy.model.num_queries
+                
+                print(f"[evaluate_actions] 3D actions detected - shape: {actions.shape}, model batch size: {model_batch_size}, num_queries: {num_queries}")
+                
+                # Handle batch size mismatch
+                if batch_size != model_batch_size:
+                    print(f"[evaluate_actions] WARNING: Batch size mismatch - actions: {batch_size}, model input: {model_batch_size}")
+                    if batch_size < model_batch_size:
+                        # Pad by repeating the last batch
+                        pad_size = model_batch_size - batch_size
+                        padding = actions[-1:].repeat(pad_size, 1, 1)
+                        actions = torch.cat([actions, padding], dim=0)
+                        print(f"[evaluate_actions] After padding: actions shape: {actions.shape}")
+                    else:
+                        # Truncate to match model's batch size
+                        actions = actions[:model_batch_size]
+                        print(f"[evaluate_actions] After truncating: actions shape: {actions.shape}")
+                
+                # Handle query dimension mismatch
+                if curr_queries != num_queries:
+                    print(f"[evaluate_actions] WARNING: Query dimension mismatch - actions: {curr_queries}, model: {num_queries}")
+                    if curr_queries < num_queries:
+                        # Pad by repeating the last query
+                        pad_size = num_queries - curr_queries
+                        padding = actions[:, -1:].repeat(1, pad_size, 1)
+                        actions = torch.cat([actions, padding], dim=1)
+                        print(f"[evaluate_actions] After padding queries: actions shape: {actions.shape}")
+                    else:
+                        # Truncate to match model's num_queries
+                        actions = actions[:, :num_queries]
+                        print(f"[evaluate_actions] After truncating queries: actions shape: {actions.shape}")
             
             actions = actions.float()
             print(f"[evaluate_actions] Actions after float conversion: shape: {actions.shape}")
@@ -365,18 +399,35 @@ class PPOACTPolicy(nn.Module):
             print(f"[evaluate_actions] Creating distribution with mu: {mu.shape}, std: {std.shape}")
             dist = torch.distributions.Normal(mu, std)
             
-            # Compute log probability
+            # Compute log probability for all queries and average them
             print(f"[evaluate_actions] Computing log_prob with actions: {actions.shape}")
-            action_log_probs = dist.log_prob(actions).sum(dim=-1)
-            print(f"[evaluate_actions] Log probs shape: {action_log_probs.shape}")
             
-            # Compute log probability under multivariate Gaussian
-            # log_prob = -0.5 * ((x - mu)^2 / std^2 + log(2*pi*std^2))
-            log_prob_per_dim = -0.5 * (((a_hat - mu)**2 / (std**2 + 1e-8)) + 
-                                    torch.log(2 * np.pi * std**2 + 1e-8))
+            # The issue is that actions is [batch_size, num_queries, action_dim] but
+            # distribution is [batch_size, action_dim]
+            # We'll compute log probabilities for each query and average them
             
-            # Sum over latent dimensions, and handle sequence dimension if present
-            action_log_probs = log_prob_per_dim.sum(dim=-1)
+            # Create a list to store log probabilities for each query
+            query_log_probs = []
+            
+            # For each query position, compute log probability
+            for q in range(actions.shape[1]):
+                query_actions = actions[:, q, :]
+                query_a_hat = a_hat[:, q, :]
+                print(f"[evaluate_actions] Computing log_prob for query {q}, actions shape: {query_actions.shape}")
+                
+                # Compute log probability using the Gaussian formula
+                log_prob_per_dim = -0.5 * (((query_a_hat - mu)**2 / (std**2 + 1e-8)) + 
+                                          torch.log(2 * np.pi * std**2 + 1e-8))
+                query_log_prob = log_prob_per_dim.sum(dim=-1)
+                query_log_probs.append(query_log_prob)
+            
+            # Stack and average log probabilities across queries
+            stacked_log_probs = torch.stack(query_log_probs, dim=1)  # [batch_size, num_queries]
+            print(f"[evaluate_actions] Stacked log probs shape: {stacked_log_probs.shape}")
+            
+            # Average log probabilities across queries
+            action_log_probs = stacked_log_probs.mean(dim=1)  # [batch_size]
+            print(f"[evaluate_actions] Final log probs shape: {action_log_probs.shape}")
             
             # Check if we have a sequence dimension to mean over
             if len(action_log_probs.shape) > 1 and action_log_probs.shape[-1] > 1:

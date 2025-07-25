@@ -434,8 +434,9 @@ class UnityVRRLInterface(UnityVRInterface):
                         
                     self.episode_log_probs.append(log_prob)
                     
-                    # Store action for episode - convert to CPU tensor for storage
-                    self.episode_actions.append(raw_action.detach().cpu())
+                    # Store full action chunk for episode - convert to CPU tensor for storage
+                    # This ensures we keep all query actions for proper PPO training
+                    self.episode_actions.append(all_actions.detach().cpu())
                     
                 except Exception as e:
                     print(f"[RL ERROR] Error in PPO policy evaluation: {e}")
