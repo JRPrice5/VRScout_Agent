@@ -246,10 +246,22 @@ class PPOACTPolicy(nn.Module):
         # Get features from policy network
         env_state = None
         
+        # Handle image tensor dimensions for conv2d compatibility
+        # Expected: [batch_size, num_cameras, channels, height, width]
+        # If we have 5D tensor, reshape for conv2d processing
+        if len(image.shape) == 5:
+            batch_size, num_cameras, channels, height, width = image.shape
+            # Reshape to [batch_size * num_cameras, channels, height, width] for conv2d
+            image = image.view(batch_size * num_cameras, channels, height, width)
+        
         # Normalize image
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                         std=[0.229, 0.224, 0.225])
         image = normalize(image)
+        
+        # If we reshaped above, reshape back to 5D for ACT model
+        if len(image.shape) == 4 and 'batch_size' in locals() and 'num_cameras' in locals():
+            image = image.view(batch_size, num_cameras, channels, height, width)
         
         # Forward pass through policy network
         if actions is not None:
@@ -355,10 +367,22 @@ class PPOACTPolicy(nn.Module):
         """
         env_state = None
         
+        # Handle image tensor dimensions for conv2d compatibility
+        # Expected: [batch_size, num_cameras, channels, height, width]
+        # If we have 5D tensor, reshape for conv2d processing
+        if len(image.shape) == 5:
+            batch_size, num_cameras, channels, height, width = image.shape
+            # Reshape to [batch_size * num_cameras, channels, height, width] for conv2d
+            image = image.view(batch_size * num_cameras, channels, height, width)
+        
         # Normalize image
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                         std=[0.229, 0.224, 0.225])
         image = normalize(image)
+        
+        # If we reshaped above, reshape back to 5D for ACT model
+        if len(image.shape) == 4 and 'batch_size' in locals() and 'num_cameras' in locals():
+            image = image.view(batch_size, num_cameras, channels, height, width)
         
         # Forward pass through current policy
         _, _, (mu_current, logvar_current) = self.policy.model(qpos, image, env_state, actions, is_pad)
