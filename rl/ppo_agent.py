@@ -428,6 +428,9 @@ class PPOACTPolicy(nn.Module):
                 # Get batch data
                 states, images, actions, old_log_probs, returns, advantages = memory.get_batch_data(batch_indices)
                 
+                # Debug print for image tensor shape before processing
+                print(f"[PPO Update] Image tensor shape: {images.shape}, dtype: {images.dtype}")
+                
                 # Evaluate actions
                 action_log_probs, values, entropy, mu, logvar = self.evaluate_actions(states, images, actions)
                 
