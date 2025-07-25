@@ -101,6 +101,8 @@ class UnityVRRLInterface(UnityVRInterface):
         # These are needed even if temporal_agg is False, to maintain compatibility with parent class logic
         self.last_actions = None
         self.last_value = None
+        self.last_mu = None
+        self.last_logvar = None
         
         # Initialize temporal aggregation variables if needed (same as parent class)
         if self.temporal_agg:
@@ -246,30 +248,30 @@ class UnityVRRLInterface(UnityVRInterface):
         with torch.no_grad():
             # Extract qpos from state data
             qpos_numpy = np.array(state_data['qpos'], dtype=np.float32)
-            print(f"[RL DEBUG] Input qpos_numpy shape: {qpos_numpy.shape}, dtype: {qpos_numpy.dtype}")
-            print(f"[RL DEBUG] Input qpos values (first 10): {qpos_numpy[:10]}")
+            # print(f"[RL DEBUG] Input qpos_numpy shape: {qpos_numpy.shape}, dtype: {qpos_numpy.dtype}")
+            # print(f"[RL DEBUG] Input qpos values (first 10): {qpos_numpy[:10]}")
             
             # Preprocess qpos
             qpos = self.pre_process(qpos_numpy)
             qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
-            print(f"[RL DEBUG] After preprocessing qpos shape: {qpos.shape}")
+            # print(f"[RL DEBUG] After preprocessing qpos shape: {qpos.shape}")
             
             # Process image data
             curr_image = self._process_image_data(state_data)
             
             # DEBUG: Print tensor shapes and model configuration
-            print(f"[RL DEBUG] qpos shape: {qpos.shape}")
-            print(f"[RL DEBUG] curr_image shape: {curr_image.shape}")
-            print(f"[RL DEBUG] self.camera_names: {self.camera_names}")
-            print(f"[RL DEBUG] model.camera_names: {getattr(self.ppo_policy.policy.model, 'camera_names', 'NOT SET')}")
+            # print(f"[RL DEBUG] qpos shape: {qpos.shape}")
+            # print(f"[RL DEBUG] curr_image shape: {curr_image.shape}")
+            # print(f"[RL DEBUG] self.camera_names: {self.camera_names}")
+            # print(f"[RL DEBUG] model.camera_names: {getattr(self.ppo_policy.policy.model, 'camera_names', 'NOT SET')}")
             
             # CRITICAL FIX: Ensure the PPO policy model has the correct camera_names
             if hasattr(self.ppo_policy.policy.model, 'camera_names'):
                 if self.ppo_policy.policy.model.camera_names != self.camera_names:
-                    print(f"[RL DEBUG] Fixing model camera_names: {self.ppo_policy.policy.model.camera_names} -> {self.camera_names}")
+                    # print(f"[RL DEBUG] Fixing model camera_names: {self.ppo_policy.policy.model.camera_names} -> {self.camera_names}")
                     self.ppo_policy.policy.model.camera_names = self.camera_names
             else:
-                print(f"[RL DEBUG] Setting model camera_names to: {self.camera_names}")
+                # print(f"[RL DEBUG] Setting model camera_names to: {self.camera_names}")
                 self.ppo_policy.policy.model.camera_names = self.camera_names
             
             # Store state and image for episode
@@ -282,27 +284,45 @@ class UnityVRRLInterface(UnityVRInterface):
                 try:
                     # Only query the policy when needed based on query_frequency (same as parent class)
                     time_index = self.timestep % self.query_frequency
+                    mu, logvar = None, None  # Initialize for later use
+                    
                     if time_index == 0:
-                        # Get action from policy
-                        action_tensor, value = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                        print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
-                        print(f"[RL DEBUG] Value: {value}")
+                        # Get action from policy - capture mu and logvar if available
+                        result = self.ppo_policy.evaluate_actions(qpos, curr_image)
+                        if len(result) == 5:  # Training mode returns (action_log_probs, value, entropy, mu, logvar)
+                            action_tensor, value, _, mu, logvar = result
+                        else:  # Inference mode returns (action, value)
+                            action_tensor, value = result
+                        
+                        # print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
+                        # print(f"[RL DEBUG] Value: {value}")
                         
                         all_actions = action_tensor  # Shape: [batch, num_queries, action_dim]
                         self.last_actions = all_actions  # Store for future timesteps
                         self.last_value = value  # Store value for reuse
+                        self.last_mu = mu  # Store mu for reuse
+                        self.last_logvar = logvar  # Store logvar for reuse
                     else:
                         # Use previously computed actions if not querying on this timestep
                         if self.last_actions is None:
                             # First timestep or in case there's no previous action
-                            action_tensor, value = self.ppo_policy.evaluate_actions(qpos, curr_image)
+                            result = self.ppo_policy.evaluate_actions(qpos, curr_image)
+                            if len(result) == 5:  # Training mode
+                                action_tensor, value, _, mu, logvar = result
+                            else:  # Inference mode
+                                action_tensor, value = result
+                            
                             all_actions = action_tensor
                             self.last_actions = all_actions
                             self.last_value = value
+                            self.last_mu = mu
+                            self.last_logvar = logvar
                             time_index = 0
                         else:
                             all_actions = self.last_actions
                             value = self.last_value
+                            mu = self.last_mu
+                            logvar = self.last_logvar
                     
                     # Apply temporal aggregation if enabled (same logic as parent class)
                     if self.temporal_agg:
@@ -387,17 +407,8 @@ class UnityVRRLInterface(UnityVRInterface):
                     self.episode_values.append(value.item())
                     
                     # Compute log probability using the policy's latent distribution
-                    # We need to get the latent distribution parameters (mu, logvar) from the policy
+                    # Use mu and logvar from evaluate_actions call to avoid redundant forward pass
                     with torch.no_grad():
-                        # Get the latent distribution parameters from the policy
-                        env_state = None
-                        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                                       std=[0.229, 0.224, 0.225])
-                        normalized_image = normalize(curr_image)
-                        
-                        # Forward pass to get latent distribution
-                        _, _, (mu, logvar) = self.ppo_policy.policy.model(qpos, normalized_image, env_state)
-                        
                         # In inference mode, mu and logvar are None
                         if mu is None or logvar is None:
                             # For inference mode, we can't compute exact log probabilities
@@ -639,8 +650,9 @@ class UnityVRRLInterface(UnityVRInterface):
                         chunk = client_socket.recv(buffer_size)
                         if not chunk:
                             print("Unity client disconnected")
-                            # Clear memory after client disconnect
+                            # Clear memory after client disconnect and start a new episode
                             self.memory.clear()
+                            self.start_new_episode()
                             break
                         
                         data_buffer += chunk
