@@ -60,6 +60,7 @@ namespace CLOVR.IPCClient
         
         // Episode management
         private bool waitingForEpisodeEnd = false;
+        private bool pendingEpisodeEndConfirmation = false;
         private Coroutine episodeEndCoroutine;
         private Coroutine rewardUpdateCoroutine;
         
@@ -283,10 +284,9 @@ namespace CLOVR.IPCClient
         
         private void ShowEpisodeEndConfirmation()
         {
-            // For now, automatically end episode after timeout
-            // In a full implementation, you might want to show a proper dialog
-            Debug.Log("[OCRRewardTracker] Episode timeout reached. Ending episode...");
-            EndEpisode();
+            // Set pending confirmation state to show confirmation button in GUI
+            Debug.Log("[OCRRewardTracker] Episode timeout reached. Waiting for user confirmation...");
+            pendingEpisodeEndConfirmation = true;
         }
         
         private void EndEpisode()
@@ -295,6 +295,7 @@ namespace CLOVR.IPCClient
             
             episodeActive = false;
             waitingForEpisodeEnd = false;
+            pendingEpisodeEndConfirmation = false;
             
             // Send final rewards to RL server
             SendRewardsToRLServer();
@@ -462,6 +463,31 @@ namespace CLOVR.IPCClient
                 if (episodeActive)
                 {
                     EndEpisode();
+                }
+            }
+            
+            // Show confirmation button only when there's a pending confirmation
+            if (pendingEpisodeEndConfirmation)
+            {
+                GUILayout.Space(10); // Add some spacing
+                GUILayout.Label("Episode timeout reached!", GUI.skin.box);
+                
+                if (GUILayout.Button("Confirm End Episode"))
+                {
+                    EndEpisode();
+                }
+                
+                if (GUILayout.Button("Continue Episode"))
+                {
+                    pendingEpisodeEndConfirmation = false;
+                    // Reset episode end timer state to allow for a fresh timeout period
+                    waitingForEpisodeEnd = false;
+                    if (episodeEndCoroutine != null)
+                    {
+                        StopCoroutine(episodeEndCoroutine);
+                        episodeEndCoroutine = null;
+                    }
+                    Debug.Log("[OCRRewardTracker] Episode continuation confirmed by user. Timer reset.");
                 }
             }
             
