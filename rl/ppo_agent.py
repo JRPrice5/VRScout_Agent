@@ -416,33 +416,79 @@ class PPOACTPolicy(nn.Module):
             # distribution is [batch_size, action_dim]
             # We'll compute log probabilities for each query and average them
             
+            # Normalize actions to prevent extreme values
+            # Clip actions to reasonable bounds to prevent numerical instabilities
+            actions_normalized = torch.clamp(actions, min=-10.0, max=10.0)
+            a_hat_normalized = torch.clamp(a_hat, min=-10.0, max=10.0)
+            print(f"[evaluate_actions] Actions normalized and clamped")
+            
             # Create a list to store log probabilities for each query
             query_log_probs = []
             
             # For each query position, compute log probability
-            for q in range(actions.shape[1]):
-                query_actions = actions[:, q, :]
-                query_a_hat = a_hat[:, q, :]
+            for q in range(actions_normalized.shape[1]):
+                query_actions = actions_normalized[:, q, :]
+                query_a_hat = a_hat_normalized[:, q, :]
                 print(f"[evaluate_actions] Computing log_prob for query {q}, actions shape: {query_actions.shape}")
                 
-                # Compute log probability using the Gaussian formula
-                log_prob_per_dim = -0.5 * (((query_a_hat - mu)**2 / (std**2 + 1e-8)) + 
-                                          torch.log(2 * np.pi * std**2 + 1e-8))
+                # Compute log probability using the Gaussian formula with numerical stability
+                # Clamp std to prevent division by zero or extremely small values
+                std_clamped = torch.clamp(std, min=1e-6, max=100.0)
+                
+                # Compute log probability with numerical stability
+                diff_squared = (query_a_hat - mu)**2
+                variance = std_clamped**2
+                
+                # Prevent extreme values in the exponential term
+                exp_term = torch.clamp(diff_squared / variance, max=50.0)  # Prevent overflow
+                log_term = torch.clamp(torch.log(2 * np.pi * variance), min=-50.0, max=50.0)
+                
+                log_prob_per_dim = -0.5 * (exp_term + log_term)
+                
+                # Clip individual log probabilities to prevent extreme values
+                log_prob_per_dim = torch.clamp(log_prob_per_dim, min=-50.0, max=50.0)
+                
                 query_log_prob = log_prob_per_dim.sum(dim=-1)
+                
+                # Check for NaN or Inf values and handle them
+                if torch.isnan(query_log_prob).any() or torch.isinf(query_log_prob).any():
+                    print(f"[WARNING] NaN or Inf detected in query {q} log probabilities!")
+                    print(f"[WARNING] query_actions range: [{query_actions.min():.4f}, {query_actions.max():.4f}]")
+                    print(f"[WARNING] mu range: [{mu.min():.4f}, {mu.max():.4f}]")
+                    print(f"[WARNING] std range: [{std.min():.4f}, {std.max():.4f}]")
+                    # Replace NaN/Inf with a reasonable default value
+                    query_log_prob = torch.where(torch.isnan(query_log_prob) | torch.isinf(query_log_prob), 
+                                                torch.tensor(-10.0, device=query_log_prob.device), 
+                                                query_log_prob)
+                
+                # Final clipping of query log probabilities
+                query_log_prob = torch.clamp(query_log_prob, min=-50.0, max=10.0)
                 query_log_probs.append(query_log_prob)
             
             # Stack and average log probabilities across queries
             stacked_log_probs = torch.stack(query_log_probs, dim=1)  # [batch_size, num_queries]
             print(f"[evaluate_actions] Stacked log probs shape: {stacked_log_probs.shape}")
             
+            # Check for NaN/Inf in stacked log probs
+            if torch.isnan(stacked_log_probs).any() or torch.isinf(stacked_log_probs).any():
+                print(f"[WARNING] NaN or Inf detected in stacked log probabilities!")
+                stacked_log_probs = torch.where(torch.isnan(stacked_log_probs) | torch.isinf(stacked_log_probs), 
+                                               torch.tensor(-10.0, device=stacked_log_probs.device), 
+                                               stacked_log_probs)
+            
             # Average log probabilities across queries
             action_log_probs = stacked_log_probs.mean(dim=1)  # [batch_size]
-            print(f"[evaluate_actions] Final log probs shape: {action_log_probs.shape}")
             
-            # Check if we have a sequence dimension to mean over
-            if len(action_log_probs.shape) > 1 and action_log_probs.shape[-1] > 1:
-                action_log_probs = action_log_probs.mean(dim=-1)
-            # Otherwise, we already have the correct shape
+            # Final safety check and clipping for action log probabilities
+            if torch.isnan(action_log_probs).any() or torch.isinf(action_log_probs).any():
+                print(f"[WARNING] NaN or Inf detected in final action log probabilities!")
+                action_log_probs = torch.where(torch.isnan(action_log_probs) | torch.isinf(action_log_probs), 
+                                              torch.tensor(-10.0, device=action_log_probs.device), 
+                                              action_log_probs)
+            
+            # Clip final log probabilities to prevent extreme values
+            action_log_probs = torch.clamp(action_log_probs, min=-50.0, max=10.0)
+            print(f"[evaluate_actions] Final log probs shape: {action_log_probs.shape}, range: [{action_log_probs.min():.4f}, {action_log_probs.max():.4f}]")
             
             # Get value estimate
             # We'll use the latent representation from the model for value estimation
@@ -612,18 +658,116 @@ class PPOACTPolicy(nn.Module):
                 
                 # Compute ratio and clipped ratio
                 print(f"[PPO Update] Computing ratio with action_log_probs: {action_log_probs.shape}, old_log_probs: {old_log_probs.shape}")
-                ratio = torch.exp(action_log_probs - old_log_probs)
-                print(f"[PPO Update] Ratio shape: {ratio.shape}")
+                
+                # Add numerical stability checks for log probabilities
+                if torch.isnan(action_log_probs).any() or torch.isinf(action_log_probs).any():
+                    print(f"[WARNING] NaN or Inf detected in action_log_probs!")
+                    action_log_probs = torch.where(torch.isnan(action_log_probs) | torch.isinf(action_log_probs), 
+                                                  torch.tensor(-10.0, device=action_log_probs.device), 
+                                                  action_log_probs)
+                
+                if torch.isnan(old_log_probs).any() or torch.isinf(old_log_probs).any():
+                    print(f"[WARNING] NaN or Inf detected in old_log_probs!")
+                    old_log_probs = torch.where(torch.isnan(old_log_probs) | torch.isinf(old_log_probs), 
+                                               torch.tensor(-10.0, device=old_log_probs.device), 
+                                               old_log_probs)
+                
+                # Clip log probability differences to prevent extreme ratios
+                log_prob_diff = action_log_probs - old_log_probs
+                log_prob_diff = torch.clamp(log_prob_diff, min=-20.0, max=20.0)  # Prevents extreme ratios
+                
+                ratio = torch.exp(log_prob_diff)
+                
+                # Additional safety check for ratio values
+                if torch.isnan(ratio).any() or torch.isinf(ratio).any():
+                    print(f"[WARNING] NaN or Inf detected in ratio computation!")
+                    ratio = torch.where(torch.isnan(ratio) | torch.isinf(ratio), 
+                                       torch.tensor(1.0, device=ratio.device), 
+                                       ratio)
+                
+                # Clip ratio to reasonable bounds to prevent extreme policy updates
+                ratio = torch.clamp(ratio, min=1e-8, max=1e8)
+                
+                print(f"[PPO Update] Ratio shape: {ratio.shape}, range: [{ratio.min():.6f}, {ratio.max():.6f}]")
                 clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
                 
-                # Compute policy loss
-                policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
+                # Check advantages for numerical stability
+                if torch.isnan(advantages).any() or torch.isinf(advantages).any():
+                    print(f"[WARNING] NaN or Inf detected in advantages!")
+                    advantages = torch.where(torch.isnan(advantages) | torch.isinf(advantages), 
+                                           torch.tensor(0.0, device=advantages.device), 
+                                           advantages)
                 
-                # Compute value loss
+                # Compute policy loss with additional stability checks
+                policy_obj1 = ratio * advantages
+                policy_obj2 = clipped_ratio * advantages
+                
+                # Check for NaN/Inf in policy objectives
+                if torch.isnan(policy_obj1).any() or torch.isinf(policy_obj1).any():
+                    print(f"[WARNING] NaN or Inf detected in policy_obj1!")
+                    policy_obj1 = torch.where(torch.isnan(policy_obj1) | torch.isinf(policy_obj1), 
+                                             torch.tensor(0.0, device=policy_obj1.device), 
+                                             policy_obj1)
+                
+                if torch.isnan(policy_obj2).any() or torch.isinf(policy_obj2).any():
+                    print(f"[WARNING] NaN or Inf detected in policy_obj2!")
+                    policy_obj2 = torch.where(torch.isnan(policy_obj2) | torch.isinf(policy_obj2), 
+                                             torch.tensor(0.0, device=policy_obj2.device), 
+                                             policy_obj2)
+                
+                policy_loss = -torch.min(policy_obj1, policy_obj2).mean()
+                
+                # Final check and clipping for policy loss
+                if torch.isnan(policy_loss) or torch.isinf(policy_loss):
+                    print(f"[WARNING] NaN or Inf detected in policy_loss! Setting to 0.0")
+                    policy_loss = torch.tensor(0.0, device=policy_loss.device, requires_grad=True)
+                else:
+                    # Clip policy loss to prevent extreme values
+                    policy_loss = torch.clamp(policy_loss, min=-1000.0, max=1000.0)
+                
+                print(f"[PPO Update] Policy loss: {policy_loss.item():.6f}")
+                
+                # Compute value loss with numerical stability
+                if torch.isnan(values).any() or torch.isinf(values).any():
+                    print(f"[WARNING] NaN or Inf detected in values!")
+                    values = torch.where(torch.isnan(values) | torch.isinf(values), 
+                                        torch.tensor(0.0, device=values.device), 
+                                        values)
+                
+                if torch.isnan(returns).any() or torch.isinf(returns).any():
+                    print(f"[WARNING] NaN or Inf detected in returns!")
+                    returns = torch.where(torch.isnan(returns) | torch.isinf(returns), 
+                                         torch.tensor(0.0, device=returns.device), 
+                                         returns)
+                
                 value_loss = F.mse_loss(values, returns)
                 
-                # Compute total loss
+                # Clip value loss to prevent extreme values
+                if torch.isnan(value_loss) or torch.isinf(value_loss):
+                    print(f"[WARNING] NaN or Inf detected in value_loss! Setting to 0.0")
+                    value_loss = torch.tensor(0.0, device=value_loss.device, requires_grad=True)
+                else:
+                    value_loss = torch.clamp(value_loss, min=0.0, max=1000.0)
+                
+                print(f"[PPO Update] Value loss: {value_loss.item():.6f}")
+                
+                # Compute total loss with numerical stability
+                # Check entropy for numerical stability
+                if torch.isnan(entropy) or torch.isinf(entropy):
+                    print(f"[WARNING] NaN or Inf detected in entropy! Setting to 0.0")
+                    entropy = torch.tensor(0.0, device=entropy.device, requires_grad=True)
+                
+                # Check KL divergence for numerical stability
+                if torch.isnan(kl_div) or torch.isinf(kl_div):
+                    print(f"[WARNING] NaN or Inf detected in KL divergence! Setting to 0.0")
+                    kl_div = torch.tensor(0.0, device=kl_div.device, requires_grad=True)
+                
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy + self.kl_weight * kl_div
+                
+                # Final check for total loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"[WARNING] NaN or Inf detected in total loss! Setting to policy_loss only")
+                    loss = policy_loss  # Fall back to just policy loss if total loss is unstable
                 
                 # Update networks
                 optimizer.zero_grad()
