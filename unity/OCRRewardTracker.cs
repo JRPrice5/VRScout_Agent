@@ -48,7 +48,7 @@ namespace CLOVR.IPCClient
         
         // Score and reward tracking
         private int currentScore = 0;
-        private int lastValidScore = 0;
+        private int lastValidScore = -1;
         private float lastScoreTime = 0f;
         private bool episodeActive = false;
         private int episodeStartTimestep = 0;
@@ -233,7 +233,7 @@ namespace CLOVR.IPCClient
             {
                 currentScore = newScore;
                 
-                if (newScore > 0)
+                if (newScore > -1)
                 {
                     lastValidScore = newScore;
                     lastScoreTime = (float)(DateTime.Now - startTime).TotalSeconds;
@@ -254,16 +254,20 @@ namespace CLOVR.IPCClient
                 }
                 else if (episodeActive)
                 {
-                    // Score is 0 or invalid, start episode end timer if not already waiting
-                    if (!waitingForEpisodeEnd)
+                    // Handle score of -1 (OCR failure)
+                    if (newScore == -1)
                     {
-                        waitingForEpisodeEnd = true;
-                        needToStartEndTimer = true;
-                        Debug.Log($"[OCRRewardTracker] Will start episode end timer on main thread due to score: {newScore}");
-                    }
-                    else
-                    {
-                        Debug.Log($"[OCRRewardTracker] Score {newScore} received but already waiting for episode end");
+                        // OCR failed, start episode end timer if not already waiting
+                        if (!waitingForEpisodeEnd)
+                        {
+                            waitingForEpisodeEnd = true;
+                            needToStartEndTimer = true;
+                            Debug.Log($"[OCRRewardTracker] Will start episode end timer on main thread due to OCR failure (score: -1)");
+                        }
+                        else
+                        {
+                            Debug.Log($"[OCRRewardTracker] OCR failure (score: -1) received but already waiting for episode end");
+                        }
                     }
                 }
                 else
@@ -383,7 +387,7 @@ namespace CLOVR.IPCClient
             lock (scoreLock)
             {
                 // If no valid score received yet, return neutral reward
-                if (lastValidScore == 0)
+                if (lastValidScore == -1)
                 {
                     return neutralStepReward;
                 }
@@ -397,9 +401,15 @@ namespace CLOVR.IPCClient
                     // Score is positive, give positive reward
                     return positiveStepReward;
                 }
+                else if (currentScore == -1)
+                {
+                    // Score is -1 (OCR failed), return neutral reward
+                    // This avoids penalizing the agent for OCR failures
+                    return neutralStepReward;
+                }
                 else
                 {
-                    // Score is 0 or invalid, give negative reward
+                    // Score is 0, give negative reward
                     return negativeStepReward;
                 }
             }

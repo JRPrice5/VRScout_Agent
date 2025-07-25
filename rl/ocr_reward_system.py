@@ -263,10 +263,10 @@ class OCRRewardSystem:
             text: Raw OCR text
             
         Returns:
-            int: Extracted score or 0 if no valid score found
+            int: Extracted score or -1 if no valid score found
         """
         if not text or not text.strip():
-            return 0
+            return -1
             
         # Clean the text
         text = text.strip().replace('\n', ' ').replace('\r', ' ')
@@ -279,17 +279,17 @@ class OCRRewardSystem:
             scores = [int(num) for num in numbers]
             return max(scores)
         
-        return 0
+        return -1
         
     def capture_and_process_score(self):
         """
         Capture screen region and extract score using OCR.
         
         Returns:
-            int: Detected score or 0 if detection failed
+            int: Detected score or -1 if detection failed
         """
         if not self.screen_region:
-            return 0
+            return -1
             
         try:
             with mss.mss() as sct:
@@ -322,7 +322,7 @@ class OCRRewardSystem:
                 
         except Exception as e:
             print(f"Error in OCR processing: {e}")
-            return 0
+            return -1
             
     def send_score_to_unity(self, score):
         """
