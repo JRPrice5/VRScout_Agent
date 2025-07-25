@@ -90,6 +90,7 @@ class PPOMemory:
         
         last_advantage = 0
         last_return = 0
+        next_return = 0
         
         # Process episodes in reverse order
         for t in reversed(range(len(rewards))):
