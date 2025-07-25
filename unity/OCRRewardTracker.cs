@@ -67,11 +67,17 @@ namespace CLOVR.IPCClient
         private readonly object scoreLock = new object();
         private readonly object rewardLock = new object();
         
+        // Timing for thread-safe operations
+        private DateTime startTime;
+        
         // GUI
         private Rect guiRect = new Rect(10, 10, 300, 200);
         
         void Start()
         {
+            // Initialize start time for thread-safe timing
+            startTime = DateTime.Now;
+            
             // Get reference to inference client
             inferenceClient = GetComponent<InferencePoseClient>();
             if (inferenceClient == null)
@@ -206,7 +212,7 @@ namespace CLOVR.IPCClient
                 if (newScore > 0)
                 {
                     lastValidScore = newScore;
-                    lastScoreTime = Time.time;
+                    lastScoreTime = (float)(DateTime.Now - startTime).TotalSeconds;
                     
                     // Start episode if not already active and inference client is connected
                     if (!episodeActive && inferenceClient != null && inferenceClient.IsConnected)
