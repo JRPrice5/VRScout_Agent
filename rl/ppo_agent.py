@@ -509,7 +509,7 @@ class PPOACTPolicy(nn.Module):
         env_state = None
         
         # Debug print for original shape
-        print(f"[evaluate_actions] Original image shape: {image.shape}")
+        print(f"[get_kl_divergence] Original image shape: {image.shape}")
         
         # Handle image tensor dimensions for conv2d compatibility
         # Handle 6D tensor [batch_size, dim1, dim2, channels, height, width]
@@ -519,12 +519,34 @@ class PPOACTPolicy(nn.Module):
             # Squeeze out the redundant dimension (dim2 is usually 1)
             # This converts [batch_size, dim1, 1, channels, height, width] to [batch_size, dim1, channels, height, width]
             image = image.squeeze(2)
-            print(f"[evaluate_actions] Squeezed redundant dim: {image.shape}")
+            print(f"[get_kl_divergence] Squeezed redundant dim: {image.shape}")
+        
+        # Handle actions tensor if provided
+        if actions is not None:
+            print(f"[get_kl_divergence] Actions shape: {actions.shape}")
+            # Check if we have an extra dimension [batch_size, 1, num_queries, action_dim]
+            if len(actions.shape) == 4 and actions.shape[1] == 1:
+                print(f"[get_kl_divergence] Detected extra dimension in actions tensor, squeezing it")
+                actions = actions.squeeze(1)  # Remove the extra dimension
+                print(f"[get_kl_divergence] After squeezing: {actions.shape}")
+            
+            # Handle is_pad tensor if needed
+            if is_pad is None:
+                # Create is_pad with correct shape [batch_size, num_queries]
+                if len(actions.shape) == 3:  # [batch_size, num_queries, action_dim]
+                    is_pad = torch.zeros((actions.shape[0], actions.shape[1]), dtype=torch.bool, device=actions.device)
+                else:  # Handle unexpected shapes gracefully
+                    is_pad = torch.zeros_like(actions[..., 0], dtype=torch.bool)
+                print(f"[get_kl_divergence] Created default is_pad with shape: {is_pad.shape}")
         
         # Normalize image
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                         std=[0.229, 0.224, 0.225])
         image = normalize(image)
+        
+        print(f"[get_kl_divergence] Before model call - qpos: {qpos.shape}, image: {image.shape}")
+        if actions is not None:
+            print(f"[get_kl_divergence] actions: {actions.shape}, is_pad: {is_pad.shape}")
         
         # Forward pass through current policy
         _, _, (mu_current, logvar_current) = self.policy.model(qpos, image, env_state, actions, is_pad)
