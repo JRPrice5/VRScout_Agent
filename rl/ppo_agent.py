@@ -131,7 +131,15 @@ class PPOMemory:
         
         states = torch.tensor(np.array([self.states[i] for i in indices]), dtype=torch.float32).to(device)
         images = torch.stack([self.images[i] for i in indices]).to(device)
-        actions = torch.tensor(np.array([self.actions[i] for i in indices]), dtype=torch.float32).to(device)
+        
+        # Check if actions are already PyTorch tensors
+        if isinstance(self.actions[0], torch.Tensor):
+            # Stack tensors directly instead of converting to numpy first
+            actions = torch.stack([self.actions[i].to(device) for i in indices])
+        else:
+            # Original behavior for non-tensor actions
+            actions = torch.tensor(np.array([self.actions[i] for i in indices]), dtype=torch.float32).to(device)
+            
         old_log_probs = torch.tensor(np.array([self.action_log_probs[i] for i in indices]), dtype=torch.float32).to(device)
         returns = torch.tensor(np.array([self.returns[i] for i in indices]), dtype=torch.float32).to(device)
         advantages = torch.tensor(np.array([self.advantages[i] for i in indices]), dtype=torch.float32).to(device)
