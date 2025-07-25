@@ -297,6 +297,12 @@ class PPOACTPolicy(nn.Module):
         # Check if actions is provided (training mode)
         if actions is not None:
             print(f"[evaluate_actions] Actions shape: {actions.shape}")
+            # Check if we have an extra dimension [batch_size, 1, num_queries, action_dim]
+            if len(actions.shape) == 4 and actions.shape[1] == 1:
+                print(f"[evaluate_actions] Detected extra dimension in actions tensor, squeezing it")
+                actions = actions.squeeze(1)  # Remove the extra dimension
+                print(f"[evaluate_actions] After squeezing: {actions.shape}")
+            
             if len(actions.shape) == 2:
                 # Handle 2D actions (batch_size, action_dim)
                 batch_size, action_dim = actions.shape
@@ -364,7 +370,11 @@ class PPOACTPolicy(nn.Module):
             print(f"[evaluate_actions] Actions after float conversion: shape: {actions.shape}")
             
             if is_pad is None:
-                is_pad = torch.zeros_like(actions[:, :, 0], dtype=torch.bool)
+                # Create is_pad with correct shape [batch_size, num_queries]
+                if len(actions.shape) == 3:  # [batch_size, num_queries, action_dim]
+                    is_pad = torch.zeros((actions.shape[0], actions.shape[1]), dtype=torch.bool, device=actions.device)
+                else:  # Handle unexpected shapes gracefully
+                    is_pad = torch.zeros_like(actions[..., 0], dtype=torch.bool)
                 print(f"[evaluate_actions] Created default is_pad with shape: {is_pad.shape}")
             else:
                 print(f"[evaluate_actions] Processing provided is_pad with shape: {is_pad.shape}")
