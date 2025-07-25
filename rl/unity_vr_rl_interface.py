@@ -476,8 +476,11 @@ class UnityVRRLInterface(UnityVRInterface):
         
         print(f"Received episode data: {len(timesteps)} timesteps, {len(rewards)} rewards")
         
-        # Match rewards to stored transitions
-        self.memory.match_rewards(timesteps, rewards)
+        # Create a lookup dictionary for faster reward matching
+        timestep_to_reward = dict(zip(timesteps, rewards))
+        
+        # Count matches for debugging
+        matches_found = 0
         
         # Store transitions in memory
         for i, (state, image, action, value, log_prob, timestep) in enumerate(
@@ -486,8 +489,9 @@ class UnityVRRLInterface(UnityVRInterface):
             
             # Get reward for this timestep (default to 0 if not provided)
             reward = 0.0
-            if timestep in dict(zip(timesteps, rewards)):
-                reward = dict(zip(timesteps, rewards))[timestep]
+            if timestep in timestep_to_reward:
+                reward = timestep_to_reward[timestep]
+                matches_found += 1
             
             # Determine if this is the last step
             is_done = (i == len(self.episode_states) - 1) and done
@@ -503,6 +507,9 @@ class UnityVRRLInterface(UnityVRInterface):
                 action_log_prob=log_prob,
                 timestep=timestep
             )
+        
+        # Print reward matching statistics
+        print(f"Reward matching: {matches_found} matches found out of {len(self.episode_timesteps)} episode timesteps")
         
         # Update episode statistics
         total_reward = sum(rewards) if rewards else 0.0
