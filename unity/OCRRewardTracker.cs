@@ -63,6 +63,8 @@ namespace CLOVR.IPCClient
         private bool pendingEpisodeEndConfirmation = false;
         private Coroutine episodeEndCoroutine;
         private Coroutine rewardUpdateCoroutine;
+        private bool needToStartEndTimer = false;
+        private bool needToStopEndTimer = false;
         
         // Thread safety
         private readonly object scoreLock = new object();
@@ -94,6 +96,27 @@ namespace CLOVR.IPCClient
             }
         }
         
+        void Update()
+        {
+            if (needToStartEndTimer)
+            {
+                needToStartEndTimer = false;
+                episodeEndCoroutine = StartCoroutine(EpisodeEndTimer());
+                Debug.Log("[OCRRewardTracker] Started episode end timer on main thread");
+            }
+            
+            if (needToStopEndTimer)
+            {
+                needToStopEndTimer = false;
+                if (episodeEndCoroutine != null)
+                {
+                    StopCoroutine(episodeEndCoroutine);
+                    episodeEndCoroutine = null;
+                    Debug.Log("[OCRRewardTracker] Stopped episode end timer on main thread");
+                }
+            }
+        }
+
         void OnDestroy()
         {
             StopRewardTracking();
@@ -225,11 +248,8 @@ namespace CLOVR.IPCClient
                     if (waitingForEpisodeEnd)
                     {
                         waitingForEpisodeEnd = false;
-                        if (episodeEndCoroutine != null)
-                        {
-                            StopCoroutine(episodeEndCoroutine);
-                            episodeEndCoroutine = null;
-                        }
+                        needToStopEndTimer = true;
+                        Debug.Log($"[OCRRewardTracker] Will stop episode end timer on main thread");
                     }
                 }
                 else if (episodeActive)
@@ -238,8 +258,17 @@ namespace CLOVR.IPCClient
                     if (!waitingForEpisodeEnd)
                     {
                         waitingForEpisodeEnd = true;
-                        episodeEndCoroutine = StartCoroutine(EpisodeEndTimer());
+                        needToStartEndTimer = true;
+                        Debug.Log($"[OCRRewardTracker] Will start episode end timer on main thread due to score: {newScore}");
                     }
+                    else
+                    {
+                        Debug.Log($"[OCRRewardTracker] Score {newScore} received but already waiting for episode end");
+                    }
+                }
+                else
+                {
+                    Debug.Log($"[OCRRewardTracker] Score {newScore} received but episode not active (episodeActive: {episodeActive})");
                 }
             }
             
@@ -270,12 +299,19 @@ namespace CLOVR.IPCClient
         
         private IEnumerator EpisodeEndTimer()
         {
+            Debug.Log($"[OCRRewardTracker] Episode end timer started, waiting {episodeEndTimeout} seconds...");
             yield return new WaitForSeconds(episodeEndTimeout);
+            
+            Debug.Log($"[OCRRewardTracker] Episode end timer completed. waitingForEpisodeEnd: {waitingForEpisodeEnd}, episodeActive: {episodeActive}");
             
             if (waitingForEpisodeEnd && episodeActive)
             {
                 // Show confirmation dialog
                 ShowEpisodeEndConfirmation();
+            }
+            else
+            {
+                Debug.Log($"[OCRRewardTracker] Episode end timer completed but conditions not met for confirmation");
             }
             
             waitingForEpisodeEnd = false;
@@ -482,11 +518,7 @@ namespace CLOVR.IPCClient
                     pendingEpisodeEndConfirmation = false;
                     // Reset episode end timer state to allow for a fresh timeout period
                     waitingForEpisodeEnd = false;
-                    if (episodeEndCoroutine != null)
-                    {
-                        StopCoroutine(episodeEndCoroutine);
-                        episodeEndCoroutine = null;
-                    }
+                    needToStopEndTimer = true;
                     Debug.Log("[OCRRewardTracker] Episode continuation confirmed by user. Timer reset.");
                 }
             }
