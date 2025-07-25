@@ -625,6 +625,10 @@ class UnityVRRLInterface(UnityVRInterface):
         client_socket = self.client_socket
         
         try:
+            # Clear memory and start a new episode when a new client connects
+            self.memory.clear()
+            self.start_new_episode()
+            
             # Reset timestep counter when a new client connects
             self.timestep = 0
 
@@ -650,9 +654,6 @@ class UnityVRRLInterface(UnityVRInterface):
                         chunk = client_socket.recv(buffer_size)
                         if not chunk:
                             print("Unity client disconnected")
-                            # Clear memory after client disconnect and start a new episode
-                            self.memory.clear()
-                            self.start_new_episode()
                             break
                         
                         data_buffer += chunk

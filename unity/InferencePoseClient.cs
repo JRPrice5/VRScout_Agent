@@ -180,7 +180,15 @@ namespace CLOVR.IPCClient
         private int maxQueueSize = 10; // Limit queue size to prevent memory issues
 
         // Status properties
-        public bool IsConnected { get { return isConnected; } set { isConnected = value; } }
+        public bool IsConnected 
+        { 
+            get { return isConnected; } 
+            set 
+            { 
+                shouldReconnect = value;
+                isConnected = value;
+            }
+        }
         public int CurrentTimestep => clientTimestep;
         public int QueuedActions => actionQueue.Count;
         
