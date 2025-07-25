@@ -165,6 +165,12 @@ namespace CLOVR.IPCClient
         private readonly object lockObject = new object();
         private bool shouldReconnect = true;
 
+        // Public properties to expose connection objects
+        public NetworkStream NetworkStream => stream;
+        public TcpClient TcpClient => client;
+        public string ServerIP => serverIP;
+        public int ServerPort => serverPort;
+
         // Action data received from Python
         private float[] latestAction;
 
@@ -1384,7 +1390,7 @@ namespace CLOVR.IPCClient
                     resultTexture.ReadPixels(new Rect(0, 0, finalWidth, finalHeight), 0, 0);
                     resultTexture.Apply(false);
                     
-                    // Encode to JPG instead of raw data
+                    // Encode to JPG
                     byte[] jpgData = resultTexture.EncodeToJPG(jpgQuality);
                     
                     // Clean up temporary resources
@@ -1428,7 +1434,7 @@ namespace CLOVR.IPCClient
                         resultTexture.ReadPixels(new Rect(0, 0, finalWidth, finalHeight), 0, 0);
                         resultTexture.Apply(false);
                         
-                        // Encode to JPG instead of raw data
+                        // Encode to JPG
                         byte[] jpgData = resultTexture.EncodeToJPG(jpgQuality);
                         
                         // Clean up temporary resources
@@ -1443,7 +1449,7 @@ namespace CLOVR.IPCClient
                         // No compression - just flip
                         FlipTextureVertically(tempTexture);
                         
-                        // Encode to JPG instead of raw data
+                        // Encode to JPG
                         byte[] jpgData = tempTexture.EncodeToJPG(jpgQuality);
                         
                         // Clean up

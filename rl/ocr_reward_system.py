@@ -357,12 +357,9 @@ class OCRRewardSystem:
             score = self.capture_and_process_score()
             
             # Update state
-            if score > 0:
-                self.current_score = score
-                self.last_valid_score = score
-                self.last_score_time = time.time()
-            else:
-                self.current_score = 0
+            self.current_score = score
+            self.last_valid_score = score
+            self.last_score_time = time.time()
                 
             # Send score to Unity
             self.send_score_to_unity(self.current_score)

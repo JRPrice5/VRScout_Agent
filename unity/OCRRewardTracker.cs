@@ -74,7 +74,7 @@ namespace CLOVR.IPCClient
         private DateTime startTime;
         
         // GUI
-        private Rect guiRect = new Rect(10, 10, 300, 200);
+        private Rect guiRect = new Rect(10, 10, 300, 300); // Increased height to accommodate confirmation buttons
         
         void Start()
         {
@@ -258,7 +258,7 @@ namespace CLOVR.IPCClient
                     if (newScore == -1)
                     {
                         // OCR failed, start episode end timer if not already waiting
-                        if (!waitingForEpisodeEnd)
+                        if (!waitingForEpisodeEnd && !pendingEpisodeEndConfirmation)
                         {
                             waitingForEpisodeEnd = true;
                             needToStartEndTimer = true;
@@ -336,6 +336,7 @@ namespace CLOVR.IPCClient
             episodeActive = false;
             waitingForEpisodeEnd = false;
             pendingEpisodeEndConfirmation = false;
+            inferenceClient.IsConnected = false;
             
             // Send final rewards to RL server
             SendRewardsToRLServer();
@@ -419,12 +420,22 @@ namespace CLOVR.IPCClient
         {
             try
             {
-                rlTcpClient = new TcpClient();
-                rlTcpClient.Connect(rlServerIP, rlServerPort);
-                rlStream = rlTcpClient.GetStream();
-                isConnectedToRL = true;
-                
-                Debug.Log($"[OCRRewardTracker] Connected to RL server at {rlServerIP}:{rlServerPort}");
+                // Use the existing connection from InferencePoseClient instead of creating a new one
+                if (inferenceClient != null && inferenceClient.IsConnected)
+                {
+                    // Get the existing TCP client and create a new network stream for RL communication
+                    // This ensures we're using the same socket connection that's already established
+                    rlTcpClient = inferenceClient.TcpClient;
+                    rlStream = inferenceClient.NetworkStream;
+                    isConnectedToRL = true;
+                    
+                    Debug.Log($"[OCRRewardTracker] Using existing connection to server at {inferenceClient.ServerIP}:{inferenceClient.ServerPort}");
+                }
+                else
+                {
+                    Debug.LogWarning("[OCRRewardTracker] InferencePoseClient is not connected. Cannot establish RL connection.");
+                    isConnectedToRL = false;
+                }
             }
             catch (Exception e)
             {
@@ -437,17 +448,12 @@ namespace CLOVR.IPCClient
         {
             isConnectedToRL = false;
             
-            if (rlStream != null)
-            {
-                rlStream.Close();
-                rlStream = null;
-            }
+            // Don't close the stream or client since they're shared with InferencePoseClient
+            // Just release our references to them
+            rlStream = null;
+            rlTcpClient = null;
             
-            if (rlTcpClient != null)
-            {
-                rlTcpClient.Close();
-                rlTcpClient = null;
-            }
+            Debug.Log("[OCRRewardTracker] Released RL server connection references");
         }
         
         private void SendRewardsToRLServer()
@@ -468,7 +474,7 @@ namespace CLOVR.IPCClient
                     }
                 };
                 
-                string jsonData = JsonUtility.ToJson(episodeData);
+                string jsonData = JsonUtility.ToJson(episodeData) + "END_OF_MESSAGE";
                 byte[] data = Encoding.UTF8.GetBytes(jsonData);
                 
                 rlStream.Write(data, 0, data.Length);
