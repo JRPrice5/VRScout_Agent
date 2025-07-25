@@ -278,8 +278,13 @@ class PPOACTPolicy(nn.Module):
             log_prob_per_dim = -0.5 * (((a_hat - mu)**2 / (std**2 + 1e-8)) + 
                                     torch.log(2 * np.pi * std**2 + 1e-8))
             
-            # Sum over latent dimensions, mean over sequence length
-            action_log_probs = log_prob_per_dim.sum(dim=-1).mean(dim=-1)
+            # Sum over latent dimensions, and handle sequence dimension if present
+            action_log_probs = log_prob_per_dim.sum(dim=-1)
+            
+            # Check if we have a sequence dimension to mean over
+            if len(action_log_probs.shape) > 1 and action_log_probs.shape[-1] > 1:
+                action_log_probs = action_log_probs.mean(dim=-1)
+            # Otherwise, we already have the correct shape
             
             # Get value estimate
             # We'll use the latent representation from the model for value estimation
