@@ -254,11 +254,28 @@ class PPOACTPolicy(nn.Module):
         # Forward pass through policy network
         if actions is not None:
             # Training mode - we need to compute log probs
-            actions = actions[:, :self.policy.model.num_queries].float()
+            # Handle both 2D [batch_size, action_dim] and 3D [batch_size, num_queries, action_dim] tensors
+            if len(actions.shape) == 2:
+                # Actions are 2D [batch_size, action_dim], need to reshape to 3D
+                batch_size, action_dim = actions.shape
+                num_queries = self.policy.model.num_queries
+                # Reshape to [batch_size, num_queries, action_dim] by repeating the action
+                actions = actions.unsqueeze(1).repeat(1, num_queries, 1)
+            else:
+                # Actions are already 3D, slice to correct number of queries
+                actions = actions[:, :self.policy.model.num_queries]
+            
+            actions = actions.float()
+            
             if is_pad is None:
                 is_pad = torch.zeros_like(actions[:, :, 0], dtype=torch.bool)
             else:
-                is_pad = is_pad[:, :self.policy.model.num_queries]
+                if len(is_pad.shape) == 2:
+                    # is_pad is 2D, slice appropriately
+                    is_pad = is_pad[:, :self.policy.model.num_queries]
+                else:
+                    # is_pad might be 1D, expand it
+                    is_pad = is_pad.unsqueeze(1).repeat(1, self.policy.model.num_queries)
             
             a_hat, is_pad_hat, (mu, logvar) = self.policy.model(qpos, image, env_state, actions, is_pad)
             
