@@ -17,6 +17,7 @@ import numpy as np
 from torch.distributions import Normal
 from collections import deque
 import time
+from .log_prob_utils import compute_gaussian_log_prob, validate_log_prob_inputs
 
 # Add the parent directory to path to import ACT modules
 import sys
@@ -397,97 +398,24 @@ class PPOACTPolicy(nn.Module):
             if mu is None or logvar is None:
                 raise RuntimeError("Model forward pass returned None for mu or logvar in training mode")
             
-            # Compute log probability of actions using the latent Gaussian distribution
+            # Compute log probability using the shared utility function
+            # This ensures consistency with Unity VR RL interface log probability calculation
             print(f"[evaluate_actions] Computing log probability with mu: {mu.shape}, logvar: {logvar.shape}")
-            std = torch.exp(0.5 * logvar)
             
-            # For proper PPO, we need to compute the log probability of the actual actions
-            # under the current policy's distribution. Since ACT uses a latent space,
-            # we approximate this by computing the log prob in the latent space
+            # Validate inputs
+            is_valid, error_msg = validate_log_prob_inputs(a_hat, mu, logvar)
+            if not is_valid:
+                raise ValueError(f"Invalid inputs for log probability computation: {error_msg}")
             
-            # Create normal distribution
-            print(f"[evaluate_actions] Creating distribution with mu: {mu.shape}, std: {std.shape}")
-            dist = torch.distributions.Normal(mu, std)
+            # Use the shared utility function with mean aggregation (consistent with Unity interface)
+            action_log_probs = compute_gaussian_log_prob(
+                actions=a_hat,  # Use model predictions (a_hat) for log probability
+                mu=mu,
+                logvar=logvar,
+                aggregate_method="mean",  # Average across queries (consistent with Unity interface)
+                numerical_stability=True
+            )
             
-            # Compute log probability for all queries and average them
-            print(f"[evaluate_actions] Computing log_prob with actions: {actions.shape}")
-            
-            # The issue is that actions is [batch_size, num_queries, action_dim] but
-            # distribution is [batch_size, action_dim]
-            # We'll compute log probabilities for each query and average them
-            
-            # Normalize actions to prevent extreme values
-            # Clip actions to reasonable bounds to prevent numerical instabilities
-            actions_normalized = torch.clamp(actions, min=-10.0, max=10.0)
-            a_hat_normalized = torch.clamp(a_hat, min=-10.0, max=10.0)
-            print(f"[evaluate_actions] Actions normalized and clamped")
-            
-            # Create a list to store log probabilities for each query
-            query_log_probs = []
-            
-            # For each query position, compute log probability
-            for q in range(actions_normalized.shape[1]):
-                query_actions = actions_normalized[:, q, :]
-                query_a_hat = a_hat_normalized[:, q, :]
-                print(f"[evaluate_actions] Computing log_prob for query {q}, actions shape: {query_actions.shape}")
-                
-                # Compute log probability using the Gaussian formula with numerical stability
-                # Clamp std to prevent division by zero or extremely small values
-                std_clamped = torch.clamp(std, min=1e-6, max=100.0)
-                
-                # Compute log probability with numerical stability
-                diff_squared = (query_a_hat - mu)**2
-                variance = std_clamped**2
-                
-                # Prevent extreme values in the exponential term
-                exp_term = torch.clamp(diff_squared / variance, max=50.0)  # Prevent overflow
-                log_term = torch.clamp(torch.log(2 * np.pi * variance), min=-50.0, max=50.0)
-                
-                log_prob_per_dim = -0.5 * (exp_term + log_term)
-                
-                # Clip individual log probabilities to prevent extreme values
-                log_prob_per_dim = torch.clamp(log_prob_per_dim, min=-50.0, max=50.0)
-                
-                query_log_prob = log_prob_per_dim.sum(dim=-1)
-                
-                # Check for NaN or Inf values and handle them
-                if torch.isnan(query_log_prob).any() or torch.isinf(query_log_prob).any():
-                    print(f"[WARNING] NaN or Inf detected in query {q} log probabilities!")
-                    print(f"[WARNING] query_actions range: [{query_actions.min():.4f}, {query_actions.max():.4f}]")
-                    print(f"[WARNING] mu range: [{mu.min():.4f}, {mu.max():.4f}]")
-                    print(f"[WARNING] std range: [{std.min():.4f}, {std.max():.4f}]")
-                    # Replace NaN/Inf with a reasonable default value
-                    query_log_prob = torch.where(torch.isnan(query_log_prob) | torch.isinf(query_log_prob), 
-                                                torch.tensor(-10.0, device=query_log_prob.device), 
-                                                query_log_prob)
-                
-                # Final clipping of query log probabilities
-                query_log_prob = torch.clamp(query_log_prob, min=-50.0, max=10.0)
-                query_log_probs.append(query_log_prob)
-            
-            # Stack and average log probabilities across queries
-            stacked_log_probs = torch.stack(query_log_probs, dim=1)  # [batch_size, num_queries]
-            print(f"[evaluate_actions] Stacked log probs shape: {stacked_log_probs.shape}")
-            
-            # Check for NaN/Inf in stacked log probs
-            if torch.isnan(stacked_log_probs).any() or torch.isinf(stacked_log_probs).any():
-                print(f"[WARNING] NaN or Inf detected in stacked log probabilities!")
-                stacked_log_probs = torch.where(torch.isnan(stacked_log_probs) | torch.isinf(stacked_log_probs), 
-                                               torch.tensor(-10.0, device=stacked_log_probs.device), 
-                                               stacked_log_probs)
-            
-            # Average log probabilities across queries
-            action_log_probs = stacked_log_probs.mean(dim=1)  # [batch_size]
-            
-            # Final safety check and clipping for action log probabilities
-            if torch.isnan(action_log_probs).any() or torch.isinf(action_log_probs).any():
-                print(f"[WARNING] NaN or Inf detected in final action log probabilities!")
-                action_log_probs = torch.where(torch.isnan(action_log_probs) | torch.isinf(action_log_probs), 
-                                              torch.tensor(-10.0, device=action_log_probs.device), 
-                                              action_log_probs)
-            
-            # Clip final log probabilities to prevent extreme values
-            action_log_probs = torch.clamp(action_log_probs, min=-50.0, max=10.0)
             print(f"[evaluate_actions] Final log probs shape: {action_log_probs.shape}, range: [{action_log_probs.min():.4f}, {action_log_probs.max():.4f}]")
             
             # Get value estimate
@@ -505,30 +433,19 @@ class PPOACTPolicy(nn.Module):
             print(f"[evaluate_actions] Returning - action_log_probs: {action_log_probs.shape}, value: {value.shape}, mu: {mu.shape}, logvar: {logvar.shape}")
             return action_log_probs, value, entropy, mu, logvar
         else:
-            # Inference mode
+            # Inference mode - DETR VAE now always returns mu and logvar
             try:
                 a_hat, _, (mu, logvar) = self.policy.model(qpos, image, env_state)
                 
-                # In inference mode, DETRVAE returns None for mu and logvar
-                # We need to create a latent representation for value estimation
+                # DETR VAE should now always return mu and logvar, even in inference mode
                 if mu is None or logvar is None:
-                    # For inference, we need to extract features from the model to create a latent representation
-                    # We'll use the transformer's output features as a proxy for the latent representation
-                    batch_size = qpos.shape[0]
-                    latent_dim = getattr(self.policy.model, 'latent_dim', 32)
-                    
-                    # Create a zero latent sample (as done in DETRVAE inference mode)
-                    latent_sample = torch.zeros([batch_size, latent_dim], dtype=torch.float32).cuda()
-                    
-                    # Use this as input to value network
-                    mu = latent_sample
-                    print(f"[PPO DEBUG] Created inference latent with shape: {mu.shape}")
+                    raise RuntimeError("DETR VAE returned None for mu or logvar - this should not happen with updated model!")
                 
-                # Compute value
+                # Compute value using the latent representation
                 print(f"[evaluate_actions] Computing value with mu: {mu.shape}")
                 value = self.value_net(mu).squeeze(-1)
                 print(f"[evaluate_actions] Value shape: {value.shape}")
-                return a_hat, value
+                return a_hat, value, mu, logvar
                 
             except Exception as e:
                 print(f"[PPO ERROR] Error in model forward pass: {e}")

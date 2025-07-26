@@ -18,6 +18,7 @@ import torchvision.transforms as transforms
 import pickle
 from collections import deque
 import argparse
+from .log_prob_utils import compute_gaussian_log_prob, compute_inference_mode_log_prob
 
 # Add the parent directory to path to import ACT modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -287,12 +288,9 @@ class UnityVRRLInterface(UnityVRInterface):
                     mu, logvar = None, None  # Initialize for later use
                     
                     if time_index == 0:
-                        # Get action from policy - capture mu and logvar if available
+                        # Get action from policy
                         result = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                        if len(result) == 5:  # Training mode returns (action_log_probs, value, entropy, mu, logvar)
-                            action_tensor, value, _, mu, logvar = result
-                        else:  # Inference mode returns (action, value)
-                            action_tensor, value = result
+                        action_tensor, value, mu, logvar = result
                         
                         # print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
                         # print(f"[RL DEBUG] Value: {value}")
@@ -307,10 +305,7 @@ class UnityVRRLInterface(UnityVRInterface):
                         if self.last_actions is None:
                             # First timestep or in case there's no previous action
                             result = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                            if len(result) == 5:  # Training mode
-                                action_tensor, value, _, mu, logvar = result
-                            else:  # Inference mode
-                                action_tensor, value = result
+                            action_tensor, value, mu, logvar = result
                             
                             all_actions = action_tensor
                             self.last_actions = all_actions
@@ -406,31 +401,29 @@ class UnityVRRLInterface(UnityVRInterface):
                     # Store value for episode
                     self.episode_values.append(value.item())
                     
-                    # Compute log probability using the policy's latent distribution
-                    # Use mu and logvar from evaluate_actions call to avoid redundant forward pass
+                    # Compute log probability using the shared utility function
+                    # This ensures consistency with PPO agent log probability calculation
+                    # DETR VAE now always returns mu and logvar, even in inference mode
+                    # IMPORTANT: Use full action chunk (all_actions) to match PPO agent behavior
                     with torch.no_grad():
-                        # In inference mode, mu and logvar are None
                         if mu is None or logvar is None:
-                            # For inference mode, we can't compute exact log probabilities
-                            # Use a simplified approximation based on action magnitude
-                            action_flat = raw_action
-                            # Simple approximation: negative squared magnitude as log prob
-                            log_prob = -0.5 * torch.sum(action_flat**2).item()
-                            print(f"[RL DEBUG] Using approximated log_prob in inference mode: {log_prob}")
+                            # This should not happen anymore with updated DETR VAE
+                            print(f"[RL WARNING] mu or logvar is None - this should not happen with updated DETR VAE!")
+                            log_prob = compute_inference_mode_log_prob(raw_action)
+                            print(f"[RL DEBUG] Using fallback approximated log_prob: {log_prob}")
                         else:
-                            # Training mode - compute proper log probability
-                            # For continuous actions, we assume a Gaussian distribution
-                            std = torch.exp(0.5 * logvar)
-                            
-                            # Convert action back to latent space for log prob computation
-                            # This is an approximation - in practice you might want to store the original latent sample
-                            action_flat = raw_action
-                            
-                            # Compute log probability under Gaussian distribution
-                            # log_prob = -0.5 * ((action - mu)^2 / std^2 + log(2*pi*std^2))
-                            log_prob_tensor = -0.5 * (((action_flat.unsqueeze(0) - mu)**2 / (std**2 + 1e-8)) + 
-                                                     torch.log(2 * np.pi * std**2 + 1e-8))
-                            log_prob = log_prob_tensor.sum().item()  # Sum over action dimensions
+                            # Always use proper Gaussian log probability (both training and inference)
+                            # Use full action chunk (all_actions) to match PPO agent's a_hat shape
+                            # all_actions shape: [batch_size, num_queries, action_dim]
+                            log_prob_tensor = compute_gaussian_log_prob(
+                                actions=all_actions,  # Use full action chunk like PPO agent
+                                mu=mu,
+                                logvar=logvar,
+                                aggregate_method="mean",  # Consistent with PPO agent
+                                numerical_stability=True
+                            )
+                            log_prob = log_prob_tensor.item()  # Convert to scalar
+                            print(f"[RL DEBUG] Using proper Gaussian log_prob with full action chunk: {log_prob}")
                         
                     self.episode_log_probs.append(log_prob)
                     
