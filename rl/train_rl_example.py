@@ -63,6 +63,7 @@ def main():
     parser.add_argument('--clip_param', type=float, default=0.2, help='PPO clip parameter')
     parser.add_argument('--value_coef', type=float, default=0.5, help='Value loss coefficient')
     parser.add_argument('--entropy_coef', type=float, default=0.01, help='Entropy coefficient')
+    parser.add_argument('--lr_ppo', type=float, default=1e-5, help='PPO learning rate')
     
     # KL constraint configuration
     parser.add_argument('--kl_weight', type=float, default=0.05, help='Initial KL constraint weight')

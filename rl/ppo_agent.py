@@ -194,7 +194,7 @@ class PPOACTPolicy(nn.Module):
     """
     PPO policy for fine-tuning ACT model with KL constraint to original behavior policy.
     """
-    def __init__(self, pretrained_policy, kl_weight=0.05, clip_param=0.2, value_coef=0.5, entropy_coef=0.01):
+    def __init__(self, pretrained_policy, kl_weight=0.05, clip_param=0.2, value_coef=0.5, entropy_coef=0.01, lr_ppo=1e-5):
         super().__init__()
         
         # Store the pretrained policy for KL constraint
@@ -259,6 +259,7 @@ class PPOACTPolicy(nn.Module):
         self.clip_param = clip_param
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
+        self.lr_ppo = lr_ppo
     
     def forward(self, qpos, image):
         """Forward pass for inference"""
@@ -623,7 +624,7 @@ class PPOACTPolicy(nn.Module):
         optimizer = optim.Adam([
             {'params': self.policy.parameters()},
             {'params': self.value_net.parameters()}
-        ], lr=1e-4)
+        ], lr=self.lr_ppo)
         
         # PPO update loop
         for epoch in range(n_epochs):

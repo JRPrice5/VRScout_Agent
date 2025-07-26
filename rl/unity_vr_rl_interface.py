@@ -62,7 +62,8 @@ class UnityVRRLInterface(UnityVRInterface):
             kl_weight=self.rl_config['kl_weight'],
             clip_param=self.rl_config['clip_param'],
             value_coef=self.rl_config['value_coef'],
-            entropy_coef=self.rl_config['entropy_coef']
+            entropy_coef=self.rl_config['entropy_coef'],
+            lr_ppo=self.rl_config['lr_ppo']
         )
         
         # Initialize PPO memory buffer
@@ -140,7 +141,8 @@ class UnityVRRLInterface(UnityVRInterface):
             'update_frequency': 2048,  # Update after collecting this many steps
             'max_episodes': 1000,
             'save_frequency': 100,  # Save model every N episodes
-        }
+            'lr_ppo': 1e-5
+            }
     
     def _load_pretrained_policy(self, ckpt_path):
         """Load the pretrained policy for KL constraint"""
@@ -818,6 +820,7 @@ def main():
     parser.add_argument('--min_kl_weight', type=float, default=0.001, help='Minimum KL weight')
     parser.add_argument('--kl_decay_factor', type=float, default=0.95, help='KL weight decay factor')
     parser.add_argument('--kl_decay_steps', type=int, default=100, help='KL weight decay steps')
+    parser.add_argument('--lr_ppo', type=float, default=1e-5, help='PPO learning rate')
     
     args = parser.parse_args()
     
@@ -838,6 +841,7 @@ def main():
         'update_frequency': args.update_frequency,
         'max_episodes': args.max_episodes,
         'save_frequency': 100,
+        'lr_ppo': args.lr_ppo
     }
     
     # Create RL interface

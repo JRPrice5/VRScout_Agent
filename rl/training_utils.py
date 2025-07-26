@@ -350,7 +350,8 @@ def create_training_config(args):
         'plot_frequency': getattr(args, 'plot_frequency', 50),
         'max_memory_mb': getattr(args, 'max_memory_mb', 8000),
         'early_stopping_patience': getattr(args, 'early_stopping_patience', 50),
-        'early_stopping_min_delta': getattr(args, 'early_stopping_min_delta', 0.01)
+        'early_stopping_min_delta': getattr(args, 'early_stopping_min_delta', 0.01),
+        'lr_ppo': getattr(args, 'lr_ppo', 1e-5)
     }
 
 
