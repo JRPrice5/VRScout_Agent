@@ -18,6 +18,7 @@ from torch.distributions import Normal
 from collections import deque
 import time
 from .log_prob_utils import compute_gaussian_log_prob, validate_log_prob_inputs
+from .debug_log_prob import debug_log_prob_computation, analyze_ppo_ratio
 
 # Add the parent directory to path to import ACT modules
 import sys
@@ -418,6 +419,11 @@ class PPOACTPolicy(nn.Module):
             
             print(f"[evaluate_actions] Final log probs shape: {action_log_probs.shape}, range: [{action_log_probs.min():.4f}, {action_log_probs.max():.4f}]")
             
+            # Debug log probability computation if values seem extreme
+            if (action_log_probs < -50).any() or (action_log_probs > 10).any():
+                print("[DEBUG] Extreme log probabilities detected, running debug analysis...")
+                debug_log_prob_computation(a_hat, mu, logvar, "PPO_evaluate_actions")
+            
             # Get value estimate
             # We'll use the latent representation from the model for value estimation
             # This is a simplification; in practice you might want a separate value network
@@ -606,6 +612,12 @@ class PPOACTPolicy(nn.Module):
                 ratio = torch.clamp(ratio, min=1e-8, max=1e8)
                 
                 print(f"[PPO Update] Ratio shape: {ratio.shape}, range: [{ratio.min():.6f}, {ratio.max():.6f}]")
+                
+                # Debug ratio computation if values seem extreme
+                if (ratio > 10).any() or (ratio < 0.1).any():
+                    print("[DEBUG] Extreme ratios detected, running debug analysis...")
+                    analyze_ppo_ratio(old_log_probs, action_log_probs, "PPO_update")
+                
                 clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
                 
                 # Check advantages for numerical stability
