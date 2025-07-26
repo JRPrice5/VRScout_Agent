@@ -405,13 +405,13 @@ class PPOACTPolicy(nn.Module):
             print(f"[evaluate_actions] Computing log probability with mu: {mu.shape}, logvar: {logvar.shape}")
             
             # Validate inputs
-            is_valid, error_msg = validate_log_prob_inputs(a_hat, mu, logvar)
+            is_valid, error_msg = validate_log_prob_inputs(actions, mu, logvar)
             if not is_valid:
                 raise ValueError(f"Invalid inputs for log probability computation: {error_msg}")
             
             # Use the shared utility function with mean aggregation (consistent with Unity interface)
             action_log_probs = compute_gaussian_log_prob(
-                actions=a_hat,  # Use model predictions (a_hat) for log probability
+                actions=actions,
                 mu=mu,
                 logvar=logvar,
                 aggregate_method="mean",  # Average across queries (consistent with Unity interface)
@@ -471,6 +471,79 @@ class PPOACTPolicy(nn.Module):
                 
                 print(f"[PPO ERROR] Using fallback action shape: {dummy_action.shape}, value shape: {dummy_value.shape}")
                 return dummy_action, dummy_value
+    
+    def evaluate_actions_with_pretrained(self, qpos, image, actions=None, is_pad=None):
+        """
+        Evaluate actions using the pretrained policy to recompute old log probabilities.
+        This is used during PPO training to avoid storing μ and logvar during data collection.
+        """
+        # Get features from pretrained policy network
+        env_state = None
+        
+        # Debug print for original shape
+        print(f"[evaluate_actions_with_pretrained] Original image shape: {image.shape}")
+        
+        # Handle image tensor dimensions for conv2d compatibility (same as evaluate_actions)
+        if len(image.shape) == 6:
+            batch_size, dim1, dim2, channels, height, width = image.shape
+            image = image.squeeze(2)
+            print(f"[evaluate_actions_with_pretrained] Squeezed redundant dim: {image.shape}")
+        
+        # Normalize image
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])
+        image = normalize(image)
+        
+        # Debug print for input tensor shapes
+        print(f"[evaluate_actions_with_pretrained] Input shapes - qpos: {qpos.shape}, image: {image.shape}")
+        if actions is not None:
+            print(f"[evaluate_actions_with_pretrained] Actions shape: {actions.shape}")
+        
+        # Handle actions tensor dimensions (same logic as evaluate_actions)
+        if actions is not None:
+            if len(actions.shape) == 4 and actions.shape[1] == 1:
+                print(f"[evaluate_actions_with_pretrained] Detected extra dimension in actions tensor, squeezing it")
+                actions = actions.squeeze(1)
+                print(f"[evaluate_actions_with_pretrained] After squeezing: {actions.shape}")
+            
+            # Handle is_pad tensor if needed
+            if is_pad is None:
+                if len(actions.shape) == 3:
+                    is_pad = torch.zeros((actions.shape[0], actions.shape[1]), dtype=torch.bool, device=actions.device)
+                else:
+                    is_pad = torch.zeros_like(actions[..., 0], dtype=torch.bool)
+                print(f"[evaluate_actions_with_pretrained] Created default is_pad with shape: {is_pad.shape}")
+        
+        print(f"[evaluate_actions_with_pretrained] Before pretrained model call - qpos: {qpos.shape}, image: {image.shape}")
+        if actions is not None:
+            print(f"[evaluate_actions_with_pretrained] actions: {actions.shape}, is_pad: {is_pad.shape}")
+        
+        # Forward pass through pretrained policy
+        with torch.no_grad():
+            _, _, (mu, logvar) = self.pretrained_policy.model(qpos, image, env_state, actions, is_pad)
+        
+        print(f"[evaluate_actions_with_pretrained] Pretrained policy output - mu: {mu.shape}, logvar: {logvar.shape}")
+        
+        # Compute log probability using the shared utility function
+        if mu is None or logvar is None:
+            raise ValueError("Pretrained policy returned None for mu or logvar")
+        
+        # Use the shared utility function with mean aggregation (consistent with current policy)
+        action_log_probs = compute_gaussian_log_prob(
+            actions=actions,
+            mu=mu,
+            logvar=logvar,
+            aggregate_method="mean",  # Average across queries (consistent with current policy)
+            numerical_stability=True
+        )
+        
+        print(f"[evaluate_actions_with_pretrained] Computed action_log_probs: {action_log_probs.shape}")
+        
+        # Return dummy values for unused outputs (we only need log probabilities)
+        dummy_values = torch.zeros(qpos.shape[0], device=qpos.device)
+        dummy_entropy = torch.zeros(qpos.shape[0], device=qpos.device)
+        
+        return action_log_probs, dummy_values, dummy_entropy, mu, logvar
     
     def get_kl_divergence(self, qpos, image, actions=None, is_pad=None):
         """
@@ -572,16 +645,24 @@ class PPOACTPolicy(nn.Module):
                 print(f"  - advantages: {advantages.shape}")
                 print(f"  - batch_indices length: {len(batch_indices)}")
                 
-                # Evaluate actions
+                # Evaluate actions with current policy
                 print(f"[PPO Update] Calling evaluate_actions with states: {states.shape}, images: {images.shape}, actions: {actions.shape}")
                 action_log_probs, values, entropy, mu, logvar = self.evaluate_actions(states, images, actions)
                 print(f"[PPO Update] After evaluate_actions - action_log_probs: {action_log_probs.shape}, values: {values.shape}")
                 
+                # OPTIMIZATION: Recompute old log probabilities using pretrained policy
+                # This avoids the need to store μ and logvar during data collection
+                # We use the stored action chunks and recompute log probabilities with the pretrained policy
+                print(f"[PPO Update] Recomputing old log probabilities using pretrained policy")
+                with torch.no_grad():
+                    old_action_log_probs, _, _, old_mu, old_logvar = self.evaluate_actions_with_pretrained(states, images, actions)
+                print(f"[PPO Update] Recomputed old_log_probs: {old_action_log_probs.shape}")
+                
                 # Compute KL divergence to pretrained policy
                 kl_div = self.get_kl_divergence(states, images, actions)
                 
-                # Compute ratio and clipped ratio
-                print(f"[PPO Update] Computing ratio with action_log_probs: {action_log_probs.shape}, old_log_probs: {old_log_probs.shape}")
+                # Compute ratio and clipped ratio using recomputed old log probabilities
+                print(f"[PPO Update] Computing ratio with action_log_probs: {action_log_probs.shape}, old_log_probs: {old_action_log_probs.shape}")
                 
                 # Add numerical stability checks for log probabilities
                 if torch.isnan(action_log_probs).any() or torch.isinf(action_log_probs).any():
@@ -590,14 +671,14 @@ class PPOACTPolicy(nn.Module):
                                                   torch.tensor(-10.0, device=action_log_probs.device), 
                                                   action_log_probs)
                 
-                if torch.isnan(old_log_probs).any() or torch.isinf(old_log_probs).any():
-                    print(f"[WARNING] NaN or Inf detected in old_log_probs!")
-                    old_log_probs = torch.where(torch.isnan(old_log_probs) | torch.isinf(old_log_probs), 
-                                               torch.tensor(-10.0, device=old_log_probs.device), 
-                                               old_log_probs)
+                if torch.isnan(old_action_log_probs).any() or torch.isinf(old_action_log_probs).any():
+                    print(f"[WARNING] NaN or Inf detected in old_action_log_probs!")
+                    old_action_log_probs = torch.where(torch.isnan(old_action_log_probs) | torch.isinf(old_action_log_probs), 
+                                               torch.tensor(-10.0, device=old_action_log_probs.device), 
+                                               old_action_log_probs)
                 
                 # Clip log probability differences to prevent extreme ratios
-                log_prob_diff = action_log_probs - old_log_probs
+                log_prob_diff = action_log_probs - old_action_log_probs
                 log_prob_diff = torch.clamp(log_prob_diff, min=-20.0, max=20.0)  # Prevents extreme ratios
                 
                 ratio = torch.exp(log_prob_diff)
@@ -617,7 +698,7 @@ class PPOACTPolicy(nn.Module):
                 # Debug ratio computation if values seem extreme
                 if (ratio > 10).any() or (ratio < 0.1).any():
                     print("[DEBUG] Extreme ratios detected, running debug analysis...")
-                    analyze_ppo_ratio(old_log_probs, action_log_probs, "PPO_update")
+                    analyze_ppo_ratio(old_action_log_probs, action_log_probs, "PPO_update")
                 
                 clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
                 

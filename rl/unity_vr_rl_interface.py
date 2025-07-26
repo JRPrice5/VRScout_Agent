@@ -401,31 +401,18 @@ class UnityVRRLInterface(UnityVRInterface):
                     # Store value for episode
                     self.episode_values.append(value.item())
                     
-                    # Compute log probability using the shared utility function
-                    # This ensures consistency with PPO agent log probability calculation
-                    # DETR VAE now always returns mu and logvar, even in inference mode
-                    # IMPORTANT: Use full action chunk (all_actions) to match PPO agent behavior
-                    with torch.no_grad():
-                        if mu is None or logvar is None:
-                            # This should not happen anymore with updated DETR VAE
-                            print(f"[RL WARNING] mu or logvar is None - this should not happen with updated DETR VAE!")
-                            log_prob = compute_inference_mode_log_prob(raw_action)
-                            print(f"[RL DEBUG] Using fallback approximated log_prob: {log_prob}")
-                        else:
-                            # Always use proper Gaussian log probability (both training and inference)
-                            # Use full action chunk (all_actions) to match PPO agent's a_hat shape
-                            # all_actions shape: [batch_size, num_queries, action_dim]
-                            log_prob_tensor = compute_gaussian_log_prob(
-                                actions=all_actions,  # Use full action chunk like PPO agent
-                                mu=mu,
-                                logvar=logvar,
-                                aggregate_method="mean",  # Consistent with PPO agent
-                                numerical_stability=True
-                            )
-                            log_prob = log_prob_tensor.item()  # Convert to scalar
-                            print(f"[RL DEBUG] Using proper Gaussian log_prob with full action chunk: {log_prob}")
-                        
-                    self.episode_log_probs.append(log_prob)
+                    # OPTIMIZATION: Store placeholder log probability that will be recomputed during PPO training
+                    # According to research, we can avoid recording μ and logvar during data collection
+                    # and instead recompute them later using the stored action chunks.
+                    # This saves computation during data collection and ensures consistency.
+                    
+                    # Store a placeholder log probability (will be recomputed during PPO training)
+                    # We use 0.0 as a placeholder since PPO will recompute proper log probabilities
+                    # using the stored action chunks and current policy state
+                    placeholder_log_prob = 0.0
+                    print(f"[RL DEBUG] Storing placeholder log_prob: {placeholder_log_prob} (will be recomputed during PPO training)")
+                    
+                    self.episode_log_probs.append(placeholder_log_prob)
                     
                     # Store full action chunk for episode - convert to CPU tensor for storage
                     # This ensures we keep all query actions for proper PPO training
