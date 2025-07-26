@@ -400,20 +400,22 @@ class PPOACTPolicy(nn.Module):
             if mu is None or logvar is None:
                 raise RuntimeError("Model forward pass returned None for mu or logvar in training mode")
             
-            # Compute log probability using the shared utility function
-            # This ensures consistency with Unity VR RL interface log probability calculation
+            # PPO CORRECT APPROACH: Compute log_prob of stored actions under current policy
+            # Both old and new log probs use the same stored actions, but different policy parameters
             print(f"[evaluate_actions] Computing log probability with mu: {mu.shape}, logvar: {logvar.shape}")
+            print(f"[evaluate_actions] Using stored actions: {actions.shape} under current policy parameters")
             
-            # Validate inputs
-            is_valid, error_msg = validate_log_prob_inputs(a_hat, mu, logvar)
+            # Validate inputs - use the stored actions (correct for PPO)
+            is_valid, error_msg = validate_log_prob_inputs(actions, mu, logvar)
             if not is_valid:
                 raise ValueError(f"Invalid inputs for log probability computation: {error_msg}")
             
             # Use the shared utility function with mean aggregation (consistent with Unity interface)
+            # PPO: log_prob(stored_action | current_policy_params)
             action_log_probs = compute_gaussian_log_prob(
-                actions=a_hat,  # Use model predictions (a_hat) for log probability
-                mu=mu,
-                logvar=logvar,
+                actions=actions,  # Stored actions from experience buffer
+                mu=mu,            # Current policy's mu (from current forward pass)
+                logvar=logvar,    # Current policy's logvar (from current forward pass)
                 aggregate_method="mean",  # Average across queries (consistent with Unity interface)
                 numerical_stability=True
             )
@@ -440,15 +442,19 @@ class PPOACTPolicy(nn.Module):
             print(f"[evaluate_actions] Returning - action_log_probs: {action_log_probs.shape}, value: {value.shape}, mu: {mu.shape}, logvar: {logvar.shape}")
             return action_log_probs, value, entropy, mu, logvar
         else:
-            # Inference mode - DETR VAE now always returns mu and logvar
+            # Inference mode - DETR VAE returns None for mu/logvar to avoid dummy computations
             try:
                 a_hat, _, (mu, logvar) = self.policy.model(qpos, image, env_state)
                 
-                # DETR VAE should now always return mu and logvar, even in inference mode
+                # DETR VAE returns None for mu/logvar in inference mode for efficiency
                 if mu is None or logvar is None:
-                    raise RuntimeError("DETR VAE returned None for mu or logvar - this should not happen with updated model!")
+                    print(f"[evaluate_actions] Inference mode - mu/logvar are None (expected behavior)")
+                    # Create dummy value for inference mode
+                    batch_size = qpos.shape[0]
+                    dummy_value = torch.zeros(batch_size).cuda()
+                    return a_hat, dummy_value, mu, logvar
                 
-                # Compute value using the latent representation
+                # If mu/logvar are provided, compute value normally
                 print(f"[evaluate_actions] Computing value with mu: {mu.shape}")
                 value = self.value_net(mu).squeeze(-1)
                 print(f"[evaluate_actions] Value shape: {value.shape}")

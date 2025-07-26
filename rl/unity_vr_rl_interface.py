@@ -288,12 +288,18 @@ class UnityVRRLInterface(UnityVRInterface):
                     mu, logvar = None, None  # Initialize for later use
                     
                     if time_index == 0:
-                        # Get action from policy
-                        result = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                        action_tensor, value, mu, logvar = result
+                        # Get action from policy in inference mode
+                        inference_result = self.ppo_policy.evaluate_actions(qpos, curr_image)
+                        action_tensor, value, inference_mu, inference_logvar = inference_result
                         
-                        # print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
-                        # print(f"[RL DEBUG] Value: {value}")
+                        # Only do second pass if we need mu/logvar for log probability (RL training)
+                        if inference_mu is None or inference_logvar is None:
+                            # DETR VAE returned None - need second pass with generated actions for log probability
+                            training_result = self.ppo_policy.evaluate_actions(qpos, curr_image, actions=action_tensor)
+                            _, _, mu, logvar, _ = training_result  # Get training mode mu/logvar
+                        else:
+                            # Use the mu/logvar from inference (shouldn't happen with current DETR VAE)
+                            mu, logvar = inference_mu, inference_logvar
                         
                         all_actions = action_tensor  # Shape: [batch, num_queries, action_dim]
                         self.last_actions = all_actions  # Store for future timesteps
@@ -304,8 +310,15 @@ class UnityVRRLInterface(UnityVRInterface):
                         # Use previously computed actions if not querying on this timestep
                         if self.last_actions is None:
                             # First timestep or in case there's no previous action
-                            result = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                            action_tensor, value, mu, logvar = result
+                            inference_result = self.ppo_policy.evaluate_actions(qpos, curr_image)
+                            action_tensor, value, inference_mu, inference_logvar = inference_result
+                            
+                            # Only do second pass if needed for log probability
+                            if inference_mu is None or inference_logvar is None:
+                                training_result = self.ppo_policy.evaluate_actions(qpos, curr_image, actions=action_tensor)
+                                _, _, mu, logvar, _ = training_result
+                            else:
+                                mu, logvar = inference_mu, inference_logvar
                             
                             all_actions = action_tensor
                             self.last_actions = all_actions
