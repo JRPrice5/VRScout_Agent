@@ -19,6 +19,7 @@ from collections import deque
 import time
 from .log_prob_utils import compute_gaussian_log_prob, validate_log_prob_inputs
 from .debug_log_prob import debug_log_prob_computation, analyze_ppo_ratio
+from rl.ppo_diagnostics import diagnose_ppo_training_issues, check_data_quality
 
 # Add the parent directory to path to import ACT modules
 import sys
@@ -646,6 +647,8 @@ class PPOACTPolicy(nn.Module):
                 
                 policy_loss = -torch.min(policy_obj1, policy_obj2).mean()
                 
+                temp_policy_loss = policy_loss
+
                 # Final check and clipping for policy loss
                 if torch.isnan(policy_loss) or torch.isinf(policy_loss):
                     print(f"[WARNING] NaN or Inf detected in policy_loss! Setting to 0.0")
@@ -670,6 +673,14 @@ class PPOACTPolicy(nn.Module):
                                          returns)
                 
                 value_loss = F.mse_loss(values, returns)
+                
+                # Diagnose training issues
+                issues, suggestions = diagnose_ppo_training_issues(
+                    policy_loss=temp_policy_loss,
+                    value_loss=value_loss,
+                    kl_div=kl_div,
+                    entropy=entropy
+                )
                 
                 # Clip value loss to prevent extreme values
                 if torch.isnan(value_loss) or torch.isinf(value_loss):
