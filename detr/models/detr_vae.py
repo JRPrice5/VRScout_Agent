@@ -110,33 +110,7 @@ class DETRVAE(nn.Module):
             latent_sample = reparametrize(mu, logvar)
             latent_input = self.latent_out_proj(latent_sample)
         else:
-            # Inference mode - still compute mu and logvar for consistent log probability calculation
-            # Use zero action sequence as input to get a meaningful latent distribution
-            dummy_actions = torch.zeros([bs, self.num_queries, self.action_dim], dtype=torch.float32).to(qpos.device)
-            dummy_is_pad = torch.zeros([bs, self.num_queries], dtype=torch.bool).to(qpos.device)
-            
-            # Project dummy action sequence to get latent distribution parameters
-            action_embed = self.encoder_action_proj(dummy_actions) # (bs, seq, hidden_dim)
-            qpos_embed = self.encoder_joint_proj(qpos)  # (bs, hidden_dim)
-            qpos_embed = torch.unsqueeze(qpos_embed, axis=1)  # (bs, 1, hidden_dim)
-            cls_embed = self.cls_embed.weight # (1, hidden_dim)
-            cls_embed = torch.unsqueeze(cls_embed, axis=0).repeat(bs, 1, 1) # (bs, 1, hidden_dim)
-            encoder_input = torch.cat([cls_embed, qpos_embed, action_embed], axis=1) # (bs, seq+1, hidden_dim)
-            encoder_input = encoder_input.permute(1, 0, 2) # (seq+1, bs, hidden_dim)
-            # do not mask cls token or dummy actions
-            cls_joint_is_pad = torch.full((bs, 2), False).to(qpos.device) # False: not a padding
-            is_pad_full = torch.cat([cls_joint_is_pad, dummy_is_pad], axis=1)  # (bs, seq+1)
-            # obtain position embedding
-            pos_embed = self.pos_table.clone().detach()
-            pos_embed = pos_embed.permute(1, 0, 2)  # (seq+1, 1, hidden_dim)
-            # query model
-            encoder_output = self.encoder(encoder_input, pos=pos_embed, src_key_padding_mask=is_pad_full)
-            encoder_output = encoder_output[0] # take cls output only
-            latent_info = self.latent_proj(encoder_output)
-            mu = latent_info[:, :self.latent_dim]
-            logvar = latent_info[:, self.latent_dim:]
-            
-            # For inference, we still use zero latent sample but now we have proper mu/logvar
+            mu = logvar = None
             latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
             latent_input = self.latent_out_proj(latent_sample)
 

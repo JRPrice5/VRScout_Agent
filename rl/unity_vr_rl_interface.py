@@ -103,8 +103,6 @@ class UnityVRRLInterface(UnityVRInterface):
         # These are needed even if temporal_agg is False, to maintain compatibility with parent class logic
         self.last_actions = None
         self.last_value = None
-        self.last_mu = None
-        self.last_logvar = None
         
         # Initialize temporal aggregation variables if needed (same as parent class)
         if self.temporal_agg:
@@ -300,8 +298,6 @@ class UnityVRRLInterface(UnityVRInterface):
                         all_actions = action_tensor  # Shape: [batch, num_queries, action_dim]
                         self.last_actions = all_actions  # Store for future timesteps
                         self.last_value = value  # Store value for reuse
-                        self.last_mu = mu  # Store mu for reuse
-                        self.last_logvar = logvar  # Store logvar for reuse
                     else:
                         # Use previously computed actions if not querying on this timestep
                         if self.last_actions is None:
@@ -312,14 +308,10 @@ class UnityVRRLInterface(UnityVRInterface):
                             all_actions = action_tensor
                             self.last_actions = all_actions
                             self.last_value = value
-                            self.last_mu = mu
-                            self.last_logvar = logvar
                             time_index = 0
                         else:
                             all_actions = self.last_actions
                             value = self.last_value
-                            mu = self.last_mu
-                            logvar = self.last_logvar
                     
                     # Apply temporal aggregation if enabled (same logic as parent class)
                     if self.temporal_agg:

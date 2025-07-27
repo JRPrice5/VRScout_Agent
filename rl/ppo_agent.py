@@ -445,9 +445,7 @@ class PPOACTPolicy(nn.Module):
             try:
                 a_hat, _, (mu, logvar) = self.policy.model(qpos, image, env_state)
                 
-                # DETR VAE should now always return mu and logvar, even in inference mode
-                if mu is None or logvar is None:
-                    raise RuntimeError("DETR VAE returned None for mu or logvar - this should not happen with updated model!")
+                # DETR VAE returns mu and logvar as None in inference mode
                 
                 # Compute value using the latent representation
                 print(f"[evaluate_actions] Computing value with mu: {mu.shape}")
