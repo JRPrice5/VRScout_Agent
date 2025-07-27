@@ -1,5 +1,10 @@
 import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
+import argparse
 from unity_vr_inference import UnityVRInterface
 from policy import ACTPolicy
 
@@ -21,24 +26,28 @@ class UnityVRRLInference(UnityVRInterface):
                 print("Detected PPO checkpoint format")
                 # Create policy
                 if self.policy_class == 'ACT':
-                    policy = ACTPolicy(
-                        camera_names=self.camera_names,
-                        stats=self.stats,
-                        ckpt_dir=self.ckpt_dir,
-                        task_name=self.task_name,
-                        seed=self.seed,
-                        num_epochs=self.num_epochs,
-                        kl_weight=self.kl_weight,
-                        chunk_size=self.chunk_size,
-                        hidden_dim=self.hidden_dim,
-                        dim_feedforward=self.dim_feedforward,
-                        lr=self.lr,
-                        lr_backbone=self.lr_backbone,
-                        backbone=self.backbone,
-                        enc_layers=self.enc_layers,
-                        dec_layers=self.dec_layers,
-                        nheads=self.nheads,
-                    )
+                    # ACT policy configuration with DETR required parameters
+                    policy_config = {
+                        'num_queries': self.chunk_size,
+                        'kl_weight': self.kl_weight,
+                        'hidden_dim': self.hidden_dim,
+                        'dim_feedforward': self.dim_feedforward,
+                        'lr': self.lr,
+                        'lr_backbone': self.lr_backbone,
+                        'backbone': self.backbone,
+                        'enc_layers': self.enc_layers,
+                        'dec_layers': self.dec_layers,
+                        'nheads': self.nheads,
+                        'chunk_size': self.chunk_size,
+                        # Add DETR required parameters
+                        'ckpt_dir': self.ckpt_dir,
+                        'policy_class': self.policy_class,
+                        'task_name': self.task_name,
+                        'seed': self.seed,
+                        'num_epochs': self.num_epochs,
+                        'camera_names': self.camera_names,
+                    }
+                    policy = ACTPolicy(policy_config)
                     # Load state dict from policy_state_dict
                     policy.model.load_state_dict(checkpoint['policy_state_dict'])
                     print("Successfully loaded PPO policy")
