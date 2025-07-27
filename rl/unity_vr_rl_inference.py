@@ -48,9 +48,30 @@ class UnityVRRLInference(UnityVRInterface):
                         'camera_names': self.camera_names,
                     }
                     policy = ACTPolicy(policy_config)
-                    # Load state dict from policy_state_dict
-                    policy.model.load_state_dict(checkpoint['policy_state_dict'])
-                    print("Successfully loaded PPO policy")
+                    
+                    # Fix the state dict key mismatch by removing 'model.' prefix
+                    policy_state_dict = checkpoint['policy_state_dict']
+                    fixed_state_dict = {}
+                    
+                    for key, value in policy_state_dict.items():
+                        # Check if key has 'model.' prefix and remove it
+                        if key.startswith('model.'):
+                            new_key = key[6:]  # Remove 'model.' prefix (6 characters)
+                            fixed_state_dict[new_key] = value
+                        else:
+                            fixed_state_dict[key] = value
+                    
+                    print(f"Converted {len(policy_state_dict)} keys to match expected format")
+                    
+                    # Load the fixed state dict
+                    try:
+                        policy.model.load_state_dict(fixed_state_dict)
+                        print("Successfully loaded PPO policy with fixed state dict")
+                    except Exception as e:
+                        print(f"Error loading fixed state dict: {e}")
+                        print("Attempting to load original state dict...")
+                        policy.model.load_state_dict(policy_state_dict)
+                    
                     return policy
                 else:
                     raise ValueError(f"Unsupported policy class for PPO: {self.policy_class}")
