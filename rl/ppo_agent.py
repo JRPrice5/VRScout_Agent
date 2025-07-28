@@ -684,8 +684,15 @@ class PPOACTPolicy(nn.Module):
                 
                 try:
                     print(f"[DEBUG] Calling model with batch_states: {batch_states.shape}, batch_images: {batch_images.shape}")
+                    
+                    if len(batch_actions.shape) == 3:
+                        is_pad = torch.zeros((batch_actions.shape[0], batch_actions.shape[1]), dtype=torch.bool, device=batch_actions.device)
+                    else:
+                        is_pad = torch.zeros_like(batch_actions[..., 0], dtype=torch.bool)
+                    print(f"[DEBUG] Created is_pad with shape: {is_pad.shape}")
+
                     # Pass actions to ensure model runs in training mode and computes mu/logvar
-                    model_output = self.policy.model(batch_states, batch_images, env_state, actions=batch_actions)
+                    model_output = self.policy.model(batch_states, batch_images, env_state, batch_actions, is_pad)
                     print(f"[DEBUG] Model output type: {type(model_output)}, length: {len(model_output) if isinstance(model_output, tuple) else 'N/A'}")
                     
                     # Unpack model output with proper error checking
