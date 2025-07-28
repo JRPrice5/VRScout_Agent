@@ -241,6 +241,9 @@ class PPOACTPolicy(nn.Module):
         # Load weights from pretrained policy
         self.policy.load_state_dict(pretrained_policy.state_dict())
         
+        # Set policy to eval mode initially for consistent behavior during data collection
+        self.policy.eval()
+        
         # Initialize frozen policy (will be set before each update)
         self.frozen_policy = None
         
@@ -619,9 +622,10 @@ class PPOACTPolicy(nn.Module):
         # This ensures we use the current value network state for advantage computation
         print("[PPO Update] Computing fresh values using current value network")
         
-        # Get all states and images from memory
+        # Get all states, images, and actions from memory
         all_states = torch.tensor(np.array(memory.states), dtype=torch.float32).to(device)
         all_images = torch.stack(memory.images).to(device)
+        all_actions = torch.tensor(np.array(memory.actions), dtype=torch.float32).to(device)
         all_rewards = torch.tensor(memory.rewards, dtype=torch.float32).to(device)
         all_dones = torch.tensor(memory.dones, dtype=torch.float32).to(device)
         
@@ -645,7 +649,12 @@ class PPOACTPolicy(nn.Module):
                 
                 # Get latent representation for value computation
                 env_state = None
-                _, _, (mu, _) = self.policy.model(batch_states, batch_images, env_state)
+                
+                # Get corresponding actions for this batch
+                batch_actions = all_actions[i:i+batch_size]
+                
+                # Pass actions to ensure model runs in training mode and computes mu/logvar
+                _, _, (mu, _) = self.policy.model(batch_states, batch_images, env_state, actions=batch_actions)
                 batch_values = self.value_net(mu).squeeze(-1)
                 fresh_values.append(batch_values)
             
@@ -690,6 +699,9 @@ class PPOACTPolicy(nn.Module):
             {'params': self.policy.parameters()},
             {'params': self.value_net.parameters()}
         ], lr=self.lr_ppo)
+        
+        # Switch policy to training mode for updates
+        self.policy.train()
         
         # PPO update loop
         for epoch in range(n_epochs):
@@ -869,6 +881,10 @@ class PPOACTPolicy(nn.Module):
         self.frozen_policy = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            
+        # Switch policy back to eval mode for data collection
+        self.policy.eval()
+        print("[PPO Update] Switched policy back to eval mode for data collection")
         
         # Return statistics for logging
         return {
