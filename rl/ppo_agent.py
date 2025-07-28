@@ -636,6 +636,13 @@ class PPOACTPolicy(nn.Module):
             print(f"[PPO Update] Actions are not PyTorch tensors, converting from type: {type(memory.actions[0])}")
             all_actions = torch.tensor(np.array(memory.actions), dtype=torch.float32).to(device)
         
+        if all_actions is not None:
+            print(f"[PPO Update] Actions shape: {all_actions.shape}")
+            # Check if we have an extra dimension [batch_size, 1, num_queries, action_dim]
+            if len(all_actions.shape) == 4 and all_actions.shape[1] == 1:
+                print(f"[PPO Update] Detected extra dimension in actions tensor, squeezing it")
+                all_actions = all_actions.squeeze(1)  # Remove the extra dimension
+
         print(f"[PPO Update] Final all_actions shape: {all_actions.shape}")
         
         all_rewards = torch.tensor(memory.rewards, dtype=torch.float32).to(device)
