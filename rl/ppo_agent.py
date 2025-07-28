@@ -142,6 +142,9 @@ class PPOMemory:
         images = torch.stack([self.images[i] for i in indices]).to(device)
         print(f"[PPOMemory] Loaded images with shape: {images.shape}")
         
+        # Clean up any intermediate tensors from image loading
+        torch.cuda.empty_cache()
+        
         # Check if actions are already PyTorch tensors
         if isinstance(self.actions[0], torch.Tensor):
             # Stack tensors directly instead of converting to numpy first
@@ -729,7 +732,9 @@ class PPOACTPolicy(nn.Module):
         
         # Get all states, images, and actions from memory
         all_states = torch.tensor(np.array(memory.states), dtype=torch.float32).to(device)
+        # CRITICAL FIX: Load all images to GPU and clean up intermediate tensors
         all_images = torch.stack(memory.images).to(device)
+        torch.cuda.empty_cache()  # Clean up after loading all images
         
         # Handle actions - check if they're already PyTorch tensors
         if isinstance(memory.actions[0], torch.Tensor):
@@ -970,6 +975,10 @@ class PPOACTPolicy(nn.Module):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                
+                # Clean up GPU memory after each batch to prevent accumulation
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
 
         # Clean up frozen policy immediately after use to free memory

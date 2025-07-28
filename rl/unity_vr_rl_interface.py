@@ -277,7 +277,6 @@ class UnityVRRLInterface(UnityVRInterface):
             
             # Store state and image for episode
             self.episode_states.append(qpos_numpy)
-            self.episode_images.append(curr_image)
             self.episode_timesteps.append(self.timestep)
             
             # Get action and value from PPO policy
@@ -407,6 +406,7 @@ class UnityVRRLInterface(UnityVRInterface):
                     print(f"[RL DEBUG] Storing placeholder log_prob: {placeholder_log_prob} (will be recomputed during PPO training)")
                     
                     self.episode_log_probs.append(placeholder_log_prob)
+                    self.episode_images.append(curr_image.detach().cpu())
                     
                     # Store full action chunk for episode - convert to CPU tensor for storage
                     # This ensures we keep all query actions for proper PPO training
@@ -429,6 +429,10 @@ class UnityVRRLInterface(UnityVRInterface):
             
             # Convert to list for JSON serialization
             action_list = action.tolist()
+            
+            # Clean up GPU memory after action processing to prevent VRAM accumulation
+            # if torch.cuda.is_available():
+            #     torch.cuda.empty_cache()
             
             return {
                 'action': action_list,
