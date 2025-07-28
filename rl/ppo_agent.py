@@ -585,55 +585,19 @@ class PPOACTPolicy(nn.Module):
         
         return kl_div
     
-    def update(self, memory, n_epochs=10, batch_size=64):
+    def _compute_fresh_values(self, all_states, all_images, all_actions):
         """
-        Update policy using PPO with KL constraint.
+        Compute fresh values using current value network.
+        Processes data in batches to avoid memory issues.
+        
+        Args:
+            all_states: Tensor of states [batch_size, state_dim]
+            all_images: Tensor of images [batch_size, num_cameras, channels, height, width]
+            all_actions: Tensor of actions [batch_size, num_queries, action_dim]
+            
+        Returns:
+            fresh_values: Tensor of computed values [batch_size]
         """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # CRITICAL FIX: Create a frozen copy of the current policy before updates
-        # This ensures accurate PPO ratio computation by comparing against the exact policy state
-        # that generated the actions during data collection
-        print("[PPO Update] Creating frozen copy of current policy for accurate ratio computation")
-        with torch.no_grad():
-            self.frozen_policy = copy.deepcopy(self.policy)
-            # Ensure frozen policy is in eval mode and gradients are disabled
-            self.frozen_policy.eval()
-            for param in self.frozen_policy.parameters():
-                param.requires_grad = False
-        print("[PPO Update] Frozen policy created successfully")
-        
-        # OPTIMIZATION: Compute fresh values using current value network and precompute advantages
-        # This ensures we use the current value network state for advantage computation
-        print("[PPO Update] Computing fresh values using current value network")
-        
-        # Get all states, images, and actions from memory
-        all_states = torch.tensor(np.array(memory.states), dtype=torch.float32).to(device)
-        all_images = torch.stack(memory.images).to(device)
-        
-        # Handle actions - check if they're already PyTorch tensors
-        if isinstance(memory.actions[0], torch.Tensor):
-            # Stack tensors directly instead of converting to numpy first
-            print(f"[PPO Update] Actions are PyTorch tensors with shape: {memory.actions[0].shape}")
-            all_actions = torch.stack([action.to(device) for action in memory.actions])
-        else:
-            # Original behavior for non-tensor actions
-            print(f"[PPO Update] Actions are not PyTorch tensors, converting from type: {type(memory.actions[0])}")
-            all_actions = torch.tensor(np.array(memory.actions), dtype=torch.float32).to(device)
-        
-        if all_actions is not None:
-            print(f"[PPO Update] Actions shape: {all_actions.shape}")
-            # Check if we have an extra dimension [batch_size, 1, num_queries, action_dim]
-            if len(all_actions.shape) == 4 and all_actions.shape[1] == 1:
-                print(f"[PPO Update] Detected extra dimension in actions tensor, squeezing it")
-                all_actions = all_actions.squeeze(1)  # Remove the extra dimension
-
-        print(f"[PPO Update] Final all_actions shape: {all_actions.shape}")
-        
-        all_rewards = torch.tensor(memory.rewards, dtype=torch.float32).to(device)
-        all_dones = torch.tensor(memory.dones, dtype=torch.float32).to(device)
-        
-        # Compute fresh values using current value network
         with torch.no_grad():
             # Process in batches to avoid memory issues
             batch_size = 64
@@ -739,6 +703,58 @@ class PPOACTPolicy(nn.Module):
                 print(f"[ERROR] Error during torch.cat: {e}")
                 raise
         
+        return fresh_values
+    
+    def update(self, memory, n_epochs=10, batch_size=64):
+        """
+        Update policy using PPO with KL constraint.
+        """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # CRITICAL FIX: Create a frozen copy of the current policy before updates
+        # This ensures accurate PPO ratio computation by comparing against the exact policy state
+        # that generated the actions during data collection
+        print("[PPO Update] Creating frozen copy of current policy for accurate ratio computation")
+        with torch.no_grad():
+            self.frozen_policy = copy.deepcopy(self.policy)
+            # Ensure frozen policy is in eval mode and gradients are disabled
+            self.frozen_policy.eval()
+            for param in self.frozen_policy.parameters():
+                param.requires_grad = False
+        print("[PPO Update] Frozen policy created successfully")
+        
+        # OPTIMIZATION: Compute fresh values using current value network and precompute advantages
+        # This ensures we use the current value network state for advantage computation
+        print("[PPO Update] Computing fresh values using current value network")
+        
+        # Get all states, images, and actions from memory
+        all_states = torch.tensor(np.array(memory.states), dtype=torch.float32).to(device)
+        all_images = torch.stack(memory.images).to(device)
+        
+        # Handle actions - check if they're already PyTorch tensors
+        if isinstance(memory.actions[0], torch.Tensor):
+            # Stack tensors directly instead of converting to numpy first
+            print(f"[PPO Update] Actions are PyTorch tensors with shape: {memory.actions[0].shape}")
+            all_actions = torch.stack([action.to(device) for action in memory.actions])
+        else:
+            # Original behavior for non-tensor actions
+            print(f"[PPO Update] Actions are not PyTorch tensors, converting from type: {type(memory.actions[0])}")
+            all_actions = torch.tensor(np.array(memory.actions), dtype=torch.float32).to(device)
+        
+        if all_actions is not None:
+            print(f"[PPO Update] Actions shape: {all_actions.shape}")
+            # Check if we have an extra dimension [batch_size, 1, num_queries, action_dim]
+            if len(all_actions.shape) == 4 and all_actions.shape[1] == 1:
+                print(f"[PPO Update] Detected extra dimension in actions tensor, squeezing it")
+                all_actions = all_actions.squeeze(1)  # Remove the extra dimension
+
+        print(f"[PPO Update] Final all_actions shape: {all_actions.shape}")
+        
+        all_rewards = torch.tensor(memory.rewards, dtype=torch.float32).to(device)
+        all_dones = torch.tensor(memory.dones, dtype=torch.float32).to(device)
+        
+        # Compute fresh values using current value network
+        fresh_values = self._compute_fresh_values(all_states, all_images, all_actions)
         print(f"[PPO Update] Computed fresh values: {fresh_values.shape}")
         
         # Compute advantages and returns using GAE with fresh values
