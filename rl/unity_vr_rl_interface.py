@@ -94,7 +94,7 @@ class UnityVRRLInterface(UnityVRInterface):
         self.episode_states = []
         self.episode_images = []
         self.episode_actions = []
-        self.episode_values = []
+        # Removed self.episode_values - values will be computed fresh during PPO update
         self.episode_log_probs = []
         self.episode_timesteps = []
         self.episode_start_time = None
@@ -229,7 +229,7 @@ class UnityVRRLInterface(UnityVRInterface):
         self.episode_states = []
         self.episode_images = []
         self.episode_actions = []
-        self.episode_values = []
+        # Removed self.episode_values - values will be computed fresh during PPO update
         self.episode_log_probs = []
         self.episode_timesteps = []
         
@@ -290,28 +290,28 @@ class UnityVRRLInterface(UnityVRInterface):
                     if time_index == 0:
                         # Get action from policy
                         result = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                        action_tensor, value, mu, logvar = result
+                        action_tensor, _, mu, logvar = result
                         
                         # print(f"[RL DEBUG] Raw action_tensor shape: {action_tensor.shape}, dtype: {action_tensor.dtype}")
                         # print(f"[RL DEBUG] Value: {value}")
                         
                         all_actions = action_tensor  # Shape: [batch, num_queries, action_dim]
                         self.last_actions = all_actions  # Store for future timesteps
-                        self.last_value = value  # Store value for reuse
+                        self.last_value = None  # Store value for reuse
                     else:
                         # Use previously computed actions if not querying on this timestep
                         if self.last_actions is None:
                             # First timestep or in case there's no previous action
                             result = self.ppo_policy.evaluate_actions(qpos, curr_image)
-                            action_tensor, value, mu, logvar = result
+                            action_tensor, _, mu, logvar = result
                             
                             all_actions = action_tensor
                             self.last_actions = all_actions
-                            self.last_value = value
+                            self.last_value = None
                             time_index = 0
                         else:
                             all_actions = self.last_actions
-                            value = self.last_value
+                            value = None
                     
                     # Apply temporal aggregation if enabled (same logic as parent class)
                     if self.temporal_agg:
@@ -392,8 +392,8 @@ class UnityVRRLInterface(UnityVRInterface):
                     # Keep as tensor for log probability computation
                     raw_action = raw_action.squeeze(0)  # Shape: [action_dim]
                     
-                    # Store value for episode
-                    self.episode_values.append(value.item())
+                    # OPTIMIZATION: Don't store values during rollout - compute them fresh during PPO update
+                    # This ensures we use the current value network state for advantage computation
                     
                     # OPTIMIZATION: Store placeholder log probability that will be recomputed during PPO training
                     # According to research, we can avoid recording μ and logvar during data collection
@@ -458,9 +458,9 @@ class UnityVRRLInterface(UnityVRInterface):
         matches_found = 0
         
         # Store transitions in memory
-        for i, (state, image, action, value, log_prob, timestep) in enumerate(
+        for i, (state, image, action, log_prob, timestep) in enumerate(
             zip(self.episode_states, self.episode_images, self.episode_actions, 
-                self.episode_values, self.episode_log_probs, self.episode_timesteps)):
+                self.episode_log_probs, self.episode_timesteps)):
             
             # Get reward for this timestep (default to 0 if not provided)
             reward = 0.0
@@ -478,7 +478,7 @@ class UnityVRRLInterface(UnityVRInterface):
                 action=action,
                 reward=reward,
                 done=is_done,
-                value=value,
+                value=0.0,  # Placeholder - will compute fresh values during PPO update
                 action_log_prob=log_prob,
                 timestep=timestep
             )

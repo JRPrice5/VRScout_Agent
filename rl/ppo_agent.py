@@ -8,6 +8,7 @@ during reinforcement learning fine-tuning.
 """
 
 import os
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -240,6 +241,9 @@ class PPOACTPolicy(nn.Module):
         # Load weights from pretrained policy
         self.policy.load_state_dict(pretrained_policy.state_dict())
         
+        # Initialize frozen policy (will be set before each update)
+        self.frozen_policy = None
+        
         # Create value network (separate from policy network)
         # Use latent_dim instead of hidden_dim since we're feeding mu (latent representation)
         latent_dim = args_override['latent_dim']
@@ -446,47 +450,31 @@ class PPOACTPolicy(nn.Module):
                 a_hat, _, (mu, logvar) = self.policy.model(qpos, image, env_state)
                 
                 # DETR VAE returns mu and logvar as None in inference mode
-                
-                # Compute value using the latent representation
-                print(f"[evaluate_actions] Computing value with mu: {mu.shape}")
-                value = self.value_net(mu).squeeze(-1)
-                print(f"[evaluate_actions] Value shape: {value.shape}")
-                return a_hat, value, mu, logvar
+                return a_hat, None, mu, logvar
                 
             except Exception as e:
                 print(f"[PPO ERROR] Error in model forward pass: {e}")
-                # Create normal distribution
-                print(f"[evaluate_actions] Creating distribution with mu: {mu.shape}, std: {std.shape}")
-                dist = torch.distributions.Normal(mu, std)
-                
-                # Create fallback values
-                batch_size = qpos.shape[0]
-                action_dim = getattr(self.policy.model, 'state_dim', 32)
-                num_queries = getattr(self.policy.model, 'num_queries', 8)
-                
-                # Create dummy action and value
-                dummy_action = torch.zeros(batch_size, num_queries, action_dim).cuda()
-                dummy_value = torch.zeros(batch_size).cuda()
-                
-                print(f"[PPO ERROR] Using fallback action shape: {dummy_action.shape}, value shape: {dummy_value.shape}")
-                return dummy_action, dummy_value
+                return None, None, None, None
     
-    def evaluate_actions_with_pretrained(self, qpos, image, actions=None, is_pad=None):
+    def evaluate_actions_with_frozen_policy(self, qpos, image, actions=None, is_pad=None):
         """
-        Evaluate actions using the pretrained policy to recompute old log probabilities.
-        This is used during PPO training to avoid storing μ and logvar during data collection.
+        Evaluate actions using the frozen policy to compute old log probabilities for PPO ratio.
+        This ensures accurate PPO ratio computation by using the exact policy state from before the update.
         """
-        # Get features from pretrained policy network
+        if self.frozen_policy is None:
+            raise ValueError("Frozen policy not set. Call this method only during PPO updates.")
+        
+        # Get features from frozen policy network
         env_state = None
         
         # Debug print for original shape
-        print(f"[evaluate_actions_with_pretrained] Original image shape: {image.shape}")
+        print(f"[evaluate_actions_with_frozen_policy] Original image shape: {image.shape}")
         
         # Handle image tensor dimensions for conv2d compatibility (same as evaluate_actions)
         if len(image.shape) == 6:
             batch_size, dim1, dim2, channels, height, width = image.shape
             image = image.squeeze(2)
-            print(f"[evaluate_actions_with_pretrained] Squeezed redundant dim: {image.shape}")
+            print(f"[evaluate_actions_with_frozen_policy] Squeezed redundant dim: {image.shape}")
         
         # Normalize image
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -494,16 +482,16 @@ class PPOACTPolicy(nn.Module):
         image = normalize(image)
         
         # Debug print for input tensor shapes
-        print(f"[evaluate_actions_with_pretrained] Input shapes - qpos: {qpos.shape}, image: {image.shape}")
+        print(f"[evaluate_actions_with_frozen_policy] Input shapes - qpos: {qpos.shape}, image: {image.shape}")
         if actions is not None:
-            print(f"[evaluate_actions_with_pretrained] Actions shape: {actions.shape}")
+            print(f"[evaluate_actions_with_frozen_policy] Actions shape: {actions.shape}")
         
         # Handle actions tensor dimensions (same logic as evaluate_actions)
         if actions is not None:
             if len(actions.shape) == 4 and actions.shape[1] == 1:
-                print(f"[evaluate_actions_with_pretrained] Detected extra dimension in actions tensor, squeezing it")
+                print(f"[evaluate_actions_with_frozen_policy] Detected extra dimension in actions tensor, squeezing it")
                 actions = actions.squeeze(1)
-                print(f"[evaluate_actions_with_pretrained] After squeezing: {actions.shape}")
+                print(f"[evaluate_actions_with_frozen_policy] After squeezing: {actions.shape}")
             
             # Handle is_pad tensor if needed
             if is_pad is None:
@@ -511,21 +499,21 @@ class PPOACTPolicy(nn.Module):
                     is_pad = torch.zeros((actions.shape[0], actions.shape[1]), dtype=torch.bool, device=actions.device)
                 else:
                     is_pad = torch.zeros_like(actions[..., 0], dtype=torch.bool)
-                print(f"[evaluate_actions_with_pretrained] Created default is_pad with shape: {is_pad.shape}")
+                print(f"[evaluate_actions_with_frozen_policy] Created default is_pad with shape: {is_pad.shape}")
         
-        print(f"[evaluate_actions_with_pretrained] Before pretrained model call - qpos: {qpos.shape}, image: {image.shape}")
+        print(f"[evaluate_actions_with_frozen_policy] Before frozen model call - qpos: {qpos.shape}, image: {image.shape}")
         if actions is not None:
-            print(f"[evaluate_actions_with_pretrained] actions: {actions.shape}, is_pad: {is_pad.shape}")
+            print(f"[evaluate_actions_with_frozen_policy] actions: {actions.shape}, is_pad: {is_pad.shape}")
         
-        # Forward pass through pretrained policy
+        # Forward pass through frozen policy (no gradient)
         with torch.no_grad():
-            _, _, (mu, logvar) = self.pretrained_policy.model(qpos, image, env_state, actions, is_pad)
+            _, _, (mu, logvar) = self.frozen_policy.model(qpos, image, env_state, actions, is_pad)
         
-        print(f"[evaluate_actions_with_pretrained] Pretrained policy output - mu: {mu.shape}, logvar: {logvar.shape}")
+        print(f"[evaluate_actions_with_frozen_policy] Frozen policy output - mu: {mu.shape}, logvar: {logvar.shape}")
         
         # Compute log probability using the shared utility function
         if mu is None or logvar is None:
-            raise ValueError("Pretrained policy returned None for mu or logvar")
+            raise ValueError("Frozen policy returned None for mu or logvar")
         
         # Use the shared utility function with mean aggregation (consistent with current policy)
         action_log_probs = compute_gaussian_log_prob(
@@ -536,7 +524,7 @@ class PPOACTPolicy(nn.Module):
             numerical_stability=True
         )
         
-        print(f"[evaluate_actions_with_pretrained] Computed action_log_probs: {action_log_probs.shape}")
+        print(f"[evaluate_actions_with_frozen_policy] Computed action_log_probs: {action_log_probs.shape}")
         
         # Return dummy values for unused outputs (we only need log probabilities)
         dummy_values = torch.zeros(qpos.shape[0], device=qpos.device)
@@ -615,8 +603,87 @@ class PPOACTPolicy(nn.Module):
         """
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Compute advantages and returns
-        memory.compute_advantages_and_returns()
+        # CRITICAL FIX: Create a frozen copy of the current policy before updates
+        # This ensures accurate PPO ratio computation by comparing against the exact policy state
+        # that generated the actions during data collection
+        print("[PPO Update] Creating frozen copy of current policy for accurate ratio computation")
+        with torch.no_grad():
+            self.frozen_policy = copy.deepcopy(self.policy)
+            # Ensure frozen policy is in eval mode and gradients are disabled
+            self.frozen_policy.eval()
+            for param in self.frozen_policy.parameters():
+                param.requires_grad = False
+        print("[PPO Update] Frozen policy created successfully")
+        
+        # OPTIMIZATION: Compute fresh values using current value network and precompute advantages
+        # This ensures we use the current value network state for advantage computation
+        print("[PPO Update] Computing fresh values using current value network")
+        
+        # Get all states and images from memory
+        all_states = torch.tensor(np.array(memory.states), dtype=torch.float32).to(device)
+        all_images = torch.stack(memory.images).to(device)
+        all_rewards = torch.tensor(memory.rewards, dtype=torch.float32).to(device)
+        all_dones = torch.tensor(memory.dones, dtype=torch.float32).to(device)
+        
+        # Compute fresh values using current value network
+        with torch.no_grad():
+            # Process in batches to avoid memory issues
+            batch_size = 64
+            fresh_values = []
+            
+            for i in range(0, len(all_states), batch_size):
+                batch_states = all_states[i:i+batch_size]
+                batch_images = all_images[i:i+batch_size]
+                
+                # Handle image normalization
+                if len(batch_images.shape) == 6:
+                    batch_images = batch_images.squeeze(2)
+                
+                normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                               std=[0.229, 0.224, 0.225])
+                batch_images = normalize(batch_images)
+                
+                # Get latent representation for value computation
+                env_state = None
+                _, _, (mu, _) = self.policy.model(batch_states, batch_images, env_state)
+                batch_values = self.value_net(mu).squeeze(-1)
+                fresh_values.append(batch_values)
+            
+            fresh_values = torch.cat(fresh_values, dim=0)
+        
+        print(f"[PPO Update] Computed fresh values: {fresh_values.shape}")
+        
+        # Compute advantages and returns using GAE with fresh values
+        advantages = torch.zeros_like(all_rewards).to(device)
+        returns = torch.zeros_like(all_rewards).to(device)
+        
+        last_advantage = 0
+        next_return = 0
+        
+        # Process episodes in reverse order
+        for t in reversed(range(len(all_rewards))):
+            if t == len(all_rewards) - 1 or all_dones[t]:
+                next_value = 0
+                next_advantage = 0
+            else:
+                next_value = fresh_values[t + 1]
+                next_advantage = advantages[t + 1]
+            
+            # TD error
+            delta = all_rewards[t] + memory.gamma * next_value * (1 - all_dones[t]) - fresh_values[t]
+            
+            # GAE
+            advantages[t] = delta + memory.gamma * memory.gae_lambda * (1 - all_dones[t]) * next_advantage
+            
+            # Returns
+            returns[t] = all_rewards[t] + memory.gamma * (1 - all_dones[t]) * next_return
+            next_return = returns[t]
+        
+        # Normalize advantages for stability
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        print(f"[PPO Update] Computed advantages: {advantages.shape}, mean: {advantages.mean():.4f}, std: {advantages.std():.4f}")
+        print(f"[PPO Update] Computed returns: {returns.shape}, mean: {returns.mean():.4f}, std: {returns.std():.4f}")
         
         # Create optimizer for policy and value networks
         optimizer = optim.Adam([
@@ -631,8 +698,12 @@ class PPOACTPolicy(nn.Module):
             
             # Process each batch
             for batch_indices in batches:
-                # Get batch data
-                states, images, actions, old_log_probs, returns, advantages = memory.get_batch_data(batch_indices)
+                # Get batch data (excluding returns and advantages which we precomputed)
+                states, images, actions, old_log_probs, _, _ = memory.get_batch_data(batch_indices)
+                
+                # Use precomputed advantages and returns for this batch
+                batch_advantages = advantages[batch_indices]
+                batch_returns = returns[batch_indices]
                 
                 # Debug print for all tensor shapes before processing
                 print(f"[PPO Update] Batch data shapes:")
@@ -640,8 +711,8 @@ class PPOACTPolicy(nn.Module):
                 print(f"  - images: {images.shape}, dtype: {images.dtype}")
                 print(f"  - actions: {actions.shape}")
                 print(f"  - old_log_probs: {old_log_probs.shape}")
-                print(f"  - returns: {returns.shape}")
-                print(f"  - advantages: {advantages.shape}")
+                print(f"  - returns: {batch_returns.shape}")
+                print(f"  - advantages: {batch_advantages.shape}")
                 print(f"  - batch_indices length: {len(batch_indices)}")
                 
                 # Evaluate actions with current policy
@@ -649,13 +720,13 @@ class PPOACTPolicy(nn.Module):
                 action_log_probs, values, entropy, mu, logvar = self.evaluate_actions(states, images, actions)
                 print(f"[PPO Update] After evaluate_actions - action_log_probs: {action_log_probs.shape}, values: {values.shape}")
                 
-                # OPTIMIZATION: Recompute old log probabilities using pretrained policy
-                # This avoids the need to store μ and logvar during data collection
-                # We use the stored action chunks and recompute log probabilities with the pretrained policy
-                print(f"[PPO Update] Recomputing old log probabilities using pretrained policy")
+                # CRITICAL FIX: Recompute old log probabilities using frozen policy for accurate PPO ratio
+                # This ensures we compare against the exact policy state from before the update
+                # instead of using the original pretrained policy which may be very different
+                print(f"[PPO Update] Recomputing old log probabilities using frozen policy")
                 with torch.no_grad():
-                    old_action_log_probs, _, _, old_mu, old_logvar = self.evaluate_actions_with_pretrained(states, images, actions)
-                print(f"[PPO Update] Recomputed old_log_probs: {old_action_log_probs.shape}")
+                    old_action_log_probs, _, _, old_mu, old_logvar = self.evaluate_actions_with_frozen_policy(states, images, actions)
+                print(f"[PPO Update] Recomputed old_log_probs using frozen policy: {old_action_log_probs.shape}")
                 
                 # Compute KL divergence to pretrained policy
                 kl_div = self.get_kl_divergence(states, images, actions)
@@ -702,15 +773,15 @@ class PPOACTPolicy(nn.Module):
                 clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
                 
                 # Check advantages for numerical stability
-                if torch.isnan(advantages).any() or torch.isinf(advantages).any():
+                if torch.isnan(batch_advantages).any() or torch.isinf(batch_advantages).any():
                     print(f"[WARNING] NaN or Inf detected in advantages!")
-                    advantages = torch.where(torch.isnan(advantages) | torch.isinf(advantages), 
-                                           torch.tensor(0.0, device=advantages.device), 
-                                           advantages)
+                    batch_advantages = torch.where(torch.isnan(batch_advantages) | torch.isinf(batch_advantages), 
+                                           torch.tensor(0.0, device=batch_advantages.device), 
+                                           batch_advantages)
                 
                 # Compute policy loss with additional stability checks
-                policy_obj1 = ratio * advantages
-                policy_obj2 = clipped_ratio * advantages
+                policy_obj1 = ratio * batch_advantages
+                policy_obj2 = clipped_ratio * batch_advantages
                 
                 # Check for NaN/Inf in policy objectives
                 if torch.isnan(policy_obj1).any() or torch.isinf(policy_obj1).any():
@@ -746,13 +817,13 @@ class PPOACTPolicy(nn.Module):
                                         torch.tensor(0.0, device=values.device), 
                                         values)
                 
-                if torch.isnan(returns).any() or torch.isinf(returns).any():
+                if torch.isnan(batch_returns).any() or torch.isinf(batch_returns).any():
                     print(f"[WARNING] NaN or Inf detected in returns!")
-                    returns = torch.where(torch.isnan(returns) | torch.isinf(returns), 
-                                         torch.tensor(0.0, device=returns.device), 
-                                         returns)
+                    batch_returns = torch.where(torch.isnan(batch_returns) | torch.isinf(batch_returns), 
+                                         torch.tensor(0.0, device=batch_returns.device), 
+                                         batch_returns)
                 
-                value_loss = F.mse_loss(values, returns)
+                value_loss = F.mse_loss(values, batch_returns)
                 
                 # Diagnose training issues
                 issues, suggestions = diagnose_ppo_training_issues(
@@ -793,6 +864,12 @@ class PPOACTPolicy(nn.Module):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+        
+        # Clean up frozen policy to free memory
+        print("[PPO Update] Cleaning up frozen policy to free memory")
+        self.frozen_policy = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # Return statistics for logging
         return {
