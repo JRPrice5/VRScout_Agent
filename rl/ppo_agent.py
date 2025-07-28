@@ -654,14 +654,23 @@ class PPOACTPolicy(nn.Module):
             batch_size = 64
             fresh_values = []
             
+            print(f"[DEBUG] Starting batch processing with {len(all_states)} states")
+            print(f"[DEBUG] all_states shape: {all_states.shape}, all_images shape: {all_images.shape}, all_actions shape: {all_actions.shape}")
+            
             for i in range(0, len(all_states), batch_size):
+                print(f"\n[DEBUG] Processing batch {i//batch_size + 1}/{(len(all_states) + batch_size - 1)//batch_size}")
                 batch_states = all_states[i:i+batch_size]
                 batch_images = all_images[i:i+batch_size]
                 
+                print(f"[DEBUG] Batch shapes - states: {batch_states.shape}, images: {batch_images.shape}")
+                
                 # Handle image normalization
                 if len(batch_images.shape) == 6:
+                    print(f"[DEBUG] Found 6D image tensor with shape {batch_images.shape}, squeezing dimension 2")
                     batch_images = batch_images.squeeze(2)
+                    print(f"[DEBUG] After squeeze: {batch_images.shape}")
                 
+                print(f"[DEBUG] Applying normalization to images")
                 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                std=[0.229, 0.224, 0.225])
                 batch_images = normalize(batch_images)
@@ -671,13 +680,71 @@ class PPOACTPolicy(nn.Module):
                 
                 # Get corresponding actions for this batch
                 batch_actions = all_actions[i:i+batch_size]
+                print(f"[DEBUG] Batch actions shape: {batch_actions.shape}")
                 
-                # Pass actions to ensure model runs in training mode and computes mu/logvar
-                _, _, (mu, _) = self.policy.model(batch_states, batch_images, env_state, actions=batch_actions)
-                batch_values = self.value_net(mu).squeeze(-1)
-                fresh_values.append(batch_values)
+                try:
+                    print(f"[DEBUG] Calling model with batch_states: {batch_states.shape}, batch_images: {batch_images.shape}")
+                    # Pass actions to ensure model runs in training mode and computes mu/logvar
+                    model_output = self.policy.model(batch_states, batch_images, env_state, actions=batch_actions)
+                    print(f"[DEBUG] Model output type: {type(model_output)}, length: {len(model_output) if isinstance(model_output, tuple) else 'N/A'}")
+                    
+                    # Unpack model output with proper error checking
+                    if isinstance(model_output, tuple) and len(model_output) == 3:
+                        a_hat, is_pad_hat, latent_vars = model_output
+                        print(f"[DEBUG] Unpacked model output - a_hat: {type(a_hat)}, is_pad_hat: {type(is_pad_hat)}, latent_vars: {type(latent_vars)}")
+                        
+                        if isinstance(latent_vars, tuple) and len(latent_vars) == 2:
+                            mu, logvar = latent_vars
+                            print(f"[DEBUG] Latent variables - mu: {type(mu)}, logvar: {type(logvar)}")
+                            
+                            if mu is None:
+                                print(f"[ERROR] mu is None! This will cause the error.")
+                                # Try to force training mode to get mu
+                                print(f"[DEBUG] Attempting to run model in training mode...")
+                                self.policy.model.train()
+                                _, _, (mu, _) = self.policy.model(batch_states, batch_images, env_state, actions=batch_actions)
+                                self.policy.model.eval()
+                                print(f"[DEBUG] After training mode attempt, mu is: {type(mu)}")
+                            else:
+                                print(f"[DEBUG] mu shape: {mu.shape}")
+                        else:
+                            print(f"[ERROR] Unexpected latent_vars structure: {latent_vars}")
+                            raise ValueError(f"Expected tuple of length 2 for latent_vars, got: {latent_vars}")
+                    else:
+                        print(f"[ERROR] Unexpected model output structure: {model_output}")
+                        raise ValueError(f"Expected tuple of length 3 for model output, got: {model_output}")
+                    
+                    print(f"[DEBUG] Computing values using mu with shape: {mu.shape}")
+                    batch_values = self.value_net(mu).squeeze(-1)
+                    print(f"[DEBUG] batch_values shape: {batch_values.shape}")
+                    fresh_values.append(batch_values)
+                    print(f"[DEBUG] fresh_values list length: {len(fresh_values)}")
+                    
+                except Exception as e:
+                    print(f"[ERROR] Exception in batch {i//batch_size + 1}: {e}")
+                    print(f"[ERROR] Exception type: {type(e).__name__}")
+                    import traceback
+                    print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                    raise
             
-            fresh_values = torch.cat(fresh_values, dim=0)
+            print(f"\n[DEBUG] Concatenating {len(fresh_values)} value tensors")
+            if len(fresh_values) == 0:
+                print(f"[ERROR] fresh_values list is empty! Cannot concatenate.")
+                raise ValueError("No value tensors to concatenate")
+                
+            # Check each tensor in fresh_values
+            for i, tensor in enumerate(fresh_values):
+                if tensor is None:
+                    print(f"[ERROR] fresh_values[{i}] is None!")
+                else:
+                    print(f"[DEBUG] fresh_values[{i}] shape: {tensor.shape}")
+            
+            try:
+                fresh_values = torch.cat(fresh_values, dim=0)
+                print(f"[DEBUG] Successfully concatenated values with shape: {fresh_values.shape}")
+            except Exception as e:
+                print(f"[ERROR] Error during torch.cat: {e}")
+                raise
         
         print(f"[PPO Update] Computed fresh values: {fresh_values.shape}")
         
