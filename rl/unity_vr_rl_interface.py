@@ -246,7 +246,7 @@ class UnityVRRLInterface(UnityVRInterface):
         if not self.is_training:
             return super()._process_state_and_get_action(state_data)
         
-        with torch.no_grad():
+        with torch.inference_mode():
             # Extract qpos from state data
             qpos_numpy = np.array(state_data['qpos'], dtype=np.float32)
             # print(f"[RL DEBUG] Input qpos_numpy shape: {qpos_numpy.shape}, dtype: {qpos_numpy.dtype}")
