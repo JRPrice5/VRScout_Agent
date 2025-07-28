@@ -154,27 +154,12 @@ class PPOMemory:
         
         print(f"[PPOMemory] Final actions shape: {actions.shape}")
         
-        old_log_probs = torch.tensor(np.array([self.action_log_probs[i] for i in indices]), dtype=torch.float32).to(device)
-        print(f"[PPOMemory] Loaded old_log_probs with shape: {old_log_probs.shape}")
-        
-        returns = torch.tensor(np.array([self.returns[i] for i in indices]), dtype=torch.float32).to(device)
-        print(f"[PPOMemory] Loaded returns with shape: {returns.shape}")
-        
-        advantages = torch.tensor(np.array([self.advantages[i] for i in indices]), dtype=torch.float32).to(device)
-        print(f"[PPOMemory] Loaded advantages with shape: {advantages.shape}")
-        
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
         print(f"[PPOMemory] Returning batch data with shapes:")
         print(f"  - states: {states.shape}")
         print(f"  - images: {images.shape}")
         print(f"  - actions: {actions.shape}")
-        print(f"  - old_log_probs: {old_log_probs.shape}")
-        print(f"  - returns: {returns.shape}")
-        print(f"  - advantages: {advantages.shape}")
         
-        return states, images, actions, old_log_probs, returns, advantages
+        return states, images, actions
     
     def clear(self):
         """Clear memory"""
