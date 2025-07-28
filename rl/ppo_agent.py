@@ -625,7 +625,19 @@ class PPOACTPolicy(nn.Module):
         # Get all states, images, and actions from memory
         all_states = torch.tensor(np.array(memory.states), dtype=torch.float32).to(device)
         all_images = torch.stack(memory.images).to(device)
-        all_actions = torch.tensor(np.array(memory.actions), dtype=torch.float32).to(device)
+        
+        # Handle actions - check if they're already PyTorch tensors
+        if isinstance(memory.actions[0], torch.Tensor):
+            # Stack tensors directly instead of converting to numpy first
+            print(f"[PPO Update] Actions are PyTorch tensors with shape: {memory.actions[0].shape}")
+            all_actions = torch.stack([action.to(device) for action in memory.actions])
+        else:
+            # Original behavior for non-tensor actions
+            print(f"[PPO Update] Actions are not PyTorch tensors, converting from type: {type(memory.actions[0])}")
+            all_actions = torch.tensor(np.array(memory.actions), dtype=torch.float32).to(device)
+        
+        print(f"[PPO Update] Final all_actions shape: {all_actions.shape}")
+        
         all_rewards = torch.tensor(memory.rewards, dtype=torch.float32).to(device)
         all_dones = torch.tensor(memory.dones, dtype=torch.float32).to(device)
         
