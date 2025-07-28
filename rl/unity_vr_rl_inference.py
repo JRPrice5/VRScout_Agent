@@ -71,7 +71,10 @@ class UnityVRRLInference(UnityVRInterface):
                         print(f"Error loading fixed state dict: {e}")
                         print("Attempting to load original state dict...")
                         policy.model.load_state_dict(policy_state_dict)
-                    
+
+                    policy.cuda()
+                    policy.eval()
+
                     return policy
                 else:
                     raise ValueError(f"Unsupported policy class for PPO: {self.policy_class}")
