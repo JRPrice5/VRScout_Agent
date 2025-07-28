@@ -834,6 +834,12 @@ class PPOACTPolicy(nn.Module):
                     old_action_log_probs, _, _, old_mu, old_logvar = self.evaluate_actions_with_frozen_policy(states, images, actions)
                 print(f"[PPO Update] Recomputed old_log_probs using frozen policy: {old_action_log_probs.shape}")
                 
+                # Clean up frozen policy immediately after use to free memory
+                print("[PPO Update] Cleaning up frozen policy to free memory")
+                self.frozen_policy = None
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
                 # Compute KL divergence to pretrained policy
                 kl_div = self.get_kl_divergence(states, images, actions)
                 
@@ -971,11 +977,6 @@ class PPOACTPolicy(nn.Module):
                 loss.backward()
                 optimizer.step()
         
-        # Clean up frozen policy to free memory
-        print("[PPO Update] Cleaning up frozen policy to free memory")
-        self.frozen_policy = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
             
         # Switch policy back to eval mode for data collection
         self.policy.eval()
