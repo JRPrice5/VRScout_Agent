@@ -700,7 +700,7 @@ class PPOACTPolicy(nn.Module):
                         a_hat, is_pad_hat, latent_vars = model_output
                         print(f"[DEBUG] Unpacked model output - a_hat: {type(a_hat)}, is_pad_hat: {type(is_pad_hat)}, latent_vars: {type(latent_vars)}")
                         
-                        if isinstance(latent_vars, tuple) and len(latent_vars) == 2:
+                        if (isinstance(latent_vars, (tuple, list)) and len(latent_vars) == 2):
                             mu, logvar = latent_vars
                             print(f"[DEBUG] Latent variables - mu: {type(mu)}, logvar: {type(logvar)}")
                             
@@ -709,14 +709,15 @@ class PPOACTPolicy(nn.Module):
                                 # Try to force training mode to get mu
                                 print(f"[DEBUG] Attempting to run model in training mode...")
                                 self.policy.model.train()
-                                _, _, (mu, _) = self.policy.model(batch_states, batch_images, env_state, actions=batch_actions)
+                                _, _, latent_vars_retry = self.policy.model(batch_states, batch_images, env_state, actions=batch_actions)
+                                mu, _ = latent_vars_retry if isinstance(latent_vars_retry, (tuple, list)) else (None, None)
                                 self.policy.model.eval()
                                 print(f"[DEBUG] After training mode attempt, mu is: {type(mu)}")
                             else:
                                 print(f"[DEBUG] mu shape: {mu.shape}")
                         else:
                             print(f"[ERROR] Unexpected latent_vars structure: {latent_vars}")
-                            raise ValueError(f"Expected tuple of length 2 for latent_vars, got: {latent_vars}")
+                            raise ValueError(f"Expected tuple or list of length 2 for latent_vars, got: {latent_vars}")
                     else:
                         print(f"[ERROR] Unexpected model output structure: {model_output}")
                         raise ValueError(f"Expected tuple of length 3 for model output, got: {model_output}")
