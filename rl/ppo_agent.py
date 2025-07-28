@@ -699,7 +699,7 @@ class PPOACTPolicy(nn.Module):
             # Process each batch
             for batch_indices in batches:
                 # Get batch data (excluding returns and advantages which we precomputed)
-                states, images, actions, old_log_probs, _, _ = memory.get_batch_data(batch_indices)
+                states, images, actions, _, _, _ = memory.get_batch_data(batch_indices)
                 
                 # Use precomputed advantages and returns for this batch
                 batch_advantages = advantages[batch_indices]
@@ -710,7 +710,6 @@ class PPOACTPolicy(nn.Module):
                 print(f"  - states: {states.shape}")
                 print(f"  - images: {images.shape}, dtype: {images.dtype}")
                 print(f"  - actions: {actions.shape}")
-                print(f"  - old_log_probs: {old_log_probs.shape}")
                 print(f"  - returns: {batch_returns.shape}")
                 print(f"  - advantages: {batch_advantages.shape}")
                 print(f"  - batch_indices length: {len(batch_indices)}")
