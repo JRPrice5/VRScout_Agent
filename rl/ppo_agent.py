@@ -183,7 +183,7 @@ class PPOACTPolicy(nn.Module):
     """
     PPO policy for fine-tuning ACT model with KL constraint to original behavior policy.
     """
-    def __init__(self, pretrained_policy, kl_weight=0.05, clip_param=0.2, value_coef=0.5, entropy_coef=0.01, lr_ppo=1e-5):
+    def __init__(self, pretrained_policy, kl_weight=0.05, clip_param=0.2, value_coef=0.5, entropy_coef=0.01, lr_ppo=1e-5, lr_backbone=None):
         super().__init__()
         
         # Store the pretrained policy for KL constraint
@@ -255,6 +255,17 @@ class PPOACTPolicy(nn.Module):
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
         self.lr_ppo = lr_ppo
+        
+        # Set lr_backbone - if not provided, use extracted value or default to lr_ppo/10
+        if lr_backbone is not None:
+            self.lr_backbone = lr_backbone
+        else:
+            # Try to extract from pretrained policy, otherwise use lr_ppo/10 as default
+            self.lr_backbone = args_override.get('lr_backbone', lr_ppo / 10.0)
+        
+        print(f"PPO Learning Rates:")
+        print(f"  Main policy lr: {self.lr_ppo}")
+        print(f"  Backbone lr: {self.lr_backbone}")
     
     def forward(self, qpos, image):
         """Forward pass for inference"""
@@ -794,11 +805,40 @@ class PPOACTPolicy(nn.Module):
         print(f"[PPO Update] Computed advantages: {advantages.shape}, mean: {advantages.mean():.4f}, std: {advantages.std():.4f}")
         print(f"[PPO Update] Computed returns: {returns.shape}, mean: {returns.mean():.4f}, std: {returns.std():.4f}")
         
-        # Create optimizer for policy and value networks
-        optimizer = optim.Adam([
-            {'params': self.policy.parameters()},
-            {'params': self.value_net.parameters()}
-        ], lr=self.lr_ppo)
+        # Create optimizer with separate learning rates for backbone and other parameters
+        # Follow the same pattern as the original ACT model optimizer
+        policy_param_dicts = [
+            {
+                "params": [p for n, p in self.policy.named_parameters() if "backbone" not in n and p.requires_grad],
+                "lr": self.lr_ppo
+            },
+            {
+                "params": [p for n, p in self.policy.named_parameters() if "backbone" in n and p.requires_grad],
+                "lr": self.lr_backbone
+            },
+            {
+                "params": self.value_net.parameters(),
+                "lr": self.lr_ppo  # Value network uses main learning rate
+            }
+        ]
+        
+        # Count parameters in each group for debugging
+        backbone_params = [p for n, p in self.policy.named_parameters() if "backbone" in n and p.requires_grad]
+        non_backbone_params = [p for n, p in self.policy.named_parameters() if "backbone" not in n and p.requires_grad]
+        value_params = list(self.value_net.parameters())
+        
+        print(f"[PPO Optimizer] Parameter groups:")
+        print(f"  Non-backbone parameters: {len(non_backbone_params)} (lr={self.lr_ppo})")
+        print(f"  Backbone parameters: {len(backbone_params)} (lr={self.lr_backbone})")
+        print(f"  Value network parameters: {len(value_params)} (lr={self.lr_ppo})")
+        
+        # Filter out empty parameter groups
+        filtered_param_dicts = [group for group in policy_param_dicts if len(list(group["params"])) > 0]
+        
+        if len(filtered_param_dicts) == 0:
+            raise ValueError("No trainable parameters found in policy or value network")
+        
+        optimizer = optim.Adam(filtered_param_dicts)
         
         # Switch policy to training mode for updates
         self.policy.train()

@@ -63,7 +63,8 @@ class UnityVRRLInterface(UnityVRInterface):
             clip_param=self.rl_config['clip_param'],
             value_coef=self.rl_config['value_coef'],
             entropy_coef=self.rl_config['entropy_coef'],
-            lr_ppo=self.rl_config['lr_ppo']
+            lr_ppo=self.rl_config['lr_ppo'],
+            lr_backbone=self.rl_config['lr_backbone']
         )
         
         # Initialize PPO memory buffer
@@ -139,7 +140,8 @@ class UnityVRRLInterface(UnityVRInterface):
             'update_frequency': 2048,  # Update after collecting this many steps
             'max_episodes': 1000,
             'save_frequency': 100,  # Save model every N episodes
-            'lr_ppo': 1e-5
+            'lr_ppo': 1e-5,
+            'lr_backbone': 1e-6  # Separate learning rate for backbone/encoder components
             }
     
     def _load_pretrained_policy(self, ckpt_path):
@@ -817,6 +819,7 @@ def main():
     parser.add_argument('--kl_decay_factor', type=float, default=0.95, help='KL weight decay factor')
     parser.add_argument('--kl_decay_steps', type=int, default=100, help='KL weight decay steps')
     parser.add_argument('--lr_ppo', type=float, default=1e-5, help='PPO learning rate')
+
     
     args = parser.parse_args()
     
@@ -837,7 +840,8 @@ def main():
         'update_frequency': args.update_frequency,
         'max_episodes': args.max_episodes,
         'save_frequency': 100,
-        'lr_ppo': args.lr_ppo
+        'lr_ppo': args.lr_ppo,
+        'lr_backbone': args.lr_backbone
     }
     
     # Create RL interface
