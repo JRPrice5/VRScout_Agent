@@ -54,7 +54,8 @@ class UnityVRInterface:
                  enc_layers=4,
                  dec_layers=7,
                  nheads=8,
-                 query_frequency=1):
+                 query_frequency=1,
+                 reverse_weighting=False):
         """
         Initialize the interface.
         
@@ -80,6 +81,7 @@ class UnityVRInterface:
             nheads: Number of attention heads
             kl_weight: KL Weight for ACT policy
             chunk_size: Chunk size for ACT policy
+            reverse_weighting: Whether to put more weight on older actions instead of recent ones
         """
         self.host = host
         self.port = port
@@ -93,6 +95,7 @@ class UnityVRInterface:
         self.num_epochs = num_epochs
         self.kl_weight = kl_weight
         self.chunk_size = chunk_size
+        self.reverse_weighting = reverse_weighting
         self.hidden_dim = hidden_dim
         self.dim_feedforward = dim_feedforward
         self.lr = lr
@@ -130,6 +133,7 @@ class UnityVRInterface:
             self.last_unique_timestep = -1  # Track the last unique timestep to handle repeats
             self.decay_factor = 0.02  # Decay factor for exponential weighting (higher = more focus on recent)
             self.current_weight = 0.0  # Weight given to the current prediction (0-1)
+            self.reverse_weighting = False  # If True, put more weight on older actions instead of recent ones
         
         # Initialize socket
         self.socket = None
@@ -438,7 +442,17 @@ class UnityVRInterface:
                             
                             # Apply exponential weighting based on how old the prediction is
                             time_deltas = self.timestep - sorted_timesteps
-                            weights = torch.exp(-self.decay_factor * time_deltas.float())
+                            
+                            if self.reverse_weighting:
+                                # Put more weight on older actions (reverse the weighting)
+                                # Invert time_deltas so older predictions get higher weights
+                                max_delta = time_deltas.max()
+                                inverted_deltas = max_delta - time_deltas
+                                weights = torch.exp(-self.decay_factor * inverted_deltas.float())
+                            else:
+                                # Default: put more weight on recent actions
+                                weights = torch.exp(-self.decay_factor * time_deltas.float())
+                                
                             weights = weights / weights.sum()
                             
                             # Compute weighted average of past predictions
@@ -600,6 +614,7 @@ def main():
     parser.add_argument('--dec_layers', type=int, default=7, help='Number of decoder layers')
     parser.add_argument('--nheads', type=int, default=8, help='Number of attention heads')
     parser.add_argument('--query_frequency', type=int, default=1, help='How often to query the policy (in timesteps)')
+    parser.add_argument('--reverse_weighting', action='store_true', help='Use reverse weighting for temporal aggregation')
     
     args = parser.parse_args()
     
@@ -619,6 +634,7 @@ def main():
         num_epochs=args.num_epochs,
         kl_weight=args.kl_weight,
         chunk_size=args.chunk_size,
+        reverse_weighting=args.reverse_weighting,
         hidden_dim=args.hidden_dim,
         dim_feedforward=args.dim_feedforward,
         lr=args.lr,
