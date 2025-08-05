@@ -167,7 +167,7 @@ class CNNMLP(nn.Module):
                 backbone_down_projs.append(down_proj)
             self.backbone_down_projs = nn.ModuleList(backbone_down_projs)
 
-            mlp_in_dim = 768 * len(backbones) + 32
+            mlp_in_dim = 512 * len(backbones) + 32
             self.mlp = mlp(input_dim=mlp_in_dim, hidden_dim=1024, output_dim=32, hidden_depth=2)
         else:
             raise NotImplementedError
