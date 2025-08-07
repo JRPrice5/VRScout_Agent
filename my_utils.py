@@ -70,8 +70,28 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
         # normalize image and change dtype to float
         image_data = image_data / 255.0
-        action_data = (action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
-        qpos_data = (qpos_data - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
+        
+        # Import action indices for splitting actions by type
+        from action_utils import ACTION_INDICES
+        
+        # Split normalization for continuous and boolean actions
+        continuous_indices = ACTION_INDICES['continuous']
+        boolean_indices = ACTION_INDICES['boolean']
+        
+        # Convert numpy arrays to torch tensors and ensure float32 dtype
+        action_mean = torch.tensor(self.norm_stats["action_mean"][continuous_indices], dtype=torch.float32)
+        action_std = torch.tensor(self.norm_stats["action_std"][continuous_indices], dtype=torch.float32)
+        
+        # Only normalize continuous actions
+        action_data[:, continuous_indices] = ((action_data[:, continuous_indices] - action_mean) / action_std)
+        
+        # For boolean actions, ensure they're in [0, 1] range but don't normalize
+        action_data[:, boolean_indices] = torch.clamp(action_data[:, boolean_indices], 0.0, 1.0)
+        
+        # Normalize qpos as before with explicit dtype control
+        qpos_mean = torch.tensor(self.norm_stats["qpos_mean"], dtype=torch.float32)
+        qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
+        qpos_data = (qpos_data - qpos_mean) / qpos_std
 
         return image_data, qpos_data, action_data, is_pad
 
