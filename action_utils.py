@@ -57,17 +57,20 @@ def compute_mixed_loss(pred_actions, target_actions, is_pad=None, continuous_wei
     # Compute L1 loss for continuous actions
     continuous_l1 = torch.nn.functional.l1_loss(pred_continuous, target_continuous, reduction='none')
     
-    # For boolean actions, first ensure targets are exactly 0 or 1
-    target_boolean_binary = torch.round(target_boolean)
+    # For boolean actions, ensure targets are strictly in the range [0, 1]
+    target_boolean_binary = torch.clamp(target_boolean, min=0.0, max=1.0)
+    
+    # Apply sigmoid to predictions to ensure they're in [0, 1] range
+    pred_boolean_sigmoid = torch.sigmoid(pred_boolean)
     
     # For boolean values, we use a combination of BCE and L1 loss
     # BCE for classification accuracy
     boolean_bce = torch.nn.functional.binary_cross_entropy(
-        torch.sigmoid(pred_boolean), target_boolean_binary, reduction='none'
+        pred_boolean_sigmoid, target_boolean_binary, reduction='none'
     )
     
     # L1 for regression stability (helps with convergence)
-    boolean_l1 = torch.nn.functional.l1_loss(torch.sigmoid(pred_boolean), target_boolean_binary, reduction='none')
+    boolean_l1 = torch.nn.functional.l1_loss(pred_boolean_sigmoid, target_boolean_binary, reduction='none')
     
     # Combined boolean loss
     boolean_loss = 0.7 * boolean_bce + 0.3 * boolean_l1
