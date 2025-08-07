@@ -475,7 +475,16 @@ class UnityVRInterface:
                 raw_action = self.policy(qpos, curr_image)
             
             # Post-process action
-            raw_action = raw_action.squeeze(0).cpu().numpy()
+            raw_action = raw_action.squeeze(0).cpu()
+            
+            # Apply sigmoid to boolean actions (indices 24-27)
+            boolean_indices = [24, 25, 26, 27]  # lefthand_trigger, righthand_trigger, lefthand_grip, righthand_grip
+            for idx in boolean_indices:
+                if idx < len(raw_action):
+                    raw_action[idx] = torch.sigmoid(raw_action[idx])
+            
+            # Convert to numpy for post-processing
+            raw_action = raw_action.numpy()
             action = self.post_process(raw_action)
             
             # Convert to list for JSON serialization
