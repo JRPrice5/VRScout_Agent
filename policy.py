@@ -3,6 +3,7 @@ from torch.nn import functional as F
 import torchvision.transforms as transforms
 
 from detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
+from action_utils import compute_mixed_loss, split_actions_by_type
 import IPython
 e = IPython.embed
 
@@ -37,12 +38,18 @@ class ACTPolicy(nn.Module):
 
             a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, actions, is_pad)
             total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
+            
+            # Compute mixed loss for continuous and boolean actions
+            mixed_losses = compute_mixed_loss(a_hat, actions, is_pad, 
+                                             continuous_weight=1.0, 
+                                             boolean_weight=2.0)  # Higher weight for boolean actions
+            
             loss_dict = dict()
-            all_l1 = F.l1_loss(actions, a_hat, reduction='none')
-            l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
-            loss_dict['l1'] = l1
+            loss_dict['continuous_l1'] = mixed_losses['continuous_l1']
+            loss_dict['boolean_bce'] = mixed_losses['boolean_bce']
+            loss_dict['l1'] = mixed_losses['continuous_l1']  # Keep for backward compatibility
             loss_dict['kl'] = total_kld[0]
-            loss_dict['loss'] = loss_dict['l1'] + loss_dict['kl'] * self.kl_weight
+            loss_dict['loss'] = mixed_losses['total_loss'] + loss_dict['kl'] * self.kl_weight
             return loss_dict
         else: # inference time
             a_hat, _, (_, _) = self.model(qpos, image, env_state) # no action, sample from prior
