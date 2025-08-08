@@ -50,6 +50,7 @@ def compute_mixed_loss(pred_actions, target_actions, is_pad=None, continuous_wei
     Returns:
         loss_dict: Dictionary containing individual losses and weighted total loss
     """
+    
     # Split actions into continuous and boolean components
     pred_continuous, pred_boolean = split_actions_by_type(pred_actions)
     target_continuous, target_boolean = split_actions_by_type(target_actions)
@@ -78,8 +79,14 @@ def compute_mixed_loss(pred_actions, target_actions, is_pad=None, continuous_wei
     # Apply padding mask if provided
     if is_pad is not None:
         mask = ~is_pad.unsqueeze(-1)
-        continuous_l1 = (continuous_l1 * mask[:, :, :continuous_l1.size(2)]).sum() / mask.sum()
-        boolean_loss = (boolean_loss * mask[:, :, :boolean_loss.size(2)]).sum() / mask.sum()
+        
+        # For continuous actions: divide by (mask.sum() * continuous_action_dims)
+        continuous_action_dims = continuous_l1.size(2)
+        boolean_action_dims = boolean_loss.size(2)
+        
+        # New style normalization with proper dimension scaling
+        continuous_l1 = (continuous_l1 * mask[:, :, :continuous_l1.size(2)]).sum() / (mask.sum() * continuous_action_dims)
+        boolean_loss = (boolean_loss * mask[:, :, :boolean_loss.size(2)]).sum() / (mask.sum() * boolean_action_dims)
     else:
         continuous_l1 = continuous_l1.mean()
         boolean_loss = boolean_loss.mean()
