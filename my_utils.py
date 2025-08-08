@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import os
 import h5py
+import time
 from torch.utils.data import TensorDataset, DataLoader
 
 import IPython
@@ -21,11 +22,24 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return len(self.episode_ids)
 
     def __getitem__(self, index):
+        # Enable detailed timing for first few samples
+        detailed_timing = index < 5
+        if detailed_timing:
+            total_start = time.time()
+            
         sample_full_episode = False # hardcode
 
         episode_id = self.episode_ids[index]
         dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
+        
+        if detailed_timing:
+            file_start = time.time()
+            
         with h5py.File(dataset_path, 'r') as root:
+            if detailed_timing:
+                file_open_time = time.time() - file_start
+                data_read_start = time.time()
+                
             is_sim = root.attrs['sim']
             original_action_shape = root['/action'].shape
             episode_len = original_action_shape[0]
@@ -37,8 +51,17 @@ class EpisodicDataset(torch.utils.data.Dataset):
             qpos = root['/observations/qpos'][start_ts]
             qvel = root['/observations/qvel'][start_ts]
             image_dict = dict()
+            
+            if detailed_timing:
+                image_read_start = time.time()
+                
             for cam_name in self.camera_names:
                 image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
+                
+            if detailed_timing:
+                image_read_time = time.time() - image_read_start
+                action_read_start = time.time()
+                
             # get all actions after and including start_ts
             if is_sim:
                 action = root['/action'][start_ts:]
@@ -47,11 +70,21 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 action = root['/action'][max(0, start_ts - 1):] # hack, to make timesteps more aligned
                 action_len = episode_len - max(0, start_ts - 1) # hack, to make timesteps more aligned
 
+            if detailed_timing:
+                action_read_time = time.time() - action_read_start
+                data_read_time = time.time() - data_read_start
+
+        if detailed_timing:
+            processing_start = time.time()
+
         self.is_sim = is_sim
         padded_action = np.zeros(original_action_shape, dtype=np.float32)
         padded_action[:action_len] = action
         is_pad = np.zeros(episode_len)
         is_pad[action_len:] = 1
+
+        if detailed_timing:
+            image_stack_start = time.time()
 
         # new axis for different cameras
         all_cam_images = []
@@ -59,17 +92,29 @@ class EpisodicDataset(torch.utils.data.Dataset):
             all_cam_images.append(image_dict[cam_name])
         all_cam_images = np.stack(all_cam_images, axis=0)
 
+        if detailed_timing:
+            image_stack_time = time.time() - image_stack_start
+            tensor_convert_start = time.time()
+
         # construct observations
         image_data = torch.from_numpy(all_cam_images)
         qpos_data = torch.from_numpy(qpos).float()
         action_data = torch.from_numpy(padded_action).float()
         is_pad = torch.from_numpy(is_pad).bool()
 
+        if detailed_timing:
+            tensor_convert_time = time.time() - tensor_convert_start
+            image_transform_start = time.time()
+
         # channel last
         image_data = torch.einsum('k h w c -> k c h w', image_data)
 
         # normalize image and change dtype to float
         image_data = image_data / 255.0
+
+        if detailed_timing:
+            image_transform_time = time.time() - image_transform_start
+            normalization_start = time.time()
         
         # Import action indices for splitting actions by type
         from action_utils import ACTION_INDICES
@@ -91,6 +136,22 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_mean = torch.tensor(self.norm_stats["qpos_mean"], dtype=torch.float32)
         qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
         qpos_data = (qpos_data - qpos_mean) / qpos_std
+
+        if detailed_timing:
+            normalization_time = time.time() - normalization_start
+            total_time = time.time() - total_start
+            
+            print(f"[DataLoader] Sample {index} timing breakdown:")
+            print(f"  File open: {file_open_time:.4f}s")
+            print(f"  Image read: {image_read_time:.4f}s")
+            print(f"  Action read: {action_read_time:.4f}s")
+            print(f"  Total data read: {data_read_time:.4f}s")
+            print(f"  Image stacking: {image_stack_time:.4f}s")
+            print(f"  Tensor conversion: {tensor_convert_time:.4f}s")
+            print(f"  Image transform: {image_transform_time:.4f}s")
+            print(f"  Normalization: {normalization_time:.4f}s")
+            print(f"  Total sample time: {total_time:.4f}s")
+            print(f"  Image shape: {image_data.shape}")
 
         return image_data, qpos_data, action_data, is_pad
 
@@ -149,10 +210,20 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     # construct dataset and dataloader
     train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats)
     val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
+    
+    # Optimized DataLoader configuration for better performance
+    # Increase num_workers and prefetch_factor to eliminate batch iteration bottleneck
+    num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many
+    prefetch_factor = 4  # Prefetch more batches to keep GPU busy
+    
+    print(f"DataLoader config: num_workers={num_workers}, prefetch_factor={prefetch_factor}")
+    
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, 
-                                 num_workers=1, prefetch_factor=1, collate_fn=custom_collate_fn)
+                                 num_workers=num_workers, prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn,
+                                 persistent_workers=True)  # Keep workers alive between epochs
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, 
-                               num_workers=1, prefetch_factor=1, collate_fn=custom_collate_fn)
+                               num_workers=num_workers, prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn,
+                               persistent_workers=True)  # Keep workers alive between epochs
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
 

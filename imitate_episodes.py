@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from tqdm import tqdm
 from einops import rearrange
+import time
+import psutil
+import GPUtil
 
 from constants import DT
 from constants import PUPPET_GRIPPER_JOINT_OPEN
@@ -315,9 +318,36 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
 
 def forward_pass(data, policy):
+    forward_start_detailed = time.time()
+    
     image_data, qpos_data, action_data, is_pad = data
+    
+    # Time GPU transfer
+    gpu_transfer_start = time.time()
     image_data, qpos_data, action_data, is_pad = image_data.cuda(), qpos_data.cuda(), action_data.cuda(), is_pad.cuda()
-    return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
+    gpu_transfer_time = time.time() - gpu_transfer_start
+    
+    # Time policy forward pass
+    policy_forward_start = time.time()
+    result = policy(qpos_data, image_data, action_data, is_pad)
+    policy_forward_time = time.time() - policy_forward_start
+    
+    total_forward_time = time.time() - forward_start_detailed
+    
+    # Print detailed timing for first few batches of first epoch
+    if hasattr(forward_pass, 'call_count'):
+        forward_pass.call_count += 1
+    else:
+        forward_pass.call_count = 1
+        
+    if forward_pass.call_count <= 5:
+        print(f"[ForwardPass] Call {forward_pass.call_count} detailed timing:")
+        print(f"  GPU transfer: {gpu_transfer_time:.4f}s")
+        print(f"  Policy forward: {policy_forward_time:.4f}s")
+        print(f"  Total forward: {total_forward_time:.4f}s")
+        print(f"  Batch shape: {image_data.shape}")
+    
+    return result
 
 
 def train_bc(train_dataloader, val_dataloader, config):
@@ -333,19 +363,75 @@ def train_bc(train_dataloader, val_dataloader, config):
     policy.cuda()
     optimizer = make_optimizer(policy_class, policy)
 
+    # Profiling setup
+    profile_dir = os.path.join(ckpt_dir, 'profiling')
+    os.makedirs(profile_dir, exist_ok=True)
+    
+    # Initialize profiling metrics
+    profiling_data = {
+        'epoch_times': [],
+        'train_times': [],
+        'val_times': [],
+        'forward_times': [],
+        'backward_times': [],
+        'optimizer_times': [],
+        'data_loading_times': [],
+        'dataloader_overhead': [],
+        'gpu_memory_usage': [],
+        'gpu_utilization': [],
+        'cpu_usage': []
+    }
+    
+    print(f"Starting profiling - results will be saved to {profile_dir}")
+    print(f"Initial GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+
     train_history = []
     validation_history = []
     min_val_loss = np.inf
     best_ckpt_info = None
+    
+    # Profile first 3 epochs in detail
+    profile_epochs = min(3, num_epochs)
+    
     for epoch in tqdm(range(num_epochs)):
+        epoch_start_time = time.time()
         print(f'\nEpoch {epoch}')
-        # validation
+        
+        # GPU memory and utilization tracking
+        if torch.cuda.is_available():
+            gpu_memory_before = torch.cuda.memory_allocated() / 1024**3
+            try:
+                gpus = GPUtil.getGPUs()
+                gpu_util = gpus[0].load * 100 if gpus else 0
+            except:
+                gpu_util = 0
+        else:
+            gpu_memory_before = 0
+            gpu_util = 0
+            
+        cpu_percent = psutil.cpu_percent()
+        
+        # Validation with timing
+        val_start_time = time.time()
         with torch.inference_mode():
             policy.eval()
             epoch_dicts = []
+            val_data_loading_time = 0
+            val_forward_time = 0
+            
             for batch_idx, data in enumerate(val_dataloader):
+                data_start = time.time()
+                # Data is already loaded, measure forward pass
+                data_loading_time = time.time() - data_start
+                val_data_loading_time += data_loading_time
+                
+                forward_start = time.time()
                 forward_dict = forward_pass(data, policy)
+                forward_time = time.time() - forward_start
+                val_forward_time += forward_time
+                
                 epoch_dicts.append(forward_dict)
+                
             epoch_summary = compute_dict_mean(epoch_dicts)
             validation_history.append(epoch_summary)
 
@@ -353,35 +439,206 @@ def train_bc(train_dataloader, val_dataloader, config):
             if epoch_val_loss < min_val_loss:
                 min_val_loss = epoch_val_loss
                 best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
-        print(f'Val loss:   {epoch_val_loss:.5f}')
+                
+        val_time = time.time() - val_start_time
+        print(f'Val loss:   {epoch_val_loss:.5f} (Time: {val_time:.2f}s)')
         summary_string = ''
         for k, v in epoch_summary.items():
             summary_string += f'{k}: {v.item():.3f} '
         print(summary_string)
 
-        # training
+        # Training with detailed profiling
+        train_start_time = time.time()
         policy.train()
         optimizer.zero_grad()
+        
+        train_data_loading_time = 0
+        train_forward_time = 0
+        train_backward_time = 0
+        train_optimizer_time = 0
+        
+        # Use torch profiler for detailed analysis on first few epochs
+        if epoch < profile_epochs:
+            profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    os.path.join(profile_dir, f'epoch_{epoch}')
+                ),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True
+            )
+            profiler.start()
+        else:
+            profiler = None
+            
+        batch_iter_start = time.time()
+        dataloader_overhead = 0
+        
         for batch_idx, data in enumerate(train_dataloader):
+            # Measure time between batches (dataloader overhead)
+            if batch_idx > 0:
+                batch_ready_time = time.time()
+                dataloader_overhead += batch_ready_time - batch_iter_start
+            
+            # Data loading timing (data transfer to GPU)
+            data_transfer_start = time.time()
+            # Data is already loaded by dataloader, measure GPU transfer in forward_pass
+            data_loading_time = time.time() - data_transfer_start
+            train_data_loading_time += data_loading_time
+            
+            # Forward pass timing (includes GPU transfer)
+            forward_start = time.time()
             forward_dict = forward_pass(data, policy)
-            # backward
+            forward_time = time.time() - forward_start
+            train_forward_time += forward_time
+            
+            # Backward pass timing
+            backward_start = time.time()
             loss = forward_dict['loss']
             loss.backward()
+            backward_time = time.time() - backward_start
+            train_backward_time += backward_time
+            
+            # Optimizer step timing
+            optimizer_start = time.time()
             optimizer.step()
             optimizer.zero_grad()
+            optimizer_time = time.time() - optimizer_start
+            train_optimizer_time += optimizer_time
+            
             train_history.append(detach_dict(forward_dict))
+            
+            if profiler:
+                profiler.step()
+                
+            # Print detailed timing for first epoch, first few batches
+            if epoch == 0 and batch_idx < 3:
+                print(f"  Batch {batch_idx}: Forward={forward_time:.3f}s, "
+                      f"Backward={backward_time:.3f}s, Optimizer={optimizer_time:.3f}s")
+                      
+            # Prepare for next iteration timing
+            batch_iter_start = time.time()
+                      
+        if profiler:
+            profiler.stop()
+            
+        train_time = time.time() - train_start_time
         epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
         epoch_train_loss = epoch_summary['loss']
-        print(f'Train loss: {epoch_train_loss:.5f}')
+        print(f'Train loss: {epoch_train_loss:.5f} (Time: {train_time:.2f}s)')
         summary_string = ''
         for k, v in epoch_summary.items():
             summary_string += f'{k}: {v.item():.3f} '
         print(summary_string)
+        
+        # GPU memory after training
+        if torch.cuda.is_available():
+            gpu_memory_after = torch.cuda.memory_allocated() / 1024**3
+            try:
+                gpus = GPUtil.getGPUs()
+                gpu_util_after = gpus[0].load * 100 if gpus else 0
+            except:
+                gpu_util_after = 0
+        else:
+            gpu_memory_after = 0
+            gpu_util_after = 0
+            
+        epoch_time = time.time() - epoch_start_time
+        
+        # Store profiling data
+        profiling_data['epoch_times'].append(epoch_time)
+        profiling_data['train_times'].append(train_time)
+        profiling_data['val_times'].append(val_time)
+        profiling_data['forward_times'].append(train_forward_time)
+        profiling_data['backward_times'].append(train_backward_time)
+        profiling_data['optimizer_times'].append(train_optimizer_time)
+        profiling_data['data_loading_times'].append(train_data_loading_time)
+        profiling_data['dataloader_overhead'].append(dataloader_overhead)
+        profiling_data['gpu_memory_usage'].append(gpu_memory_after)
+        profiling_data['gpu_utilization'].append(gpu_util_after)
+        profiling_data['cpu_usage'].append(cpu_percent)
+        
+        # Print detailed timing breakdown
+        print(f"Timing breakdown - Total: {epoch_time:.2f}s, "
+              f"Train: {train_time:.2f}s, Val: {val_time:.2f}s")
+        print(f"  Forward: {train_forward_time:.2f}s, "
+              f"Backward: {train_backward_time:.2f}s, "
+              f"Optimizer: {train_optimizer_time:.2f}s")
+        print(f"  DataLoader overhead: {dataloader_overhead:.2f}s "
+              f"({dataloader_overhead/train_time*100:.1f}% of train time)")
+        print(f"GPU Memory: {gpu_memory_after:.2f}GB, "
+              f"GPU Util: {gpu_util_after:.1f}%, CPU: {cpu_percent:.1f}%")
 
         if epoch % 100 == 0:
             ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
             torch.save(policy.state_dict(), ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
+            
+            # Save profiling data
+            profiling_path = os.path.join(profile_dir, f'profiling_data_epoch_{epoch}.pkl')
+            with open(profiling_path, 'wb') as f:
+                pickle.dump(profiling_data, f)
+
+    # Final profiling summary
+    print("\n" + "="*50)
+    print("PROFILING SUMMARY")
+    print("="*50)
+    avg_epoch_time = np.mean(profiling_data['epoch_times'])
+    avg_train_time = np.mean(profiling_data['train_times'])
+    avg_val_time = np.mean(profiling_data['val_times'])
+    avg_forward_time = np.mean(profiling_data['forward_times'])
+    avg_backward_time = np.mean(profiling_data['backward_times'])
+    avg_optimizer_time = np.mean(profiling_data['optimizer_times'])
+    avg_dataloader_overhead = np.mean(profiling_data['dataloader_overhead'])
+    avg_gpu_memory = np.mean(profiling_data['gpu_memory_usage'])
+    avg_gpu_util = np.mean(profiling_data['gpu_utilization'])
+    avg_cpu_util = np.mean(profiling_data['cpu_usage'])
+    
+    # Calculate unaccounted time
+    accounted_time = avg_forward_time + avg_backward_time + avg_optimizer_time + avg_dataloader_overhead
+    unaccounted_time = avg_train_time - accounted_time
+    
+    print(f"Average epoch time: {avg_epoch_time:.2f}s")
+    print(f"Average train time: {avg_train_time:.2f}s ({avg_train_time/avg_epoch_time*100:.1f}%)")
+    print(f"Average val time: {avg_val_time:.2f}s ({avg_val_time/avg_epoch_time*100:.1f}%)")
+    print(f"Training breakdown:")
+    print(f"  Forward pass: {avg_forward_time:.2f}s ({avg_forward_time/avg_train_time*100:.1f}%)")
+    print(f"  Backward pass: {avg_backward_time:.2f}s ({avg_backward_time/avg_train_time*100:.1f}%)")
+    print(f"  Optimizer step: {avg_optimizer_time:.2f}s ({avg_optimizer_time/avg_train_time*100:.1f}%)")
+    print(f"  DataLoader overhead: {avg_dataloader_overhead:.2f}s ({avg_dataloader_overhead/avg_train_time*100:.1f}% of train time)")
+    print(f"  Unaccounted time: {unaccounted_time:.2f}s ({unaccounted_time/avg_train_time*100:.1f}%)")
+    print(f"Average GPU memory usage: {avg_gpu_memory:.2f}GB")
+    print(f"Average GPU utilization: {avg_gpu_util:.1f}%")
+    print(f"Average CPU utilization: {avg_cpu_util:.1f}%")
+    
+    # Identify bottlenecks
+    print("\nBOTTLENECK ANALYSIS:")
+    if avg_gpu_util < 50:
+        print("⚠️  LOW GPU UTILIZATION - GPU is underutilized")
+    if avg_forward_time / avg_train_time > 0.6:
+        print("⚠️  FORWARD PASS BOTTLENECK - Model inference is slow")
+    if avg_backward_time / avg_train_time > 0.3:
+        print("⚠️  BACKWARD PASS BOTTLENECK - Gradient computation is slow")
+    if avg_optimizer_time / avg_train_time > 0.2:
+        print("⚠️  OPTIMIZER BOTTLENECK - Parameter updates are slow")
+    if avg_dataloader_overhead / avg_train_time > 0.4:
+        print("⚠️  DATALOADER BOTTLENECK - Data loading/preprocessing is slow")
+    if unaccounted_time / avg_train_time > 0.3:
+        print("⚠️  UNACCOUNTED TIME - Significant time spent in unmeasured operations")
+    
+    # Save final profiling data
+    final_profiling_path = os.path.join(profile_dir, 'final_profiling_summary.pkl')
+    with open(final_profiling_path, 'wb') as f:
+        pickle.dump(profiling_data, f)
+    
+    print(f"\nDetailed profiling data saved to: {profile_dir}")
+    print(f"TensorBoard traces available for first {profile_epochs} epochs")
+    print("="*50)
 
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
     torch.save(policy.state_dict(), ckpt_path)
