@@ -74,18 +74,17 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # Import action indices for splitting actions by type
         from action_utils import ACTION_INDICES
         
-        # Split normalization for continuous and boolean actions
-        continuous_indices = ACTION_INDICES['continuous']
+        # Get boolean indices for clamping after normalization
         boolean_indices = ACTION_INDICES['boolean']
         
         # Convert numpy arrays to torch tensors and ensure float32 dtype
-        action_mean = torch.tensor(self.norm_stats["action_mean"][continuous_indices], dtype=torch.float32)
-        action_std = torch.tensor(self.norm_stats["action_std"][continuous_indices], dtype=torch.float32)
+        action_mean = torch.tensor(self.norm_stats["action_mean"], dtype=torch.float32)
+        action_std = torch.tensor(self.norm_stats["action_std"], dtype=torch.float32)
         
-        # Only normalize continuous actions
-        action_data[:, continuous_indices] = ((action_data[:, continuous_indices] - action_mean) / action_std)
+        # Normalize all actions as in the original implementation
+        action_data = (action_data - action_mean) / action_std
         
-        # For boolean actions, ensure they're in [0, 1] range but don't normalize
+        # After normalization, clamp boolean actions to [0,1] range
         action_data[:, boolean_indices] = torch.clamp(action_data[:, boolean_indices], 0.0, 1.0)
         
         # Normalize qpos as before with explicit dtype control
