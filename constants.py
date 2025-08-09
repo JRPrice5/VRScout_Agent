@@ -72,6 +72,12 @@ SIM_TASK_CONFIGS = {
         'episode_len': 7512,
         'camera_names': ['camera1']
     },
+    'sim_vr_task_pw_3': {
+        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_3\HDF5',
+        'num_episodes': 24,
+        'episode_len': 6958,
+        'camera_names': ['camera1']
+    },
 }
 
 ### Simulation envs fixed constants
