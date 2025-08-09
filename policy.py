@@ -42,7 +42,7 @@ class ACTPolicy(nn.Module):
             # Compute mixed loss for continuous and boolean actions
             mixed_losses = compute_mixed_loss(a_hat, actions, is_pad, 
                                              continuous_weight=1.0, 
-                                             boolean_weight=2.0)  # Higher weight for boolean actions
+                                             boolean_weight=1.0)  # Higher weight for boolean actions
             
             loss_dict = dict()
             loss_dict['continuous_l1'] = mixed_losses['continuous_l1']
