@@ -55,7 +55,8 @@ class UnityVRInterface:
                  dec_layers=7,
                  nheads=8,
                  query_frequency=1,
-                 reverse_weighting=False):
+                 reverse_weighting=False,
+                 activation='relu'):
         """
         Initialize the interface.
         
@@ -82,7 +83,8 @@ class UnityVRInterface:
             kl_weight: KL Weight for ACT policy
             chunk_size: Chunk size for ACT policy
             reverse_weighting: Whether to put more weight on older actions instead of recent ones
-        """
+            activation: Activation function to use
+            """
         self.host = host
         self.port = port
         self.camera_names = camera_names
@@ -104,6 +106,7 @@ class UnityVRInterface:
         self.enc_layers = enc_layers
         self.dec_layers = dec_layers
         self.nheads = nheads
+        self.activation = activation
         
         # Load dataset statistics
         stats_path = os.path.join(self.ckpt_dir, f'dataset_stats.pkl')
@@ -166,6 +169,7 @@ class UnityVRInterface:
                 'seed': self.seed,
                 'num_epochs': self.num_epochs,
                 'camera_names': self.camera_names,
+                'activation': self.activation,
             }
             policy = ACTPolicy(policy_config)
         elif self.policy_class == 'CNNMLP':
@@ -624,6 +628,7 @@ def main():
     parser.add_argument('--nheads', type=int, default=8, help='Number of attention heads')
     parser.add_argument('--query_frequency', type=int, default=1, help='How often to query the policy (in timesteps)')
     parser.add_argument('--reverse_weighting', action='store_true', help='Use reverse weighting for temporal aggregation')
+    parser.add_argument('--activation', type=str, default='relu', help='Activation function to use')
     
     args = parser.parse_args()
     
@@ -652,7 +657,8 @@ def main():
         enc_layers=args.enc_layers,
         dec_layers=args.dec_layers,
         nheads=args.nheads,
-        query_frequency=args.query_frequency
+        query_frequency=args.query_frequency,
+        activation=args.activation
     )
     
     interface.start_server()
