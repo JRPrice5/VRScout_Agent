@@ -47,6 +47,9 @@ def get_args_parser():
     parser.add_argument('--num_queries', default=400, type=int, # will be overridden
                         help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
+    
+    parser.add_argument('--activation', default='gelu', type=str,
+                        help="Activation function to use")
 
     # * Segmentation
     parser.add_argument('--masks', action='store_true',

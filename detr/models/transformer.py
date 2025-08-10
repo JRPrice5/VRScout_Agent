@@ -148,7 +148,10 @@ class TransformerEncoderLayer(nn.Module):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        # For GEGLU, we need double the intermediate dimension for gating
+        self.is_gated = activation in ["geglu"]
+        ffn_dim = dim_feedforward * 2 if self.is_gated else dim_feedforward
+        self.linear1 = nn.Linear(d_model, ffn_dim)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
@@ -173,7 +176,11 @@ class TransformerEncoderLayer(nn.Module):
                               key_padding_mask=src_key_padding_mask)[0]
         src = src + self.dropout1(src2)
         src = self.norm1(src)
-        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        # Apply feedforward with gated activation support
+        ffn_output = self.linear1(src)
+        # Activation (handles gated and non-gated via self.activation)
+        activated = self.activation(ffn_output)
+        src2 = self.linear2(self.dropout(activated))
         src = src + self.dropout2(src2)
         src = self.norm2(src)
         return src
@@ -188,7 +195,11 @@ class TransformerEncoderLayer(nn.Module):
                               key_padding_mask=src_key_padding_mask)[0]
         src = src + self.dropout1(src2)
         src2 = self.norm2(src)
-        src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+        # Apply feedforward with gated activation support
+        ffn_output = self.linear1(src2)
+        # Activation (handles gated and non-gated via self.activation)
+        activated = self.activation(ffn_output)
+        src2 = self.linear2(self.dropout(activated))
         src = src + self.dropout2(src2)
         return src
 
@@ -209,7 +220,10 @@ class TransformerDecoderLayer(nn.Module):
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        # For GEGLU, we need double the intermediate dimension for gating
+        self.is_gated = activation in ["geglu"]
+        ffn_dim = dim_feedforward * 2 if self.is_gated else dim_feedforward
+        self.linear1 = nn.Linear(d_model, ffn_dim)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
@@ -244,7 +258,11 @@ class TransformerDecoderLayer(nn.Module):
                                    key_padding_mask=memory_key_padding_mask)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        # Apply feedforward with gated activation support
+        ffn_output = self.linear1(tgt)
+        # Activation (handles gated and non-gated via self.activation)
+        activated = self.activation(ffn_output)
+        tgt2 = self.linear2(self.dropout(activated))
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
         return tgt
@@ -268,7 +286,11 @@ class TransformerDecoderLayer(nn.Module):
                                    key_padding_mask=memory_key_padding_mask)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt2 = self.norm3(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
+        # Apply feedforward with gated activation support
+        ffn_output = self.linear1(tgt2)
+        # Activation (handles gated and non-gated via self.activation)
+        activated = self.activation(ffn_output)
+        tgt2 = self.linear2(self.dropout(activated))
         tgt = tgt + self.dropout3(tgt2)
         return tgt
 
@@ -300,8 +322,14 @@ def build_transformer(args):
         num_decoder_layers=args.dec_layers,
         normalize_before=args.pre_norm,
         return_intermediate_dec=True,
+        activation=args.activation,
     )
 
+
+def _geglu(x):
+    """GEGLU activation function: GELU(value) * gate"""
+    x_value, x_gate = x.chunk(2, dim=-1)
+    return F.gelu(x_value) * x_gate
 
 def _get_activation_fn(activation):
     """Return an activation function given a string"""
@@ -311,4 +339,6 @@ def _get_activation_fn(activation):
         return F.gelu
     if activation == "glu":
         return F.glu
-    raise RuntimeError(F"activation should be relu/gelu, not {activation}.")
+    if activation == "geglu":
+        return _geglu
+    raise RuntimeError(F"activation should be relu/gelu/glu/geglu, not {activation}.")
