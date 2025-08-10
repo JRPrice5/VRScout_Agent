@@ -57,6 +57,7 @@ def main(args):
         enc_layers = 4
         dec_layers = 7
         nheads = 8
+        activation = args.get('activation', 'relu')
         policy_config = {'lr': args['lr'],
                          'num_queries': args['chunk_size'],
                          'kl_weight': args['kl_weight'],
@@ -67,6 +68,7 @@ def main(args):
                          'enc_layers': enc_layers,
                          'dec_layers': dec_layers,
                          'nheads': nheads,
+                         'activation': activation,
                          'camera_names': camera_names,
                          }
     elif policy_class == 'CNNMLP':
@@ -442,5 +444,6 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
+    parser.add_argument('--activation', action='store', type=str, help='activation for transformer', required=False)
 
     main(vars(parser.parse_args()))
