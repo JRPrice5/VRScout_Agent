@@ -173,13 +173,18 @@ class DINOBackbone(nn.Module):
         # We attempt to exclude the CLS token directly if supported
         try:
             features_list = self.model.get_intermediate_layers(
-                tensor, n=self._num_interm, reshape=False, return_class_token=False
+                tensor, n=self._num_interm, return_class_token=False
             )
         except TypeError:
-            # Fallback for older API without return_class_token
-            features_list = self.model.get_intermediate_layers(
-                tensor, n=self._num_interm, reshape=False
-            )
+            # Fallbacks for older API variants
+            try:
+                # Older versions may only accept (x, n)
+                features_list = self.model.get_intermediate_layers(
+                    tensor, n=self._num_interm
+                )
+            except TypeError:
+                # Oldest versions may only accept (x)
+                features_list = self.model.get_intermediate_layers(tensor)
         if not isinstance(features_list, (list, tuple)):
             features_list = [features_list]
 
