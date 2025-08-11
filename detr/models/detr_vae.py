@@ -120,8 +120,8 @@ class DETRVAE(nn.Module):
             all_cam_pos = []
             for cam_id, cam_name in enumerate(self.camera_names):
                 features, pos = self.backbones[0](image[:, cam_id]) # HARDCODED
-                features = features[0] # take the last layer feature
-                pos = pos[0]
+                features = features[-1]  # take the last/deepest layer feature
+                pos = pos[-1]
                 all_cam_features.append(self.input_proj(features))
                 all_cam_pos.append(pos)
             # proprioception features
@@ -185,8 +185,8 @@ class CNNMLP(nn.Module):
         all_cam_features = []
         for cam_id, cam_name in enumerate(self.camera_names):
             features, pos = self.backbones[cam_id](image[:, cam_id])
-            features = features[0] # take the last layer feature
-            pos = pos[0] # not used
+            features = features[-1] # take the last layer feature
+            pos = pos[-1] # not used
             all_cam_features.append(self.backbone_down_projs[cam_id](features))
         # flatten everything
         flattened_features = []
