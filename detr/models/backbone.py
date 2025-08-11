@@ -118,16 +118,15 @@ class DINOJoiner(nn.Sequential):
 
     def forward(self, tensor_list: NestedTensor):
         xs = self[0](tensor_list)
-        out: List[NestedTensor] = []
+        # Always return plain tensors for features to simplify downstream usage
+        out: List[torch.Tensor] = []
         pos = []
         for name, x in xs.items():
-            out.append(x)
-            # position encoding
-            if isinstance(x, NestedTensor):
-                # Extract tensors for position encoding
-                pos.append(self[1](x.tensors).to(x.tensors.dtype))
-            else:
-                pos.append(self[1](x).to(x.dtype))
+            # Unwrap NestedTensor to raw tensor if needed
+            feat = x.tensors if isinstance(x, NestedTensor) else x
+            out.append(feat)
+            # position encoding computed from unwrapped tensor
+            pos.append(self[1](feat).to(feat.dtype))
 
         return out, pos
 
