@@ -54,9 +54,9 @@ def main(args):
     # Use backbone from args if provided, otherwise default to resnet18
     backbone = args.get('backbone', 'resnet18')
     if policy_class == 'ACT':
-        enc_layers = 4
-        dec_layers = 7
-        nheads = 8
+        enc_layers = args.get('enc_layers', 4)
+        dec_layers = args.get('dec_layers', 7)
+        nheads = args.get('nheads', 8)
         activation = args.get('activation', 'relu')
         policy_config = {'lr': args['lr'],
                          'num_queries': args['chunk_size'],
@@ -444,6 +444,12 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
-    parser.add_argument('--activation', action='store', type=str, help='activation for transformer', required=False)
+    
+
+    # for transformer
+    parser.add_argument('--enc_layers', action='store', default=4, type=int, help='enc_layers', required=False)
+    parser.add_argument('--dec_layers', action='store', default=7, type=int, help='dec_layers', required=False)
+    parser.add_argument('--nheads', action='store', default=8, type=int, help='nheads', required=False)
+    parser.add_argument('--activation', action='store', default='relu', type=str, help='activation for transformer', required=False)
 
     main(vars(parser.parse_args()))
