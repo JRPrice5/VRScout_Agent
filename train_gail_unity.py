@@ -99,7 +99,52 @@ def main():
     }
     policy = ACTPolicy(args_override).to(device)
 
-    # Load pretrained ACT weights if present (mirror inference loader)
+    # Load pretrained ACT weights if present (robust to head/key differences)
+    def _try_load(sd_dict) -> bool:
+        """Attempt to load a state dict into policy with several fallbacks.
+        Returns True if any attempt succeeds."""
+        def _report(msg_prefix, res):
+            try:
+                # PyTorch returns IncompatibleKeys with attributes
+                mk = getattr(res, 'missing_keys', [])
+                uk = getattr(res, 'unexpected_keys', [])
+            except Exception:
+                mk, uk = [], []
+            print(f"{msg_prefix} (missing={len(mk)}, unexpected={len(uk)})")
+
+        # 1) Direct load to full policy (allow missing heads)
+        try:
+            res = policy.load_state_dict(sd_dict, strict=False)
+            _report("Loaded into policy (strict=False)", res)
+            return True
+        except Exception:
+            pass
+
+        # 2) Try removing 'module.' prefix
+        try:
+            sd2 = { (k[7:] if k.startswith('module.') else k): v for k, v in sd_dict.items() }
+            res = policy.load_state_dict(sd2, strict=False)
+            _report("Loaded into policy after stripping 'module.' (strict=False)", res)
+            return True
+        except Exception:
+            pass
+
+        # 3) Try loading into base model (checkpoint may only have ACT model weights)
+        try:
+            # If keys look like 'model.xxx', strip that when loading into policy.model
+            if any(k.startswith('model.') for k in sd_dict.keys()):
+                base_sd = { k[len('model.'):] if k.startswith('model.') else k: v for k, v in sd_dict.items() }
+            else:
+                base_sd = sd_dict
+            res = policy.model.load_state_dict(base_sd, strict=False)
+            _report("Loaded into policy.model (strict=False)", res)
+            print("Note: Action/value heads initialized randomly (first-time head init).")
+            return True
+        except Exception:
+            pass
+
+        return False
+
     ckpt_candidates = [
         os.path.join(args.ckpt_dir, 'policy_best.ckpt'),
         os.path.join(args.ckpt_dir, 'policy.ckpt'),
@@ -108,20 +153,22 @@ def main():
     for ckpt_path in ckpt_candidates:
         if os.path.isfile(ckpt_path):
             try:
-                sd = torch.load(ckpt_path, map_location='cpu')
-                # Support various formats
-                if isinstance(sd, dict):
-                    if 'policy_state' in sd:
-                        policy.load_state_dict(sd['policy_state'])
-                    elif 'state_dict' in sd:
-                        policy.load_state_dict(sd['state_dict'])
-                    else:
-                        policy.load_state_dict(sd)
+                raw = torch.load(ckpt_path, map_location='cpu')
+                # Normalize to a plain state-dict first
+                if isinstance(raw, dict) and 'policy_state' in raw:
+                    state = raw['policy_state']
+                elif isinstance(raw, dict) and 'state_dict' in raw:
+                    state = raw['state_dict']
                 else:
-                    policy.load_state_dict(sd)
-                policy.eval()
-                print(f"Loaded pretrained policy from {ckpt_path}")
-                break
+                    state = raw if isinstance(raw, dict) else {}
+
+                ok = _try_load(state)
+                if ok:
+                    policy.eval()
+                    print(f"Loaded pretrained weights from {ckpt_path}")
+                    break
+                else:
+                    print(f"Warning: no compatible keys found in {ckpt_path}; skipping.")
             except Exception as e:
                 print(f"Warning: failed to load checkpoint {ckpt_path}: {e}")
 
