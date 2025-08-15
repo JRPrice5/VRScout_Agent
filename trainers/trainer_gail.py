@@ -34,6 +34,7 @@ class TrainerGAIL:
         return logp * mask, ent * mask
 
     def update_discriminator(self, h_exp, a_cont_exp, a_bin_exp, mask_exp, h_pol, a_cont_pol, a_bin_pol, mask_pol):
+        self.disc.train()
         self.opt_disc.zero_grad(set_to_none=True)
         _, prob_exp = self.disc(h_exp.detach(), a_cont_exp.detach(), a_bin_exp.detach() if a_bin_exp is not None else None, mask_exp)
         _, prob_pol = self.disc(h_pol.detach(), a_cont_pol.detach(), a_bin_pol.detach() if a_bin_pol is not None else None, mask_pol)
@@ -44,9 +45,12 @@ class TrainerGAIL:
         with torch.no_grad():
             acc_exp = masked_mean((prob_exp > 0.5).float(), mask_exp)
             acc_pol = masked_mean((prob_pol <= 0.5).float(), mask_pol)
+        self.disc.eval()
         return loss_D.item(), acc_exp.item(), acc_pol.item()
 
     def ppo_update(self, batch, clip_eps=0.2, gamma=0.99, lam=0.95, ent_coef=0.0, vf_coef=0.5):
+        self.policy.train()
+
         qpos = batch['obs']['qpos'].to(self.device)
         image = batch['obs']['image'].to(self.device)
         a_cont = batch['a_cont'].to(self.device)
@@ -78,6 +82,7 @@ class TrainerGAIL:
         loss.backward()
         nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.cfg.get('grad_clip', 1.0))
         self.opt_policy.step()
+        self.policy.eval()
         return {
             'loss_pi': L_pi.item(),
             'loss_v': L_v.item(),

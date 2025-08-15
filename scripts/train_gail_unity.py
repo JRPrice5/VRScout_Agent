@@ -97,6 +97,32 @@ def main():
     }
     policy = ACTPolicy(args_override).to(device)
 
+    # Load pretrained ACT weights if present (mirror inference loader)
+    ckpt_candidates = [
+        os.path.join(args.ckpt_dir, 'policy_best.ckpt'),
+        os.path.join(args.ckpt_dir, 'policy.ckpt'),
+        os.path.join(args.ckpt_dir, 'gail_ckpt_final.pth'),
+    ]
+    for ckpt_path in ckpt_candidates:
+        if os.path.isfile(ckpt_path):
+            try:
+                sd = torch.load(ckpt_path, map_location='cpu')
+                # Support various formats
+                if isinstance(sd, dict):
+                    if 'policy_state' in sd:
+                        policy.load_state_dict(sd['policy_state'])
+                    elif 'state_dict' in sd:
+                        policy.load_state_dict(sd['state_dict'])
+                    else:
+                        policy.load_state_dict(sd)
+                else:
+                    policy.load_state_dict(sd)
+                policy.eval()
+                print(f"Loaded pretrained policy from {ckpt_path}")
+                break
+            except Exception as e:
+                print(f"Warning: failed to load checkpoint {ckpt_path}: {e}")
+
     # Initialize trainer
     trainer = TrainerGAIL(policy,
                           act_args=args_override,
@@ -110,7 +136,7 @@ def main():
                               'grad_clip': 1.0,
                           })
 
-    task_name = args['task_name']
+    task_name = args.task_name
     # get task parameters
     is_sim = task_name[:4] == 'sim_'
     if is_sim:
@@ -124,8 +150,8 @@ def main():
     episode_len = task_config['episode_len']
     camera_names = task_config['camera_names']
     
-    batch_size_train = args['batch_size']
-    batch_size_val = args['batch_size']
+    batch_size_train = args.batch_size
+    batch_size_val = args.batch_size
 
     # Expert data loader
     train_loader, _, _, _ = load_data(
