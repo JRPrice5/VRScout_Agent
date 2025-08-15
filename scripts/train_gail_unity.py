@@ -50,6 +50,7 @@ def main():
     parser.add_argument('--hidden_dim', type=int, default=256)
     parser.add_argument('--dim_feedforward', type=int, default=1024)
     parser.add_argument('--temporal_agg', action='store_true')
+    parser.add_argument('--query_frequency', type=int, default=1)
     parser.add_argument('--enc_layers', type=int, default=4)
     parser.add_argument('--dec_layers', type=int, default=7)
     parser.add_argument('--nheads', type=int, default=8)
@@ -277,6 +278,7 @@ def main():
         port=args.port,
         update_every=args.update_every,
         on_batch=on_batch,
+        query_frequency=args.query_frequency,
     )
 
     try:
