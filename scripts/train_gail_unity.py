@@ -61,6 +61,7 @@ def main():
     parser.add_argument('--ent_coef', type=float, default=0.0)
     parser.add_argument('--vf_coef', type=float, default=0.5)
     parser.add_argument('--ckpt_interval', type=int, default=5, help='save checkpoint every N updates')
+    parser.add_argument('--bc_weight', type=float, default=0.0, help='weight for BC anchor term')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -164,13 +165,13 @@ def main():
     expert_iter = cycle(train_loader)
 
     # Metrics accumulators
-    hist = { 'loss_D': [], 'acc_exp': [], 'acc_pol': [], 'loss_pi': [], 'loss_v': [], 'ent': [] }
+    hist = { 'loss_D': [], 'acc_exp': [], 'acc_pol': [], 'loss_pi': [], 'loss_v': [], 'ent': [], 'loss_bc': [] }
     update_count = 0
 
     def save_plots():
         try:
             fig, axs = plt.subplots(2, 3, figsize=(10, 6))
-            keys = ['loss_D','acc_exp','acc_pol','loss_pi','loss_v','ent']
+            keys = ['loss_D','acc_exp','acc_pol','loss_pi','loss_v','ent','loss_bc']
             for ax, k in zip(axs.flatten(), keys):
                 ax.plot(hist[k])
                 ax.set_title(k)
@@ -239,7 +240,7 @@ def main():
             logits_pol, prob_pol = trainer.disc(h_pol, a_cont_pol, a_bin_pol, mask_pol)
             r = reward_from_prob(prob_pol)
 
-        # Add rewards to batch and run PPO update
+        # Add rewards to batch and run PPO update (with optional BC anchor)
         batch['reward'] = r
         ppo_logs = trainer.ppo_update(
             batch,
@@ -248,6 +249,8 @@ def main():
             lam=args.lam,
             ent_coef=args.ent_coef,
             vf_coef=args.vf_coef,
+            bc_data=(qpos_exp, image_exp, a_cont_exp, a_bin_exp, (~is_pad_exp).float()) if args.bc_weight > 0 else None,
+            bc_weight=args.bc_weight,
         )
 
         # Log & checkpoint
@@ -257,6 +260,7 @@ def main():
         hist['loss_pi'].append(ppo_logs['loss_pi'])
         hist['loss_v'].append(ppo_logs['loss_v'])
         hist['ent'].append(ppo_logs['ent'])
+        hist['loss_bc'].append(ppo_logs.get('loss_bc', 0.0))
         print({'loss_D': loss_D, 'acc_exp': acc_exp, 'acc_pol': acc_pol, **ppo_logs})
 
         nonlocal update_count

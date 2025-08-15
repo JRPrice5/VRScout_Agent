@@ -48,7 +48,8 @@ class TrainerGAIL:
         self.disc.eval()
         return loss_D.item(), acc_exp.item(), acc_pol.item()
 
-    def ppo_update(self, batch, clip_eps=0.2, gamma=0.99, lam=0.95, ent_coef=0.0, vf_coef=0.5):
+    def ppo_update(self, batch, clip_eps=0.2, gamma=0.99, lam=0.95, ent_coef=0.0, vf_coef=0.5,
+                   bc_data=None, bc_weight: float = 0.0):
         self.policy.train()
 
         qpos = batch['obs']['qpos'].to(self.device)
@@ -78,6 +79,22 @@ class TrainerGAIL:
         L_ent = -(ent.sum() / mask.sum().clamp_min(1.0)) if ent_coef != 0.0 else v.new_tensor(0.0)
         loss = L_pi + vf_coef * L_v + ent_coef * L_ent
 
+        # Optional BC anchor: encourage current policy to imitate expert actions on demo states
+        L_bc = v.new_tensor(0.0)
+        if bc_data is not None and bc_weight > 0.0:
+            qpos_exp, image_exp, a_cont_exp, a_bin_exp, mask_exp = bc_data
+            qpos_exp = qpos_exp.to(self.device)
+            image_exp = image_exp.to(self.device)
+            a_cont_exp = a_cont_exp.to(self.device)
+            a_bin_exp = a_bin_exp.to(self.device) if a_bin_exp is not None else None
+            mask_exp = mask_exp.to(self.device)
+
+            out_exp = self.policy.forward(qpos_exp, image_exp, out_mode='dist')
+            logp_exp, _ = self.compute_logp_and_entropy(out_exp, a_cont_exp, a_bin_exp, mask_exp)
+            # Negative log-likelihood averaged over valid steps
+            L_bc = -(logp_exp.sum() / mask_exp.sum().clamp_min(1.0))
+            loss = loss + bc_weight * L_bc
+
         self.opt_policy.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.cfg.get('grad_clip', 1.0))
@@ -87,6 +104,7 @@ class TrainerGAIL:
             'loss_pi': L_pi.item(),
             'loss_v': L_v.item(),
             'ent': (-L_ent).item() if ent_coef != 0.0 else 0.0,
+            'loss_bc': L_bc.item() if bc_weight > 0.0 else 0.0,
         }
-    
-    #TODO BC anchor hook
+
+    #TODO additional anchors or regularizers can be added here
