@@ -35,15 +35,12 @@ def main():
     parser.add_argument('--host', type=str, default='127.0.0.1')
     parser.add_argument('--port', type=int, default=5557)
     parser.add_argument('--ckpt_dir', type=str, required=True)
-    parser.add_argument('--dataset_dir', type=str, required=True)
-    parser.add_argument('--num_episodes', type=int, default=10)
-    parser.add_argument('--camera_names', type=str, nargs='+', default=['camera1'])
     parser.add_argument('--update_every', type=int, default=1024)
     # Imitation/ACT-style args
     parser.add_argument('--policy_class', type=str, default='ACT')
     parser.add_argument('--task_name', type=str, default='gail_rl')
     parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--backbone', type=str, default='resnet18')
@@ -63,8 +60,6 @@ def main():
     parser.add_argument('--lam', type=float, default=0.95)
     parser.add_argument('--ent_coef', type=float, default=0.0)
     parser.add_argument('--vf_coef', type=float, default=0.5)
-    parser.add_argument('--batch_size_train', type=int, default=4)
-    parser.add_argument('--batch_size_val', type=int, default=4)
     parser.add_argument('--ckpt_interval', type=int, default=5, help='save checkpoint every N updates')
     args = parser.parse_args()
 
@@ -99,7 +94,6 @@ def main():
         'task_name': args.task_name,
         'seed': args.seed,
         'num_epochs': args.num_epochs,
-        'camera_names': args.camera_names,
     }
     policy = ACTPolicy(args_override).to(device)
 
@@ -116,13 +110,30 @@ def main():
                               'grad_clip': 1.0,
                           })
 
+    task_name = args['task_name']
+    # get task parameters
+    is_sim = task_name[:4] == 'sim_'
+    if is_sim:
+        from constants import SIM_TASK_CONFIGS
+        task_config = SIM_TASK_CONFIGS[task_name]
+    else:
+        raise ValueError(f'Unknown task name: {task_name}')
+    
+    dataset_dir = task_config['dataset_dir']
+    num_episodes = task_config['num_episodes']
+    episode_len = task_config['episode_len']
+    camera_names = task_config['camera_names']
+    
+    batch_size_train = args['batch_size']
+    batch_size_val = args['batch_size']
+
     # Expert data loader
     train_loader, _, _, _ = load_data(
-        dataset_dir=args.dataset_dir,
-        num_episodes=args.num_episodes,
-        camera_names=args.camera_names,
-        batch_size_train=args.batch_size_train,
-        batch_size_val=args.batch_size_val,
+        dataset_dir=dataset_dir,
+        num_episodes=num_episodes,
+        camera_names=camera_names,
+        batch_size_train=batch_size_train,
+        batch_size_val=batch_size_val,
     )
     expert_iter = cycle(train_loader)
 
