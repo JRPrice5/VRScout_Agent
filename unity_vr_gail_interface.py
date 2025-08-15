@@ -43,12 +43,14 @@ class UnityVRGAILInterface:
                  host: str = '127.0.0.1',
                  port: int = 5557,
                  update_every: int = 1024,
+                 query_frequency: int = 1,
                  on_batch: Optional[Callable[[Dict[str, torch.Tensor]], None]] = None):
         self.policy = policy.eval().cuda()
         self.stats = stats
         self.host = host
         self.port = port
         self.update_every = update_every
+        self.query_frequency = query_frequency
         self.on_batch = on_batch
 
         self.socket = None
@@ -59,6 +61,9 @@ class UnityVRGAILInterface:
 
         self.internal_timestep = 0
         self._mark_prev_done = False
+        # Cached multi-step chunk sampled from policy; consumed across timesteps
+        # Structure: {'a_cont': [1,T,Cc], 'a_bin': [1,T,Cb] or None, 'logp': [1,T], 'value': [1,T], 'idx': int, 'len': int}
+        self._chunk_cache = None
 
     # ---------- Networking ----------
     def start_server(self):
@@ -103,6 +108,7 @@ class UnityVRGAILInterface:
     # ---------- Client handling ----------
     def _handle_client(self):
         self.internal_timestep = 0
+        self._chunk_cache = None
         recv_buf = b''
         try:
             while self.running:
@@ -148,18 +154,48 @@ class UnityVRGAILInterface:
             qpos = preprocess_qpos(qpos_np, self.stats).cuda().unsqueeze(0)
             image = self._process_image_data(data)
 
-            # Forward policy to get distributions and value
-            out = self.policy.forward(qpos, image, out_mode='dist')
-            cont_dist = out['cont_dist']
-            bin_dist = out.get('bin_dist', None)
-            value = out['value']
+            # Prepare or consume a cached multi-step chunk depending on query_frequency
+            need_new_chunk = (
+                self._chunk_cache is None or
+                self._chunk_cache.get('idx', 0) >= self._chunk_cache.get('len', 0)
+            )
 
-            a_cont = cont_dist.sample()
-            logp = cont_dist.log_prob(a_cont)
-            a_bin = None
-            if bin_dist is not None:
-                a_bin = bin_dist.sample()
-                logp = logp + bin_dist.log_prob(a_bin)
+            if need_new_chunk: # TODO  overlapping chunks for perfromance?
+                # Query policy once to obtain a sequence; then emit step-by-step over timesteps
+                out = self.policy.forward(qpos, image, out_mode='dist')
+                cont_dist = out['cont_dist']
+                bin_dist = out.get('bin_dist', None)
+                value_seq = out['value']  # [1, T]
+
+                a_cont_seq = cont_dist.sample()  # [1, T, Cc]
+                logp_seq = cont_dist.log_prob(a_cont_seq)  # [1, T]
+                a_bin_seq = None
+                if bin_dist is not None:
+                    a_bin_seq = bin_dist.sample()  # [1, T, Cb]
+                    logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)  # [1, T]
+
+                # Limit the usable horizon to query_frequency to control emission span
+                T = a_cont_seq.shape[1]
+                use_T = int(min(self.query_frequency, T))
+                if use_T <= 0:
+                    use_T = 1
+
+                self._chunk_cache = {
+                    'a_cont': a_cont_seq[:, :use_T],
+                    'a_bin': a_bin_seq[:, :use_T] if a_bin_seq is not None else None,
+                    'logp': logp_seq[:, :use_T],
+                    'value': value_seq[:, :use_T],
+                    'idx': 0,
+                    'len': use_T,
+                }
+
+            # Consume one step from cache
+            t_idx = self._chunk_cache['idx']
+            a_cont = self._chunk_cache['a_cont'][:, t_idx]        # [1, Cc]
+            a_bin = None if self._chunk_cache['a_bin'] is None else self._chunk_cache['a_bin'][:, t_idx]  # [1, Cb]
+            logp = self._chunk_cache['logp'][:, t_idx]            # [1]
+            value = self._chunk_cache['value'][:, t_idx]          # [1]
+            self._chunk_cache['idx'] = t_idx + 1
 
             # If previous transition should be marked done, backpatch last dones to 1
             if self._mark_prev_done and len(self.buffer.storage['dones']) > 0:
@@ -208,6 +244,7 @@ class UnityVRGAILInterface:
         # Backpatch last transition's done flag; new episode starts with next state
         self._mark_prev_done = True
         self.internal_timestep = 0
+        self._chunk_cache = None
 
     def _send_action(self, action_np: np.ndarray):
         try:
