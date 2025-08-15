@@ -271,7 +271,7 @@ class UnityVRGAILInterface:
                 else:
                     img_bytes = bytes(img_payload)
                 img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-                img = img.resize((width, height))
+
             img_np = np.asarray(img, dtype=np.uint8)
             img_t = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()  # [C,H,W]
             return img_t
