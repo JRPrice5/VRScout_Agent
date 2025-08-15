@@ -272,7 +272,8 @@ class UnityVRGAILInterface:
                     img_bytes = bytes(img_payload)
                 img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
 
-            img_np = np.asarray(img, dtype=np.uint8)
+            # Ensure a writable, contiguous NumPy array for torch.from_numpy
+            img_np = np.array(img, dtype=np.uint8, copy=True)
             img_t = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()  # [C,H,W]
             return img_t
 

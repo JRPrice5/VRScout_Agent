@@ -14,13 +14,14 @@ class TanhDiagNormal(Distribution):
     Shapes: params [..., D] -> outputs [..., D]
     """
     has_rsample = True
+    arg_constraints = {}
 
     def __init__(self, mu: torch.Tensor, log_std: torch.Tensor, min_log_std: float = -5.0, max_log_std: float = 2.0):
         assert mu.shape == log_std.shape
         self.mu = mu
         self.log_std = log_std.clamp(min=min_log_std, max=max_log_std)
         self.std = torch.exp(self.log_std)
-        super().__init__(batch_shape=mu.shape[:-1], event_shape=mu.shape[-1:])
+        super().__init__(batch_shape=mu.shape[:-1], event_shape=mu.shape[-1:], validate_args=False)
 
     @property
     def mean(self) -> torch.Tensor:
@@ -63,6 +64,7 @@ class BernoulliMulti(Distribution): #TODO check whether it fit our boolean state
     Parameterized by logits [..., D].
     """
     has_rsample = False
+    arg_constraints = {}
 
     def __init__(self, logits: Optional[torch.Tensor] = None, probs: Optional[torch.Tensor] = None):
         assert (logits is None) ^ (probs is None), "Specify exactly one of logits or probs"
@@ -72,7 +74,7 @@ class BernoulliMulti(Distribution): #TODO check whether it fit our boolean state
         else:
             self.probs = probs
             self.logits = torch.log(torch.clamp(probs, 1e-6, 1 - 1e-6) / (1 - torch.clamp(probs, 1e-6, 1 - 1e-6)))
-        super().__init__(batch_shape=self.probs.shape[:-1], event_shape=self.probs.shape[-1:])
+        super().__init__(batch_shape=self.probs.shape[:-1], event_shape=self.probs.shape[-1:], validate_args=False)
 
     @property
     def mean(self) -> torch.Tensor:
@@ -106,7 +108,7 @@ class DiagNormal(Distribution):
         self.mu = mu
         self.log_std = log_std.clamp(min=min_log_std, max=max_log_std)
         self.std = torch.exp(self.log_std)
-        super().__init__(batch_shape=mu.shape[:-1], event_shape=mu.shape[-1:])
+        super().__init__(batch_shape=mu.shape[:-1], event_shape=mu.shape[-1:], validate_args=False)
 
     @property
     def mean(self) -> torch.Tensor:
