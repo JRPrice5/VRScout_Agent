@@ -29,6 +29,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import ACT modules
 from policy import ACTPolicy, CNNMLPPolicy
+from action_utils import ACTION_INDICES
+from action_io import preprocess_qpos, postprocess_action_to_env
 
 
 class UnityVRInterface:
@@ -113,9 +115,8 @@ class UnityVRInterface:
         with open(stats_path, 'rb') as f:
             self.stats = pickle.load(f)
         
-        # Set up preprocessing and postprocessing functions
-        self.pre_process = lambda s_qpos: (s_qpos - self.stats['qpos_mean']) / self.stats['qpos_std']
-        self.post_process = lambda a: a * self.stats['action_std'] + self.stats['action_mean']
+        # Centralized preprocessing/postprocessing
+        self.boolean_indices = ACTION_INDICES['boolean']
         
         # Load policy
         self.policy_class = policy_class
@@ -364,12 +365,9 @@ class UnityVRInterface:
             Dictionary containing action data to send back to Unity
         """
         with torch.inference_mode():
-            # Extract qpos from state data
+            # Extract and preprocess qpos using shared utility
             qpos_numpy = np.array(state_data['qpos'], dtype=np.float32)
-            
-            # Preprocess qpos
-            qpos = self.pre_process(qpos_numpy)
-            qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
+            qpos = preprocess_qpos(qpos_numpy, self.stats).cuda().unsqueeze(0)
             
             # Process image data
             curr_image = self._process_image_data(state_data)
@@ -478,18 +476,9 @@ class UnityVRInterface:
             elif self.policy_class == 'CNNMLP':
                 raw_action = self.policy(qpos, curr_image)
             
-            # Post-process action
-            raw_action = raw_action.squeeze(0).cpu()
-            
-            # Apply sigmoid to boolean actions (indices 24-27)
-            boolean_indices = [24, 25, 26, 27]  # lefthand_trigger, righthand_trigger, lefthand_grip, righthand_grip
-            for idx in boolean_indices:
-                if idx < len(raw_action):
-                    raw_action[idx] = torch.sigmoid(raw_action[idx])
-            
-            # Convert to numpy for post-processing
-            raw_action = raw_action.numpy()
-            action = self.post_process(raw_action)
+            # Post-process action using shared utility
+            raw_action = raw_action.squeeze(0)
+            action = postprocess_action_to_env(raw_action, self.stats, self.boolean_indices)
             
             # Convert to list for JSON serialization
             action_list = action.tolist()

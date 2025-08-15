@@ -1,0 +1,251 @@
+import argparse
+import os
+import pickle
+import torch
+import random
+import numpy as np
+import time
+import matplotlib.pyplot as plt
+
+from policy import ACTPolicy
+from trainers.trainer_gail import TrainerGAIL
+from unity_vr_gail_interface import UnityVRGAILInterface
+from my_utils import load_data
+from action_utils import ACTION_INDICES
+from gail.discriminator import reward_from_prob
+
+
+def cycle(loader):
+    while True:
+        for batch in loader:
+            yield batch
+
+
+def split_actions(action_tensor):
+    # action_tensor: [B, T, A]
+    cont_idx = ACTION_INDICES['continuous']
+    bin_idx = ACTION_INDICES['boolean']
+    a_cont = action_tensor[..., cont_idx]
+    a_bin = action_tensor[..., bin_idx] if len(bin_idx) > 0 else None
+    return a_cont, a_bin
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--host', type=str, default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=5557)
+    parser.add_argument('--ckpt_dir', type=str, required=True)
+    parser.add_argument('--dataset_dir', type=str, required=True)
+    parser.add_argument('--num_episodes', type=int, default=10)
+    parser.add_argument('--camera_names', type=str, nargs='+', default=['camera1'])
+    parser.add_argument('--update_every', type=int, default=1024)
+    # Imitation/ACT-style args
+    parser.add_argument('--policy_class', type=str, default='ACT')
+    parser.add_argument('--task_name', type=str, default='gail_rl')
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--num_epochs', type=int, default=100)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--backbone', type=str, default='resnet18')
+    parser.add_argument('--lr_backbone', type=float, default=1e-5)
+    parser.add_argument('--kl_weight', type=float, default=0.0)
+    parser.add_argument('--chunk_size', type=int, default=8)
+    parser.add_argument('--hidden_dim', type=int, default=256)
+    parser.add_argument('--dim_feedforward', type=int, default=1024)
+    parser.add_argument('--temporal_agg', action='store_true')
+    parser.add_argument('--enc_layers', type=int, default=4)
+    parser.add_argument('--dec_layers', type=int, default=7)
+    parser.add_argument('--nheads', type=int, default=8)
+    parser.add_argument('--activation', type=str, default='relu')
+    # PPO/GAIL hyperparams
+    parser.add_argument('--clip_eps', type=float, default=0.2)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--lam', type=float, default=0.95)
+    parser.add_argument('--ent_coef', type=float, default=0.0)
+    parser.add_argument('--vf_coef', type=float, default=0.5)
+    parser.add_argument('--batch_size_train', type=int, default=4)
+    parser.add_argument('--batch_size_val', type=int, default=4)
+    parser.add_argument('--ckpt_interval', type=int, default=5, help='save checkpoint every N updates')
+    args = parser.parse_args()
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Seed
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    # Load dataset statistics used by Unity interface and policy I/O
+    stats_path = os.path.join(args.ckpt_dir, 'dataset_stats.pkl')
+    with open(stats_path, 'rb') as f:
+        stats = pickle.load(f)
+
+    # Build policy
+    args_override = {
+        'kl_weight': args.kl_weight,
+        'num_queries': args.chunk_size,
+        'hidden_dim': args.hidden_dim,
+        'dim_feedforward': args.dim_feedforward,
+        'lr': args.lr,
+        'lr_backbone': args.lr_backbone,
+        'backbone': args.backbone,
+        'enc_layers': args.enc_layers,
+        'dec_layers': args.dec_layers,
+        'nheads': args.nheads,
+        'ckpt_dir': args.ckpt_dir,
+        'policy_class': args.policy_class,
+        'task_name': args.task_name,
+        'seed': args.seed,
+        'num_epochs': args.num_epochs,
+        'camera_names': args.camera_names,
+    }
+    policy = ACTPolicy(args_override).to(device)
+
+    # Initialize trainer
+    trainer = TrainerGAIL(policy,
+                          act_args=args_override,
+                          cont_dim=policy.cont_dim,
+                          bin_dim=policy.bin_dim,
+                          h_dim=policy.hidden_dim,
+                          device=device,
+                          cfg={
+                              'lr_policy': 3e-4,
+                              'lr_disc': 1e-4,
+                              'grad_clip': 1.0,
+                          })
+
+    # Expert data loader
+    train_loader, _, _, _ = load_data(
+        dataset_dir=args.dataset_dir,
+        num_episodes=args.num_episodes,
+        camera_names=args.camera_names,
+        batch_size_train=args.batch_size_train,
+        batch_size_val=args.batch_size_val,
+    )
+    expert_iter = cycle(train_loader)
+
+    # Metrics accumulators
+    hist = { 'loss_D': [], 'acc_exp': [], 'acc_pol': [], 'loss_pi': [], 'loss_v': [], 'ent': [] }
+    update_count = 0
+
+    def save_plots():
+        try:
+            fig, axs = plt.subplots(2, 3, figsize=(10, 6))
+            keys = ['loss_D','acc_exp','acc_pol','loss_pi','loss_v','ent']
+            for ax, k in zip(axs.flatten(), keys):
+                ax.plot(hist[k])
+                ax.set_title(k)
+            plt.tight_layout()
+            plot_path = os.path.join(args.ckpt_dir, 'gail_training_plots.png')
+            plt.savefig(plot_path)
+            plt.close(fig)
+        except Exception as e:
+            print(f'Plot save failed: {e}')
+
+    def save_checkpoint(tag: str):
+        try:
+            ckpt = {
+                'policy_state': policy.state_dict(),
+                'disc_state': trainer.disc.state_dict(),
+                'opt_policy': trainer.opt_policy.state_dict(),
+                'opt_value': trainer.opt_value.state_dict(),
+                'opt_disc': trainer.opt_disc.state_dict(),
+                'args': vars(args),
+            }
+            path = os.path.join(args.ckpt_dir, f'gail_ckpt_{tag}.pth')
+            torch.save(ckpt, path)
+            print(f'Saved checkpoint: {path}')
+        except Exception as e:
+            print(f'Checkpoint save failed: {e}')
+
+    def on_batch(batch):
+        # batch comes from UnityVRGAILInterface with tensors on CPU; move to device
+        for k, v in list(batch.items()):
+            if isinstance(v, dict):
+                batch[k] = {kk: vv.to(device) for kk, vv in v.items()}
+            elif torch.is_tensor(v):
+                batch[k] = v.to(device)
+
+        qpos_pol = batch['obs']['qpos']
+        image_pol = batch['obs']['image']
+        a_cont_pol = batch['a_cont']
+        a_bin_pol = batch.get('a_bin', None)
+        mask_pol = batch['mask']
+
+        # Policy forward to get h and value consistency
+        out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
+        h_pol = out_pol['h']
+        value_pol = out_pol['value']  # can be used to compare with stored
+
+        # Fetch an expert batch
+        image_exp, qpos_exp, action_exp, is_pad_exp = next(expert_iter)
+        image_exp = image_exp.to(device).float()
+        qpos_exp = qpos_exp.to(device).float()
+        action_exp = action_exp.to(device).float()
+        is_pad_exp = is_pad_exp.to(device)
+
+        a_cont_exp, a_bin_exp = split_actions(action_exp)  # [B,T,Cc], [B,T,Cb]
+        # Encode expert to hidden features
+        h_exp = policy.encode_to_hidden(qpos_exp, image_exp)
+        mask_exp = (~is_pad_exp).float()
+
+        # Update discriminator
+        loss_D, acc_exp, acc_pol = trainer.update_discriminator(
+            h_exp, a_cont_exp, a_bin_exp, mask_exp,
+            h_pol, a_cont_pol, a_bin_pol, mask_pol
+        )
+
+        # Compute GAIL rewards for policy batch
+        with torch.no_grad():
+            logits_pol, prob_pol = trainer.disc(h_pol, a_cont_pol, a_bin_pol, mask_pol)
+            r = reward_from_prob(prob_pol)
+
+        # Add rewards to batch and run PPO update
+        batch['reward'] = r
+        ppo_logs = trainer.ppo_update(
+            batch,
+            clip_eps=args.clip_eps,
+            gamma=args.gamma,
+            lam=args.lam,
+            ent_coef=args.ent_coef,
+            vf_coef=args.vf_coef,
+        )
+
+        # Log & checkpoint
+        hist['loss_D'].append(loss_D)
+        hist['acc_exp'].append(acc_exp)
+        hist['acc_pol'].append(acc_pol)
+        hist['loss_pi'].append(ppo_logs['loss_pi'])
+        hist['loss_v'].append(ppo_logs['loss_v'])
+        hist['ent'].append(ppo_logs['ent'])
+        print({'loss_D': loss_D, 'acc_exp': acc_exp, 'acc_pol': acc_pol, **ppo_logs})
+
+        nonlocal update_count
+        update_count += 1
+        if update_count % args.ckpt_interval == 0:
+            save_plots()
+            save_checkpoint(f'update_{update_count}')
+
+    # Start Unity GAIL Interface
+    interface = UnityVRGAILInterface(
+        policy=policy,
+        stats=stats,
+        host=args.host,
+        port=args.port,
+        update_every=args.update_every,
+        on_batch=on_batch,
+    )
+
+    try:
+        interface.start_server()
+    except KeyboardInterrupt:
+        print('Stopping...')
+    finally:
+        save_plots()
+        save_checkpoint('final')
+
+
+if __name__ == '__main__':
+    main()

@@ -1,13 +1,15 @@
+import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import torchvision.transforms as transforms
 
 from detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
-from action_utils import compute_mixed_loss, split_actions_by_type
+from action_utils import compute_mixed_loss, split_actions_by_type, ACTION_INDICES
+from distributions import TanhDiagNormal, BernoulliMulti, DiagNormal
 import IPython
 e = IPython.embed
 
-class ACTPolicy(nn.Module):
+class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.Normalize )is correct for our image shape
     def __init__(self, args_override):
         super().__init__()
         model, optimizer = build_ACT_model_and_optimizer(args_override)
@@ -15,6 +17,19 @@ class ACTPolicy(nn.Module):
         self.optimizer = optimizer
         self.kl_weight = args_override['kl_weight']
         print(f'KL Weight {self.kl_weight}')
+
+        # Feature dims and heads (do not modify backbone/transformer/CVAE)
+        hidden_dim = self.model.transformer.d_model
+        self.hidden_dim = hidden_dim
+        # Infer action splits
+        self.cont_dim = len(ACTION_INDICES['continuous'])
+        self.bin_dim = len(ACTION_INDICES['boolean'])
+        # Stochastic heads
+        self.cont_mu_head = nn.Linear(hidden_dim, self.cont_dim)
+        self.cont_log_std_head = nn.Linear(hidden_dim, self.cont_dim)
+        self.bin_logits_head = nn.Linear(hidden_dim, self.bin_dim)
+        # Value head
+        self.value_head = nn.Linear(hidden_dim, 1)
 
     def __call__(self, qpos, image, actions=None, is_pad=None):
         env_state = None
@@ -54,6 +69,87 @@ class ACTPolicy(nn.Module):
         else: # inference time
             a_hat, _, (_, _) = self.model(qpos, image, env_state) # no action, sample from prior
             return a_hat
+
+    def forward(self, qpos, image, prev_actions=None, is_pad=None, out_mode: str = "dist"):
+        """
+        Enhanced forward that exposes ACT features and adds stochastic/value heads.
+        - out_mode="dist": return distributions for continuous and binary actions + value + hidden.
+        - out_mode="mean" or "det": return means for actions + value + hidden.
+        Shapes:
+          h: [B, T, H], cont_mean/log_std: [B, T, Cc], bin_logits: [B, T, Cb], value: [B, T]
+        """
+        env_state = None
+        # Normalize image like __call__
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+        image = normalize(image)
+        qpos = qpos.float()
+
+        # Compute hidden states h using the backbone/transformer as-is
+        h = self.encode_to_hidden(qpos, image, env_state)  # [B, T, H]
+
+        # Heads
+        cont_mu = self.cont_mu_head(h)
+        cont_log_std = self.cont_log_std_head(h).clamp(min=-5.0, max=2.0)
+        bin_logits = self.bin_logits_head(h) if self.bin_dim > 0 else None
+        value = self.value_head(h).squeeze(-1)
+
+        if out_mode in ("dist", "distribution"):
+            # Unsquashed diagonal Gaussian as requested
+            cont_dist = DiagNormal(cont_mu, cont_log_std)
+            bin_dist = BernoulliMulti(bin_logits) if bin_logits is not None else None
+            return {
+                'h': h,
+                'cont_dist': cont_dist,
+                'bin_dist': bin_dist,
+                'value': value,
+            }
+        else:
+            # For unsquashed Gaussian, the mean is raw mu
+            cont_mean = cont_mu
+            bin_prob = torch.sigmoid(bin_logits) if bin_logits is not None else None
+            return {
+                'h': h,
+                'cont_mean': cont_mean,
+                'bin_prob': bin_prob,
+                'value': value,
+            }
+
+    def encode_to_hidden(self, qpos, image, env_state=None):
+        """
+        Expose per-step hidden features h_t without refactoring the backbone.
+        Returns h of shape [B, T, H].
+        """
+        self.model.eval()  # feature extraction is inference-like
+        with torch.no_grad():
+            bs, _ = qpos.shape
+            if getattr(self.model, 'backbones', None) is not None:
+                all_cam_features, all_cam_pos = [], []
+                for cam_id, _ in enumerate(self.model.camera_names):
+                    features, pos = self.model.backbones[0](image[:, cam_id])  # HARDCODED like model.forward
+                    features = features[-1]
+                    pos = pos[-1]
+                    all_cam_features.append(self.model.input_proj(features))
+                    all_cam_pos.append(pos)
+                proprio_input = self.model.input_proj_robot_state(qpos)
+                src = torch.cat(all_cam_features, axis=3)
+                pos = torch.cat(all_cam_pos, axis=3)
+                # Create zero latent and project to match model.forward
+                latent = torch.zeros((bs, getattr(self.model, 'latent_dim', 32)), device=qpos.device, dtype=qpos.dtype)
+                latent_input = self.model.latent_out_proj(latent) if hasattr(self.model, 'latent_out_proj') else None
+                hs = self.model.transformer(
+                    src, None, self.model.query_embed.weight, pos,
+                    latent_input,
+                    proprio_input,
+                    self.model.additional_pos_embed.weight
+                )[0]
+            else:
+                # Fallback to state-only path
+                qpos_proj = self.model.input_proj_robot_state(qpos)
+                env_proj = self.model.input_proj_env_state(env_state)
+                transformer_input = torch.cat([qpos_proj, env_proj], axis=1)
+                hs = self.model.transformer(transformer_input, None, self.model.query_embed.weight, self.model.pos.weight)[0]
+        return hs  # [B, T, H]
 
     def configure_optimizers(self):
         return self.optimizer
