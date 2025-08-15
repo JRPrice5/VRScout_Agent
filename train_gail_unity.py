@@ -67,6 +67,20 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    task_name = args.task_name
+    # get task parameters
+    is_sim = task_name[:4] == 'sim_'
+    if is_sim:
+        from constants import SIM_TASK_CONFIGS
+        task_config = SIM_TASK_CONFIGS[task_name]
+    else:
+        raise ValueError(f'Unknown task name: {task_name}')
+
+    dataset_dir = task_config['dataset_dir']
+    num_episodes = task_config['num_episodes']
+    episode_len = task_config['episode_len']
+    camera_names = task_config['camera_names']
+
     # Seed
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -92,7 +106,7 @@ def main():
         'dec_layers': args.dec_layers,
         'nheads': args.nheads,
         'activation': args.activation,
-        'camera_names': args.camera_names,
+        'camera_names': camera_names,
         'ckpt_dir': args.ckpt_dir,
         'policy_class': args.policy_class,
         'task_name': args.task_name,
@@ -187,20 +201,6 @@ def main():
                               'grad_clip': 1.0,
                           })
 
-    task_name = args.task_name
-    # get task parameters
-    is_sim = task_name[:4] == 'sim_'
-    if is_sim:
-        from constants import SIM_TASK_CONFIGS
-        task_config = SIM_TASK_CONFIGS[task_name]
-    else:
-        raise ValueError(f'Unknown task name: {task_name}')
-    
-    dataset_dir = task_config['dataset_dir']
-    num_episodes = task_config['num_episodes']
-    episode_len = task_config['episode_len']
-    camera_names = task_config['camera_names']
-    
     batch_size_train = args.batch_size
     batch_size_val = args.batch_size
 
