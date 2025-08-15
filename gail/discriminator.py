@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 
 def masked_mean(x: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -23,7 +24,7 @@ class GAILDiscriminator(nn.Module):
             mlp += [nn.Linear(in_dim if i == 0 else hidden, hidden), nn.ReLU()]
         self.net = nn.Sequential(*mlp, nn.Linear(hidden, 1))
 
-    def forward(self, h: torch.Tensor, a_cont: torch.Tensor, a_bin: torch.Tensor | None, mask: torch.Tensor):
+    def forward(self, h: torch.Tensor, a_cont: torch.Tensor, a_bin: Optional[torch.Tensor], mask: torch.Tensor):
         """
         h: [B, T, H]
         a_cont: [B, T, Cc]
