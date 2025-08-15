@@ -166,6 +166,7 @@ class UnityVRGAILInterface:
                 cont_dist = out['cont_dist']
                 bin_dist = out.get('bin_dist', None)
                 value_seq = out['value']  # [1, T]
+                a_hat_seq = out['a_hat']
 
                 a_cont_seq = cont_dist.sample()  # [1, T, Cc]
                 logp_seq = cont_dist.log_prob(a_cont_seq)  # [1, T]
@@ -175,14 +176,14 @@ class UnityVRGAILInterface:
                     logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)  # [1, T]
 
                 # Limit the usable horizon to query_frequency to control emission span
-                T = a_cont_seq.shape[1]
+                T = a_hat_seq.shape[1]
                 use_T = int(min(self.query_frequency, T))
                 if use_T <= 0:
                     use_T = 1
 
                 self._chunk_cache = {
-                    'a_cont': a_cont_seq[:, :use_T],
-                    'a_bin': a_bin_seq[:, :use_T] if a_bin_seq is not None else None,
+                    'a_cont': a_hat_seq[:, :use_T, ACTION_INDICES['continuous']],
+                    'a_bin': a_hat_seq[:, :use_T, ACTION_INDICES['boolean']],
                     'logp': logp_seq[:, :use_T],
                     'value': value_seq[:, :use_T],
                     'idx': 0,

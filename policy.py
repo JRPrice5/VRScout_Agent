@@ -93,12 +93,14 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
         cont_log_std = self.cont_log_std_head(h).clamp(min=-5.0, max=2.0)
         bin_logits = self.bin_logits_head(h) if self.bin_dim > 0 else None
         value = self.value_head(h).squeeze(-1)
+        a_hat = self.model.action_head(h)  # [1, Tq, A]
 
         if out_mode in ("dist", "distribution"):
             # Unsquashed diagonal Gaussian as requested
             cont_dist = DiagNormal(cont_mu, cont_log_std)
             bin_dist = BernoulliMulti(bin_logits) if bin_logits is not None else None
             return {
+                'a_hat': a_hat,
                 'h': h,
                 'cont_dist': cont_dist,
                 'bin_dist': bin_dist,
@@ -109,6 +111,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             cont_mean = cont_mu
             bin_prob = torch.sigmoid(bin_logits) if bin_logits is not None else None
             return {
+                'a_hat': a_hat,
                 'h': h,
                 'cont_mean': cont_mean,
                 'bin_prob': bin_prob,
