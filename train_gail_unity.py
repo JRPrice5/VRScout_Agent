@@ -91,6 +91,8 @@ def main():
         'enc_layers': args.enc_layers,
         'dec_layers': args.dec_layers,
         'nheads': args.nheads,
+        'activation': args.activation,
+        'camera_names': args.camera_names,
         'ckpt_dir': args.ckpt_dir,
         'policy_class': args.policy_class,
         'task_name': args.task_name,
