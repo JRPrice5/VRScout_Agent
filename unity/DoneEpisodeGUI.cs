@@ -2,6 +2,7 @@ using System;
 using System.Net.Sockets;
 using System.Text;
 using UnityEngine;
+using CLOVR.IPCClient;
 
 // Simple OnGUI tool to manually signal episode completion to the RL server.
 // Sends a small JSON message {"type":"episode_control","done":true} over a TCP stream.
@@ -20,9 +21,6 @@ public class DoneEpisodeGUI : MonoBehaviour
     [Tooltip("Use an existing NetworkStream from another component (e.g., OCRRewardTracker)")]
     public bool useSharedStream = true;
 
-    [Tooltip("Optional component holding a NetworkStream named 'rlStream'")]
-    public MonoBehaviour sharedStreamProvider; // e.g., reference to OCRRewardTracker
-
     [Header("GUI")]
     public bool showGUI = true;
     public Rect guiRect = new Rect(20, 20, 260, 120);
@@ -30,9 +28,12 @@ public class DoneEpisodeGUI : MonoBehaviour
     private TcpClient _client;
     private NetworkStream _stream;
     private bool _connected;
+    private InferencePoseClient inferenceClient;
 
     void Start()
     {
+        // Try to bind to the InferencePoseClient on the same GameObject
+        inferenceClient = GetComponent<InferencePoseClient>();
         TryBindSharedStream();
         if (!_connected && !useSharedStream)
         {
@@ -50,19 +51,19 @@ public class DoneEpisodeGUI : MonoBehaviour
 
     void TryBindSharedStream()
     {
-        if (!useSharedStream || sharedStreamProvider == null) return;
+        if (!useSharedStream) return;
         try
         {
-            var providerType = sharedStreamProvider.GetType();
-            var field = providerType.GetField("rlStream");
-            if (field != null)
+            if (inferenceClient != null && inferenceClient.IsConnected)
             {
-                var val = field.GetValue(sharedStreamProvider) as NetworkStream;
-                if (val != null)
-                {
-                    _stream = val;
-                    _connected = _stream != null;
-                }
+                // Reuse the existing TCP connection managed by InferencePoseClient
+                _client = inferenceClient.TcpClient;
+                _stream = inferenceClient.NetworkStream;
+                _connected = _stream != null;
+
+                // Mirror server endpoint info for display/fallback consistency
+                host = inferenceClient.ServerIP;
+                port = inferenceClient.ServerPort;
             }
         }
         catch (Exception e)
@@ -119,6 +120,9 @@ public class DoneEpisodeGUI : MonoBehaviour
             byte[] data = Encoding.UTF8.GetBytes(json);
             _stream.Write(data, 0, data.Length);
             _stream.Flush();
+            if (inferenceClient != null && inferenceClient.IsConnected){
+                inferenceClient.IsConnected = false;
+            }
             Debug.Log("[DoneEpisodeGUI] Sent done signal to RL server.");
         }
         catch (Exception e)
