@@ -35,6 +35,8 @@ def main():
     parser.add_argument('--host', type=str, default='127.0.0.1')
     parser.add_argument('--port', type=int, default=5557)
     parser.add_argument('--ckpt_dir', type=str, required=True)
+    parser.add_argument('--mode', type=str, choices=['train', 'eval'], default='train', help='run training or evaluation only')
+    parser.add_argument('--resume', action='store_true', help='resume discriminator/optimizers from latest GAIL ckpt (train mode only)')
     parser.add_argument('--update_every', type=int, default=1024)
     # Imitation/ACT-style args
     parser.add_argument('--policy_class', type=str, default='ACT')
@@ -188,160 +190,187 @@ def main():
             except Exception as e:
                 print(f"Warning: failed to load checkpoint {ckpt_path}: {e}")
 
-    # Initialize trainer
-    trainer = TrainerGAIL(policy,
-                          act_args=args_override,
-                          cont_dim=policy.cont_dim,
-                          bin_dim=policy.bin_dim,
-                          h_dim=policy.hidden_dim,
-                          device=device,
-                          cfg={
-                              'lr_policy': 3e-4,
-                              'lr_disc': 1e-4,
-                              'grad_clip': 1.0,
-                          })
-
-
-    expert_batch_size = args.update_every
-    expert_loader, _, _ = load_expert_step_loader(
-        dataset_dir=dataset_dir,
-        num_episodes=num_episodes,
-        camera_names=camera_names,
-        batch_size=expert_batch_size,
-        shuffle=True,              # good for GAIL
-        prefetch_factor=2,         # keep GPU fed
-    )
-    expert_iter = cycle(expert_loader)
-
-    # Metrics accumulators
-    hist = { 'loss_D': [], 'acc_exp': [], 'acc_pol': [], 'loss_pi': [], 'loss_v': [], 'ent': [], 'loss_bc': [] }
+    # Initialize trainer and, if training, data loaders and callbacks
+    trainer = None
+    on_batch = None
+    save_plots = lambda: None
+    save_checkpoint = lambda tag: None
     update_count = 0
 
-    def save_plots():
-        try:
-            fig, axs = plt.subplots(2, 3, figsize=(10, 6))
-            keys = ['loss_D','acc_exp','acc_pol','loss_pi','loss_v','ent','loss_bc']
-            for ax, k in zip(axs.flatten(), keys):
-                ax.plot(hist[k])
-                ax.set_title(k)
-            plt.tight_layout()
-            plot_path = os.path.join(args.ckpt_dir, 'gail_training_plots.png')
-            plt.savefig(plot_path)
-            plt.close(fig)
-        except Exception as e:
-            print(f'Plot save failed: {e}')
+    if args.mode == 'train':
+        trainer = TrainerGAIL(policy,
+                              act_args=args_override,
+                              cont_dim=policy.cont_dim,
+                              bin_dim=policy.bin_dim,
+                              h_dim=policy.hidden_dim,
+                              device=device,
+                              cfg={
+                                  'lr_policy': 3e-4,
+                                  'lr_disc': 1e-4,
+                                  'grad_clip': 1.0,
+                              })
 
-    def save_checkpoint(tag: str):
-        try:
-            ckpt = {
-                'policy_state': policy.state_dict(),
-                'disc_state': trainer.disc.state_dict(),
-                'opt_policy': trainer.opt_policy.state_dict(),
-                'opt_value': trainer.opt_value.state_dict(),
-                'opt_disc': trainer.opt_disc.state_dict(),
-                'args': vars(args),
-            }
-            path = os.path.join(args.ckpt_dir, f'gail_ckpt_{tag}.pth')
-            torch.save(ckpt, path)
-            print(f'Saved checkpoint: {path}')
-        except Exception as e:
-            print(f'Checkpoint save failed: {e}')
+        # Optionally resume discriminator/optimizers from the latest GAIL ckpt
+        if args.resume:
+            try:
+                all_files = [os.path.join(args.ckpt_dir, f) for f in os.listdir(args.ckpt_dir) if f.startswith('gail_ckpt_') and f.endswith('.pth')]
+                if len(all_files) > 0:
+                    latest = max(all_files, key=os.path.getmtime)
+                    raw = torch.load(latest, map_location='cpu')
+                    if isinstance(raw, dict):
+                        if 'disc_state' in raw:
+                            trainer.disc.load_state_dict(raw['disc_state'], strict=False)
+                        if 'opt_policy' in raw:
+                            trainer.opt_policy.load_state_dict(raw['opt_policy'])
+                        if 'opt_value' in raw:
+                            trainer.opt_value.load_state_dict(raw['opt_value'])
+                        if 'opt_disc' in raw:
+                            trainer.opt_disc.load_state_dict(raw['opt_disc'])
+                        update_count = int(raw.get('update_count', 0))
+                        print(f"Resumed trainer/optimizers from {latest} (update_count={update_count})")
+            except Exception as e:
+                print(f"Warning: failed to resume trainer from ckpt: {e}")
 
-    def on_batch(batch):
-        # batch comes from UnityVRGAILInterface with tensors on CPU; move to device
-        for k, v in list(batch.items()):
-            if isinstance(v, dict):
-                batch[k] = {kk: vv.to(device) for kk, vv in v.items()}
-            elif torch.is_tensor(v):
-                batch[k] = v.to(device)
-
-        qpos_pol = batch['obs']['qpos']
-        image_pol = batch['obs']['image']
-        a_cont_pol = batch['a_cont']
-        a_bin_pol = batch.get('a_bin', None)
-        mask_pol = batch['mask']
-
-        # Policy forward to get h and value consistency (no grad during rollout)
-        with torch.no_grad():
-            out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
-            h_pol = out_pol['h']  # [B, Q, H]
-            value_pol = out_pol['value']  # can be used to compare with stored
-
-        # Fetch an expert batch
-        image_exp, qpos_exp, action_exp, is_pad_exp = next(expert_iter)
-        image_exp = image_exp.to(device).float()
-        qpos_exp = qpos_exp.to(device).float()
-        action_exp = action_exp.to(device).float()
-        is_pad_exp = is_pad_exp.to(device)
-
-        B_exp, T_exp, _ = action_exp.shape
-        # To match policy data, sample a single random timestep from each expert trajectory
-        t_idx = torch.randint(0, T_exp, (B_exp,), device=device)
-        batch_idx = torch.arange(B_exp, device=device)
-        # Sample expert actions at random timestep per episode
-        action_exp_t = action_exp[batch_idx, t_idx]
-
-        a_cont_exp, a_bin_exp = split_actions(action_exp_t.unsqueeze(1)) # -> [B,1,A]
-        # Expert observations are single-step; encode directly (no grad for D input features)
-        with torch.no_grad():
-            h_exp_full = policy.encode_to_hidden(qpos_exp, image_exp)  # [B, Q, H]
-        # Use current timestep (query 0) for discriminator
-        h_exp = h_exp_full[:, 0:1, :]  # [B,1,H]
-        mask_exp = torch.ones(B_exp, 1, device=device)
-
-        # Ensure policy data has a temporal dimension of 1 (already present from buffer)
-        B_pol = h_pol.shape[0]
-        # Use current timestep (query 0) for hidden; actions/mask already [B,1,...]
-        h_pol = h_pol[:, 0:1, :]  # [B,1,H]
-
-        # To match batch sizes, sample from the larger policy batch
-        if B_pol > B_exp:
-            sample_indices = torch.randperm(B_pol, device=h_pol.device)[:B_exp]
-            h_pol = h_pol[sample_indices]
-            a_cont_pol = a_cont_pol[sample_indices]
-            if a_bin_pol is not None:
-                a_bin_pol = a_bin_pol[sample_indices]
-            mask_pol = mask_pol[sample_indices]
-
-        # Update discriminator
-        loss_D, acc_exp, acc_pol = trainer.update_discriminator(
-            h_exp, a_cont_exp, a_bin_exp, mask_exp,
-            h_pol, a_cont_pol, a_bin_pol, mask_pol
+        expert_batch_size = args.update_every
+        expert_loader, _, _ = load_expert_step_loader(
+            dataset_dir=dataset_dir,
+            num_episodes=num_episodes,
+            camera_names=camera_names,
+            batch_size=expert_batch_size,
+            shuffle=True,              # good for GAIL
+            prefetch_factor=2,         # keep GPU fed
         )
+        expert_iter = cycle(expert_loader)
 
-        # Compute GAIL rewards for policy batch
-        with torch.no_grad():
-            logits_pol, prob_pol = trainer.disc(h_pol, a_cont_pol, a_bin_pol, mask_pol)
-            r = reward_from_prob(prob_pol)
+        # Metrics accumulators
+        hist = { 'loss_D': [], 'acc_exp': [], 'acc_pol': [], 'loss_pi': [], 'loss_v': [], 'ent': [], 'loss_bc': [] }
 
-        # Add rewards to batch and run PPO update (with optional BC anchor)
-        batch['reward'] = r
-        ppo_logs = trainer.ppo_update(
-            batch,
-            clip_eps=args.clip_eps,
-            gamma=args.gamma,
-            lam=args.lam,
-            ent_coef=args.ent_coef,
-            vf_coef=args.vf_coef,
-            bc_data=(qpos_exp, image_exp, a_cont_exp, a_bin_exp, (~is_pad_exp).float()) if args.bc_weight > 0 else None,
-            bc_weight=args.bc_weight,
-        )
+        def save_plots():
+            try:
+                fig, axs = plt.subplots(2, 3, figsize=(10, 6))
+                keys = ['loss_D','acc_exp','acc_pol','loss_pi','loss_v','ent','loss_bc']
+                for ax, k in zip(axs.flatten(), keys):
+                    ax.plot(hist[k])
+                    ax.set_title(k)
+                plt.tight_layout()
+                plot_path = os.path.join(args.ckpt_dir, 'gail_training_plots.png')
+                plt.savefig(plot_path)
+                plt.close(fig)
+            except Exception as e:
+                print(f'Plot save failed: {e}')
 
-        # Log & checkpoint
-        hist['loss_D'].append(loss_D)
-        hist['acc_exp'].append(acc_exp)
-        hist['acc_pol'].append(acc_pol)
-        hist['loss_pi'].append(ppo_logs['loss_pi'])
-        hist['loss_v'].append(ppo_logs['loss_v'])
-        hist['ent'].append(ppo_logs['ent'])
-        hist['loss_bc'].append(ppo_logs.get('loss_bc', 0.0))
-        print({'loss_D': loss_D, 'acc_exp': acc_exp, 'acc_pol': acc_pol, **ppo_logs})
+        def save_checkpoint(tag: str):
+            try:
+                ckpt = {
+                    'policy_state': policy.state_dict(),
+                    'disc_state': trainer.disc.state_dict(),
+                    'opt_policy': trainer.opt_policy.state_dict(),
+                    'opt_value': trainer.opt_value.state_dict(),
+                    'opt_disc': trainer.opt_disc.state_dict(),
+                    'args': vars(args),
+                    'update_count': update_count,
+                }
+                path = os.path.join(args.ckpt_dir, f'gail_ckpt_{tag}.pth')
+                torch.save(ckpt, path)
+                print(f'Saved checkpoint: {path}')
+            except Exception as e:
+                print(f'Checkpoint save failed: {e}')
 
-        nonlocal update_count
-        update_count += 1
-        if update_count % args.ckpt_interval == 0:
-            save_plots()
-            save_checkpoint(f'update_{update_count}')
+        def on_batch(batch):
+            # batch comes from UnityVRGAILInterface with tensors on CPU; move to device
+            for k, v in list(batch.items()):
+                if isinstance(v, dict):
+                    batch[k] = {kk: vv.to(device) for kk, vv in v.items()}
+                elif torch.is_tensor(v):
+                    batch[k] = v.to(device)
+
+            qpos_pol = batch['obs']['qpos']
+            image_pol = batch['obs']['image']
+            a_cont_pol = batch['a_cont']
+            a_bin_pol = batch.get('a_bin', None)
+            mask_pol = batch['mask']
+
+            # Policy forward to get h and value consistency (no grad during rollout)
+            with torch.no_grad():
+                out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
+                h_pol = out_pol['h']  # [B, Q, H]
+                value_pol = out_pol['value']  # can be used to compare with stored
+
+            # Fetch an expert batch
+            image_exp, qpos_exp, action_exp, is_pad_exp = next(expert_iter)
+            image_exp = image_exp.to(device).float()
+            qpos_exp = qpos_exp.to(device).float()
+            action_exp = action_exp.to(device).float()
+            is_pad_exp = is_pad_exp.to(device)
+
+            B_exp, T_exp, _ = action_exp.shape
+            # To match policy data, sample a single random timestep from each expert trajectory
+            t_idx = torch.randint(0, T_exp, (B_exp,), device=device)
+            batch_idx = torch.arange(B_exp, device=device)
+            # Sample expert actions at random timestep per episode
+            action_exp_t = action_exp[batch_idx, t_idx]
+
+            a_cont_exp, a_bin_exp = split_actions(action_exp_t.unsqueeze(1)) # -> [B,1,A]
+            # Expert observations are single-step; encode directly (no grad for D input features)
+            with torch.no_grad():
+                h_exp_full = policy.encode_to_hidden(qpos_exp, image_exp)  # [B, Q, H]
+            # Use current timestep (query 0) for discriminator
+            h_exp = h_exp_full[:, 0:1, :]  # [B,1,H]
+            mask_exp = torch.ones(B_exp, 1, device=device)
+
+            # Ensure policy data has a temporal dimension of 1 (already present from buffer)
+            B_pol = h_pol.shape[0]
+            # Use current timestep (query 0) for hidden; actions/mask already [B,1,...]
+            h_pol = h_pol[:, 0:1, :]  # [B,1,H]
+
+            # To match batch sizes, sample from the larger policy batch
+            if B_pol > B_exp:
+                sample_indices = torch.randperm(B_pol, device=h_pol.device)[:B_exp]
+                h_pol = h_pol[sample_indices]
+                a_cont_pol = a_cont_pol[sample_indices]
+                if a_bin_pol is not None:
+                    a_bin_pol = a_bin_pol[sample_indices]
+                mask_pol = mask_pol[sample_indices]
+
+            # Update discriminator
+            loss_D, acc_exp, acc_pol = trainer.update_discriminator(
+                h_exp, a_cont_exp, a_bin_exp, mask_exp,
+                h_pol, a_cont_pol, a_bin_pol, mask_pol
+            )
+
+            # Compute GAIL rewards for policy batch
+            with torch.no_grad():
+                logits_pol, prob_pol = trainer.disc(h_pol, a_cont_pol, a_bin_pol, mask_pol)
+                r = reward_from_prob(prob_pol)
+
+            # Add rewards to batch and run PPO update (with optional BC anchor)
+            batch['reward'] = r
+            ppo_logs = trainer.ppo_update(
+                batch,
+                clip_eps=args.clip_eps,
+                gamma=args.gamma,
+                lam=args.lam,
+                ent_coef=args.ent_coef,
+                vf_coef=args.vf_coef,
+                bc_data=(qpos_exp, image_exp, a_cont_exp, a_bin_exp, (~is_pad_exp).float()) if args.bc_weight > 0 else None,
+                bc_weight=args.bc_weight,
+            )
+
+            # Log & checkpoint
+            hist['loss_D'].append(loss_D)
+            hist['acc_exp'].append(acc_exp)
+            hist['acc_pol'].append(acc_pol)
+            hist['loss_pi'].append(ppo_logs['loss_pi'])
+            hist['loss_v'].append(ppo_logs['loss_v'])
+            hist['ent'].append(ppo_logs['ent'])
+            hist['loss_bc'].append(ppo_logs.get('loss_bc', 0.0))
+            print({'loss_D': loss_D, 'acc_exp': acc_exp, 'acc_pol': acc_pol, **ppo_logs})
+
+            nonlocal update_count
+            update_count += 1
+            if update_count % args.ckpt_interval == 0:
+                save_plots()
+                save_checkpoint(f'update_{update_count}')
 
     # Start Unity GAIL Interface
     interface = UnityVRGAILInterface(
@@ -350,7 +379,7 @@ def main():
         host=args.host,
         port=args.port,
         update_every=args.update_every,
-        on_batch=on_batch,
+        on_batch=on_batch,  # None in eval mode disables training updates
         query_frequency=args.query_frequency,
     )
 
@@ -359,8 +388,9 @@ def main():
     except KeyboardInterrupt:
         print('Stopping...')
     finally:
-        save_plots()
-        save_checkpoint('final')
+        if args.mode == 'train':
+            save_plots()
+            save_checkpoint('final')
 
 
 if __name__ == '__main__':
