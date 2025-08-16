@@ -6,6 +6,7 @@ from typing import Optional, Dict
 
 from gail.discriminator import GAILDiscriminator, gail_loss_D, reward_from_prob, masked_mean
 from rl.ppo import compute_gae, ppo_clip_loss, value_loss
+from distributions import DiagNormal, BernoulliMulti
 
 
 class TrainerGAIL:
@@ -23,15 +24,57 @@ class TrainerGAIL:
         self.opt_disc = optim.Adam(self.disc.parameters(), lr=self.cfg.get('lr_disc', 1e-4))
 
     def compute_logp_and_entropy(self, out_dist, a_cont, a_bin, mask):
-        cont_logp = out_dist['cont_dist'].log_prob(a_cont)
-        ent = out_dist['cont_dist'].entropy()
-        if out_dist['bin_dist'] is not None and a_bin is not None:
-            cont_logp = cont_logp + out_dist['bin_dist'].log_prob(a_bin)
-            ent = ent + out_dist['bin_dist'].entropy()
-        # sum over dims
-        logp = cont_logp  # already summed over dims in distributions
-        # mask and sum over time
-        return logp * mask, ent * mask
+        """Compute log-prob and entropy using ONLY the first query (index 0).
+        Returns [B,T]-shaped tensors with values in the first column to match downstream masking.
+        """
+        cont_dist = out_dist['cont_dist']
+        bin_dist = out_dist['bin_dist']
+
+        # Slice first query for continuous distribution
+        if hasattr(cont_dist, 'mu') and cont_dist.mu.dim() == 3:
+            B, T, Cc = cont_dist.mu.shape
+            mu_first = cont_dist.mu[:, 0, :]
+            log_std_first = cont_dist.log_std[:, 0, :]
+        else:
+            # No time/query dimension; infer T from mask
+            B = cont_dist.mu.shape[0]
+            T = mask.shape[1] if mask.dim() == 2 else 1
+            mu_first = cont_dist.mu
+            log_std_first = cont_dist.log_std
+
+        cont_first = DiagNormal(mu_first, log_std_first)
+        # Align a_cont to [B, Cc]
+        if a_cont.dim() == 3:
+            a_cont_first = a_cont[:, 0, :]
+        else:
+            a_cont_first = a_cont
+
+        cont_logp_first = cont_first.log_prob(a_cont_first)  # [B]
+        ent_first = cont_first.entropy()  # [B]
+
+        # Optional binary part on first query
+        if bin_dist is not None and a_bin is not None:
+            # Build a first-query Bernoulli distribution
+            if hasattr(bin_dist, 'logits') and bin_dist.logits is not None:
+                logits = bin_dist.logits
+                logits_first = logits[:, 0, :] if logits.dim() == 3 else logits
+                bin_first = BernoulliMulti(logits=logits_first)
+            else:
+                probs = bin_dist.probs
+                probs_first = probs[:, 0, :] if probs.dim() == 3 else probs
+                bin_first = BernoulliMulti(probs=probs_first)
+
+            a_bin_first = a_bin[:, 0, :] if a_bin.dim() == 3 else a_bin
+            cont_logp_first = cont_logp_first + bin_first.log_prob(a_bin_first)
+            ent_first = ent_first + bin_first.entropy()
+
+        # Place into [B, T] outputs with only first column set
+        logp_BT = mask.new_zeros((B, T), dtype=cont_logp_first.dtype)
+        ent_BT = mask.new_zeros((B, T), dtype=ent_first.dtype)
+        logp_BT[:, 0] = cont_logp_first
+        ent_BT[:, 0] = ent_first
+
+        return logp_BT * mask, ent_BT * mask
 
     def update_discriminator(self, h_exp, a_cont_exp, a_bin_exp, mask_exp, h_pol, a_cont_pol, a_bin_pol, mask_pol):
         self.disc.train()
