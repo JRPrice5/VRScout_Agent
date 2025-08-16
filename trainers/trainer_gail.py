@@ -36,6 +36,15 @@ class TrainerGAIL:
     def update_discriminator(self, h_exp, a_cont_exp, a_bin_exp, mask_exp, h_pol, a_cont_pol, a_bin_pol, mask_pol):
         self.disc.train()
         self.opt_disc.zero_grad(set_to_none=True)
+        print(f'{h_exp.shape=}')
+        print(f'{a_cont_exp.shape=}')
+        if a_bin_exp is not None:
+            print(f'{a_bin_exp.shape=}')
+        print(f'{h_pol.shape=}')
+        print(f'{a_cont_pol.shape=}')
+        if a_bin_pol is not None:
+            print(f'{a_bin_pol.shape=}')
+
         _, prob_exp = self.disc(h_exp.detach(), a_cont_exp.detach(), a_bin_exp.detach() if a_bin_exp is not None else None, mask_exp)
         _, prob_pol = self.disc(h_pol.detach(), a_cont_pol.detach(), a_bin_pol.detach() if a_bin_pol is not None else None, mask_pol)
         loss_D = gail_loss_D(prob_exp, prob_pol, mask_exp)
