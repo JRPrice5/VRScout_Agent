@@ -114,9 +114,9 @@ class TrainerGAIL:
             ent_first = ent_first + bin_first.entropy()
 
         # Place values only in the first time column to match "first-query" semantics
-        T_out = mask.shape[1] if mask.dim() == 2 else 1
-        logp_BT = mask.new_zeros((B, T_out), dtype=cont_logp_first.dtype)
-        ent_BT = mask.new_zeros((B, T_out), dtype=ent_first.dtype)
+        T_out = T_mask
+        logp_BT = mask.new_zeros((B_mask, T_out), dtype=cont_logp_first.dtype)
+        ent_BT = mask.new_zeros((B_mask, T_out), dtype=ent_first.dtype)
         logp_BT[:, 0] = cont_logp_first
         ent_BT[:, 0] = ent_first
 
