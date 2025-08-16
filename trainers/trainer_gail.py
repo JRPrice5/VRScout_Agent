@@ -218,6 +218,9 @@ class TrainerGAIL:
             elif v.shape[0] == B * T and v.shape[1] == 1:
                 # Flattened sequence of per-step values -> reshape to [B, T]
                 v = v.view(B, T)
+            elif v.shape[0] == B * T and v.shape[1] != 1:
+                # Per-step values with an extra feature/query dim -> take first feature/query then reshape to [B, T]
+                v = v[:, 0].view(B, T)
             elif v.shape[0] == B and v.shape[1] == 1 and T > 1:
                 v = v.expand(B, T)
             elif v.shape[0] == B and v.shape[1] != T:
