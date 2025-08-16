@@ -211,6 +211,24 @@ class TrainerGAIL:
         out = self.policy.forward(qpos, image, out_mode='dist')
         logp, ent = self.compute_logp_and_entropy(out, a_cont, a_bin, mask)
         v = out['value']
+        # --- Align value tensor to [B, T] ---
+        if v.dim() == 2:
+            if v.shape == (B, T):
+                pass
+            elif v.shape[1] == 1 and T > 1:
+                v = v.expand(B, T)
+            elif v.shape[1] != T:
+                # Reduce any extra dimension (e.g., queries) to a scalar per batch, then broadcast over T
+                v = v.mean(dim=1, keepdim=True).expand(B, T)
+        elif v.dim() == 1:
+            if v.numel() == B * T:
+                v = v.view(B, T)
+            elif v.numel() == B and T > 1:
+                v = v.view(B, 1).expand(B, T)
+            else:
+                raise ValueError(f"value 'v' has incompatible shape {tuple(v.shape)} with inferred (B,T)=({B},{T})")
+        else:
+            raise ValueError(f"Unexpected value 'v' shape {tuple(v.shape)}; expected 1D or 2D")
 
         # Losses
         L_pi = ppo_clip_loss(logp, logp_old, adv, clip_eps, mask)
