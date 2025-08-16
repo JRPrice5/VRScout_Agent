@@ -4,9 +4,33 @@ import torch.nn.functional as F
 
 def compute_gae(r: torch.Tensor, v: torch.Tensor, dones: torch.Tensor, mask: torch.Tensor, gamma: float, lam: float):
     """
-    r, v, dones, mask: [B, T]
-    returns (advantages, returns): [B, T]
+    Generalized Advantage Estimation.
+
+    Supports two input layouts:
+    - Batched sequences: r, v, dones, mask with shape [B, T]
+    - Flattened sequence: r, v, dones, mask with shape [N]
+
+    Returns (advantages, returns) with the same shape as inputs.
     """
+    # Handle flattened [N] case
+    if r.dim() == 1:
+        N = r.shape[0]
+        adv = torch.zeros_like(r)
+        lastgaelam = torch.zeros((), device=r.device, dtype=r.dtype)
+        v_next = torch.zeros((), device=r.device, dtype=r.dtype)
+        for t in reversed(range(N)):
+            nonterminal = (1.0 - dones[t])
+            delta = r[t] + gamma * v_next * nonterminal - v[t]
+            lastgaelam = delta + gamma * lam * nonterminal * lastgaelam
+            adv[t] = lastgaelam
+            v_next = v[t]
+        ret = adv + v
+        # mask invalid timesteps
+        adv = adv * mask
+        ret = ret * mask
+        return adv, ret
+
+    # Default: batched [B, T]
     B, T = r.shape
     adv = torch.zeros_like(r)
     lastgaelam = torch.zeros(B, device=r.device, dtype=r.dtype)
