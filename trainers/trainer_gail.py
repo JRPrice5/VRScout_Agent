@@ -16,18 +16,25 @@ class TrainerGAIL:
         self.device = device
         self.cfg = cfg or {}
         self.disc = GAILDiscriminator(h_dim=h_dim, cont_dim=cont_dim, bin_dim=bin_dim).to(device)
-        self.opt_policy = optim.Adam(self.policy.parameters(), lr=self.cfg.get('lr_policy', 3e-4))
-        self.opt_value = optim.Adam(list(self.policy.value_head.parameters()) +
-                                    list(self.policy.cont_mu_head.parameters()) +
-                                    list(self.policy.cont_log_std_head.parameters()) +
-                                    list(self.policy.bin_logits_head.parameters()),
-                                    lr=self.cfg.get('lr_policy', 3e-4))
+        # policy optimizer: policy trunk + action heads (NOT value)
+        self.opt_policy = optim.Adam(
+            list(self.policy.policy_trunk.parameters()) +
+            list(self.policy.cont_mu_head.parameters()) +
+            list(self.policy.cont_log_std_head.parameters()) +
+            list(self.policy.bin_logits_head.parameters()),
+            lr=self.cfg.get('lr_policy', 3e-4)
+        )
+        self.opt_value = optim.Adam(self.policy.value_head.parameters(), lr=self.cfg.get('lr_policy', 3e-4))
         self.opt_disc = optim.Adam(self.disc.parameters(), lr=self.cfg.get('lr_disc', 1e-4))
 
     def compute_logp_and_entropy(self, out_dist, a_cont, a_bin, mask):
-        """Compute log-prob and entropy using ONLY the first query (index 0).
-        Returns [B,T]-shaped tensors with values in the first column to match downstream masking.
+        """Compute log-prob and entropy for ALL timesteps.
+        - Supports optional query dimension by averaging across queries.
+        - Supports squashed continuous policy via tanh correction when cfg['squashed_cont'] is True.
+        Returns: [B, T] tensors (logp, ent), masked by `mask`.
         """
+        from distributions import DiagNormal, TanhDiagNormal, BernoulliMulti
+
         cont_dist = out_dist['cont_dist']
         bin_dist = out_dist['bin_dist']
 
@@ -42,86 +49,104 @@ class TrainerGAIL:
             if n == B_mask * T_mask:
                 return x.view(B_mask, T_mask, *x.shape[1:])
             if n == B_mask:
-                # add time dim and broadcast along T
                 x_bt = x.view(B_mask, 1, *x.shape[1:])
                 return x_bt.expand(-1, T_mask, *([-1] * (x.dim() - 1)))
-            # Fallback: if n != B or B*T, raise for clarity
             raise ValueError(f"Unexpected batch dimension {n} for tensor with shape {tuple(x.shape)}, expected {B_mask} or {B_mask*T_mask}")
 
-        # Align continuous params to [B,T,Tq,C]
-        if hasattr(cont_dist, 'mu') and cont_dist.mu.dim() == 3:
-            mu_bt = reshape_BT(cont_dist.mu)          # [B,T,Tq,C]
-            logstd_bt = reshape_BT(cont_dist.log_std) # [B,T,Tq,C]
-            # Select first timestep and first query
-            mu_first = mu_bt[:, 0, 0, :]              # [B,C]
-            log_std_first = logstd_bt[:, 0, 0, :]     # [B,C]
-        else:
-            # No query dim; just [B,T,C]
-            mu_bt = reshape_BT(cont_dist.mu)          # [B,T,C]
-            logstd_bt = reshape_BT(cont_dist.log_std) # [B,T,C]
-            mu_first = mu_bt[:, 0, :]
-            log_std_first = logstd_bt[:, 0, :]
+        # Continuous params to [B,T,(Tq),C]
+        mu_bt = reshape_BT(cont_dist.mu)
+        logstd_bt = reshape_BT(cont_dist.log_std)
 
-        cont_first = DiagNormal(mu_first, log_std_first)
-        # Align a_cont to [B, Cc]
-        if a_cont.dim() == 3:
-            a_cont_bt = reshape_BT(a_cont)            # [B,T,Tq,C]
-            a_cont_first = a_cont_bt[:, 0, 0, :]      # [B,C]
-        elif a_cont.dim() == 2:
-            a_cont_bt = reshape_BT(a_cont)            # [B,T,C]
-            a_cont_first = a_cont_bt[:, 0, :]         # [B,C]
+        # Actions to [B,T,(Tq),C]
+        if a_cont.dim() == 4:  # [B,T,Tq,C]
+            a_cont_bt = reshape_BT(a_cont)
+        elif a_cont.dim() == 3:  # [B,T,C]
+            a_cont_bt = reshape_BT(a_cont)
         else:
             raise ValueError(f"Unexpected a_cont shape {tuple(a_cont.shape)}")
 
-        cont_logp_first = cont_first.log_prob(a_cont_first)  # [B]
-        ent_first = cont_first.entropy()  # [B]
+        # Build distribution and compute per-step logp/entropy
+        use_squash = bool(self.cfg.get('squashed_cont', True))
+        DistClass = TanhDiagNormal if use_squash else DiagNormal
+        min_ls = float(self.cfg.get('min_log_std', -5.0))
+        max_ls = float(self.cfg.get('max_log_std', 2.0))
 
-        # Optional binary part on first query
-        if bin_dist is not None and a_bin is not None:
-            # Build a first-query Bernoulli distribution
-            if hasattr(bin_dist, 'logits') and bin_dist.logits is not None:
-                logits = bin_dist.logits
-                if logits.dim() == 3:
-                    logits_bt = reshape_BT(logits)      # [B,T,Tq,Cb]
-                    logits_first = logits_bt[:, 0, 0, :] # [B,Cb]
-                elif logits.dim() == 2:
-                    logits_bt = reshape_BT(logits)      # [B,T,Cb]
-                    logits_first = logits_bt[:, 0, :]
-                else:
-                    raise ValueError(f"Unexpected logits shape {tuple(logits.shape)}")
-                bin_first = BernoulliMulti(logits=logits_first)
+        # If query dim exists, align with actions; reduce over queries by mean
+        if mu_bt.dim() == 4:  # [B,T,Tq,C]
+            # If actions lack query dim, use first query of distribution
+            if a_cont_bt.dim() == 3:  # [B,T,C]
+                mu_use = mu_bt[:, :, 0, :]
+                logstd_use = logstd_bt[:, :, 0, :]
+                dist = DistClass(mu_use, logstd_use, min_log_std=min_ls, max_log_std=max_ls)  # batch [B,T]
+                logp_cont = dist.log_prob(a_cont_bt)  # [B,T]
+                ent_cont = dist.entropy()             # [B,T]
             else:
-                probs = bin_dist.probs
-                if probs.dim() == 3:
-                    probs_bt = reshape_BT(probs)        # [B,T,Tq,Cb]
-                    probs_first = probs_bt[:, 0, 0, :]
-                elif probs.dim() == 2:
-                    probs_bt = reshape_BT(probs)        # [B,T,Cb]
-                    probs_first = probs_bt[:, 0, :]
-                else:
-                    raise ValueError(f"Unexpected probs shape {tuple(probs.shape)}")
-                bin_first = BernoulliMulti(probs=probs_first)
+                # Both have query dim -> compute per-query then average over queries
+                dist = DistClass(mu_bt, logstd_bt, min_log_std=min_ls, max_log_std=max_ls)          # batch [B,T,Tq]
+                logp_q = dist.log_prob(a_cont_bt)           # [B,T,Tq]
+                ent_q = dist.entropy()                      # [B,T,Tq]
+                logp_cont = logp_q.mean(dim=2)              # [B,T]
+                ent_cont = ent_q.mean(dim=2)                # [B,T]
+        else:  # [B,T,C]
+            dist = DistClass(mu_bt, logstd_bt, min_log_std=min_ls, max_log_std=max_ls)              # batch [B,T]
+            # If actions provide query dim, use first query of actions
+            if a_cont_bt.dim() == 4:
+                a_use = a_cont_bt[:, :, 0, :]
+            else:
+                a_use = a_cont_bt
+            logp_cont = dist.log_prob(a_use)                # [B,T]
+            ent_cont = dist.entropy()                       # [B,T]
 
-            # Align a_bin to [B, Cb]
-            if a_bin.dim() == 3:
-                a_bin_bt = reshape_BT(a_bin)           # [B,T,Tq,Cb]
-                a_bin_first = a_bin_bt[:, 0, 0, :]
-            elif a_bin.dim() == 2:
-                a_bin_bt = reshape_BT(a_bin)           # [B,T,Cb]
-                a_bin_first = a_bin_bt[:, 0, :]
+        logp_BT = logp_cont
+        ent_BT = ent_cont
+
+        # Optional binary part over all timesteps; handle optional query dim similarly
+        if bin_dist is not None and a_bin is not None:
+            if hasattr(bin_dist, 'logits') and bin_dist.logits is not None:
+                logits = reshape_BT(bin_dist.logits)  # [B,T,(Tq),Cb]
+                make_bin = lambda t: BernoulliMulti(logits=t)
+            else:
+                probs = reshape_BT(bin_dist.probs)
+                make_bin = lambda t: BernoulliMulti(probs=t)
+
+            # Align a_bin
+            if a_bin.dim() == 4:  # [B,T,Tq,Cb]
+                a_bin_bt = reshape_BT(a_bin)
+            elif a_bin.dim() == 3:  # [B,T,Cb]
+                a_bin_bt = reshape_BT(a_bin)
             else:
                 raise ValueError(f"Unexpected a_bin shape {tuple(a_bin.shape)}")
-            cont_logp_first = cont_logp_first + bin_first.log_prob(a_bin_first)
-            ent_first = ent_first + bin_first.entropy()
 
-        # Place values only in the first time column to match "first-query" semantics
-        T_out = T_mask
-        logp_BT = mask.new_zeros((B_mask, T_out), dtype=cont_logp_first.dtype)
-        ent_BT = mask.new_zeros((B_mask, T_out), dtype=ent_first.dtype)
-        logp_BT[:, 0] = cont_logp_first
-        ent_BT[:, 0] = ent_first
+            # Determine parameter tensor (logits or probs) to use
+            param_bt = logits if hasattr(bin_dist, 'logits') and bin_dist.logits is not None else probs
 
-        return logp_BT * mask, ent_BT * mask
+            if param_bt.dim() == 4:  # [B,T,Tq,Cb]
+                if a_bin_bt.dim() == 3:  # [B,T,Cb]
+                    bin_dist_use = make_bin(param_bt[:, :, 0, :])
+                    logp_bin = bin_dist_use.log_prob(a_bin_bt)  # [B,T]
+                    ent_bin = bin_dist_use.entropy()            # [B,T]
+                else:
+                    bin_dist_q = make_bin(param_bt)             # [B,T,Tq]
+                    logp_q = bin_dist_q.log_prob(a_bin_bt)      # [B,T,Tq]
+                    ent_q = bin_dist_q.entropy()                # [B,T,Tq]
+                    logp_bin = logp_q.mean(dim=2)
+                    ent_bin = ent_q.mean(dim=2)
+            else:  # [B,T,Cb]
+                bin_dist_use = make_bin(param_bt)
+                if a_bin_bt.dim() == 4:
+                    a_bin_use = a_bin_bt[:, :, 0, :]
+                else:
+                    a_bin_use = a_bin_bt
+                logp_bin = bin_dist_use.log_prob(a_bin_use)
+                ent_bin = bin_dist_use.entropy()
+
+            logp_BT = logp_BT + logp_bin
+            ent_BT = ent_BT + ent_bin
+
+        # Mask and return [B,T]
+        logp_BT = logp_BT * mask
+        ent_BT = ent_BT * mask
+        return logp_BT, ent_BT
 
     def update_discriminator(self, h_exp, a_cont_exp, a_bin_exp, mask_exp, h_pol, a_cont_pol, a_bin_pol, mask_pol):
         self.disc.train()
@@ -147,7 +172,7 @@ class TrainerGAIL:
         self.disc.eval()
         return loss_D.item(), acc_exp.item(), acc_pol.item()
 
-    def ppo_update(self, batch, clip_eps=0.2, gamma=0.99, lam=0.95, ent_coef=0.0, vf_coef=0.5,
+    def ppo_update(self, batch, clip_eps=0.2, gamma=0.99, lam=0.95, ent_coef=1e-3, vf_coef=0.5,
                    bc_data=None, bc_weight: float = 0.0):
         self.policy.train()
 
@@ -224,6 +249,11 @@ class TrainerGAIL:
         out = self.policy.forward(qpos, image, out_mode='dist')
         logp, ent = self.compute_logp_and_entropy(out, a_cont, a_bin, mask)
         v = out['value']
+        # Log mean entropy per continuous action dim for exploration diagnostics
+        try:
+            cont_dim = out['cont_dist'].mu.shape[-1]
+        except Exception:
+            cont_dim = None
         # --- Align value tensor to [B, T] ---
         if v.dim() == 2:
             if v.shape == (B, T):
@@ -260,7 +290,18 @@ class TrainerGAIL:
         L_pi = ppo_clip_loss(logp, logp_old, adv, clip_eps, mask)
         L_v = value_loss(v, ret, mask)
         L_ent = -(ent.sum() / mask.sum().clamp_min(1.0)) if ent_coef != 0.0 else v.new_tensor(0.0)
-        loss = L_pi + vf_coef * L_v + ent_coef * L_ent
+        if cont_dim is not None and cont_dim > 0:
+            with torch.no_grad():
+                mean_ent_per_dim = (ent.sum() / mask.sum().clamp_min(1.0)) / cont_dim
+                print(f"[PPO DBG] mean entropy per dim: {mean_ent_per_dim.item():.4f} (cont_dim={cont_dim})")
+        # We do two separate optimization steps to avoid value gradients updating the shared trunk
+        # Policy step: optimize policy trunk + action heads on (pi + ent + optional BC)
+        policy_params = (
+            list(self.policy.policy_trunk.parameters()) +
+            list(self.policy.cont_mu_head.parameters()) +
+            list(self.policy.cont_log_std_head.parameters()) +
+            list(self.policy.bin_logits_head.parameters())
+        )
 
         # Optional BC anchor: encourage current policy to imitate expert actions on demo states
         L_bc = v.new_tensor(0.0)
@@ -276,12 +317,60 @@ class TrainerGAIL:
             logp_exp, _ = self.compute_logp_and_entropy(out_exp, a_cont_exp, a_bin_exp, mask_exp)
             # Negative log-likelihood averaged over valid steps
             L_bc = -(logp_exp.sum() / mask_exp.sum().clamp_min(1.0))
-            loss = loss + bc_weight * L_bc
 
+        loss_policy = L_pi + ent_coef * L_ent + (bc_weight * L_bc if bc_weight > 0.0 else v.new_tensor(0.0))
         self.opt_policy.zero_grad(set_to_none=True)
-        loss.backward()
-        nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.cfg.get('grad_clip', 1.0))
+        loss_policy.backward()
+        nn.utils.clip_grad_norm_(policy_params, max_norm=self.cfg.get('grad_clip', 1.0))
         self.opt_policy.step()
+
+        # Value step: optimize only value_head on (vf_coef * L_v)
+        # Temporarily freeze shared trunk to avoid value gradients updating it
+        trunk_requires = []
+        for p in self.policy.policy_trunk.parameters():
+            trunk_requires.append(p.requires_grad)
+            p.requires_grad = False
+        try:
+            # Recompute value to ensure correct graph under current requires_grad settings
+            out_val = self.policy.forward(qpos, image, out_mode='dist')
+            v_val = out_val['value']
+            # Align to [B,T] similarly as above
+            if v_val.dim() == 2:
+                if v_val.shape == (B, T):
+                    pass
+                elif v_val.shape[0] == B * T and v_val.shape[1] == 1:
+                    v_val = v_val.view(B, T)
+                elif v_val.shape[0] == B * T and v_val.shape[1] != 1:
+                    v_val = v_val[:, 0].view(B, T)
+                elif v_val.shape[0] == B and v_val.shape[1] == 1 and T > 1:
+                    v_val = v_val.expand(B, T)
+                elif v_val.shape[0] == B and v_val.shape[1] != T:
+                    v_val = v_val.mean(dim=1, keepdim=True).expand(B, T)
+                else:
+                    if v_val.numel() == B * T:
+                        v_val = v_val.view(B, T)
+                    else:
+                        raise ValueError(f"value 'v' has incompatible shape {tuple(v_val.shape)} with inferred (B,T)=({B},{T})")
+            elif v_val.dim() == 1:
+                if v_val.numel() == B * T:
+                    v_val = v_val.view(B, T)
+                elif v_val.numel() == B and T > 1:
+                    v_val = v_val.view(B, 1).expand(B, T)
+                else:
+                    raise ValueError(f"value 'v' has incompatible shape {tuple(v_val.shape)} with inferred (B,T)=({B},{T})")
+            else:
+                raise ValueError(f"Unexpected value 'v' shape {tuple(v_val.shape)}; expected 1D or 2D")
+
+            L_v_val = value_loss(v_val, ret, mask)
+            loss_value = vf_coef * L_v_val
+            self.opt_value.zero_grad(set_to_none=True)
+            loss_value.backward()
+            nn.utils.clip_grad_norm_(self.policy.value_head.parameters(), max_norm=self.cfg.get('grad_clip', 1.0))
+            self.opt_value.step()
+        finally:
+            # Restore trunk requires_grad flags
+            for p, req in zip(self.policy.policy_trunk.parameters(), trunk_requires):
+                p.requires_grad = req
         self.policy.eval()
 
         # Debug stats after PPO update: compare new logp vs frozen logp_old
