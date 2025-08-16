@@ -149,6 +149,7 @@ class UnityVRGAILInterface:
         if 'qpos' not in data or 'image' not in data:
             return
 
+        # Perform policy inference and buffer storage without autograd
         with torch.inference_mode():
             qpos_np = np.array(data['qpos'], dtype=np.float32)
             qpos = preprocess_qpos(qpos_np, self.stats).cuda().unsqueeze(0)
@@ -236,9 +237,14 @@ class UnityVRGAILInterface:
             self._send_action(action_env)
 
             self.internal_timestep += 1
-            # Emit batch if ready
-            if len(self.buffer) >= self.update_every and self.on_batch is not None:
-                batch = self._finalize_and_reset_buffer()
+            # Decide whether to emit a batch (outside of inference_mode)
+            emit_now = (len(self.buffer) >= self.update_every and self.on_batch is not None)
+
+        # If a batch is ready, finalize and call the callback with autograd enabled
+        if 'emit_now' in locals() and emit_now:
+            batch = self._finalize_and_reset_buffer()
+            # Ensure gradients are enabled during training steps inside on_batch
+            with torch.enable_grad():
                 self.on_batch(batch)
 
     def _mark_done(self):
