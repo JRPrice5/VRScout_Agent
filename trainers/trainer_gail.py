@@ -17,13 +17,7 @@ class TrainerGAIL:
         self.cfg = cfg or {}
         self.disc = GAILDiscriminator(h_dim=h_dim, cont_dim=cont_dim, bin_dim=bin_dim).to(device)
         # policy optimizer: policy trunk + action heads (NOT value)
-        self.opt_policy = optim.Adam(
-            list(self.policy.policy_trunk.parameters()) +
-            list(self.policy.cont_mu_head.parameters()) +
-            list(self.policy.cont_log_std_head.parameters()) +
-            list(self.policy.bin_logits_head.parameters()),
-            lr=self.cfg.get('lr_policy', 3e-4)
-        )
+        self.opt_policy = optim.Adam(self.policy.parameters(), lr=self.cfg.get('lr_policy', 3e-4))
         self.opt_value = optim.Adam(self.policy.value_head.parameters(), lr=self.cfg.get('lr_policy', 3e-4))
         self.opt_disc = optim.Adam(self.disc.parameters(), lr=self.cfg.get('lr_disc', 1e-4))
 
