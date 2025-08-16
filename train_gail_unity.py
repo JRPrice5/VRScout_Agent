@@ -39,7 +39,7 @@ def main():
     # Imitation/ACT-style args
     parser.add_argument('--policy_class', type=str, default='ACT')
     parser.add_argument('--task_name', type=str, default='gail_rl')
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--batch_size', type=int, default=128) # This batch size (dataloader batch size) is for discriminator update
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -274,10 +274,33 @@ def main():
         action_exp = action_exp.to(device).float()
         is_pad_exp = is_pad_exp.to(device)
 
-        a_cont_exp, a_bin_exp = split_actions(action_exp)  # [B,T,Cc], [B,T,Cb]
-        # Encode expert to hidden features
-        h_exp = policy.encode_to_hidden(qpos_exp, image_exp)
-        mask_exp = (~is_pad_exp).float()
+        B_exp, T_exp, _ = action_exp.shape
+        # To match policy data, sample a single random timestep from each expert trajectory
+        t_idx = torch.randint(0, T_exp, (B_exp,), device=device)
+        qpos_exp_t = qpos_exp[torch.arange(B_exp), t_idx]
+        image_exp_t = image_exp[torch.arange(B_exp), t_idx]
+        action_exp_t = action_exp[torch.arange(B_exp), t_idx]
+
+        a_cont_exp, a_bin_exp = split_actions(action_exp_t.unsqueeze(1)) # -> [B,1,A]
+        h_exp = policy.encode_to_hidden(qpos_exp_t, image_exp_t)
+        mask_exp = torch.ones(B_exp, 1, device=device)
+
+        # Reshape policy data to have a temporal dimension of 1
+        B_pol = h_pol.shape[0]
+        h_pol = h_pol.unsqueeze(1) # [B,1,Q,H]
+        a_cont_pol = a_cont_pol.unsqueeze(1) # [B,1,A]
+        if a_bin_pol is not None:
+            a_bin_pol = a_bin_pol.unsqueeze(1) # [B,1,A]
+        mask_pol = mask_pol.unsqueeze(1) # [B,1]
+
+        # To match batch sizes, sample from the larger policy batch
+        if B_pol > B_exp:
+            sample_indices = torch.randperm(B_pol)[:B_exp]
+            h_pol = h_pol[sample_indices]
+            a_cont_pol = a_cont_pol[sample_indices]
+            if a_bin_pol is not None:
+                a_bin_pol = a_bin_pol[sample_indices]
+            mask_pol = mask_pol[sample_indices]
 
         # Update discriminator
         loss_D, acc_exp, acc_pol = trainer.update_discriminator(
