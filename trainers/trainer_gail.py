@@ -255,23 +255,6 @@ class TrainerGAIL:
         else:
             raise ValueError(f"Unexpected value 'v' shape {tuple(v.shape)}; expected 1D or 2D")
 
-        # Debug stats before PPO loss
-        with torch.no_grad():
-            valid = mask > 0
-            num_valid = valid.sum().item()
-            print(f"[PPO DBG] mask valid sum={num_valid} shape={tuple(mask.shape)}")
-            if num_valid > 0:
-                lp = logp[valid]
-                lpo = logp_old[valid]
-                dv = (lp - lpo)
-                dv_clamped = torch.clamp(dv, -20.0, 20.0)
-                ratio = torch.exp(dv_clamped)
-                ad = adv[valid]
-                print(f"[PPO DBG] logp   min/mean/max: {lp.min().item():.3f} {lp.mean().item():.3f} {lp.max().item():.3f}")
-                print(f"[PPO DBG] logp_o min/mean/max: {lpo.min().item():.3f} {lpo.mean().item():.3f} {lpo.max().item():.3f}")
-                print(f"[PPO DBG] dlogp  min/mean/max: {dv.min().item():.3f} {dv.mean().item():.3f} {dv.max().item():.3f}")
-                print(f"[PPO DBG] ratio  min/mean/max: {ratio.min().item():.3e} {ratio.mean().item():.3e} {ratio.max().item():.3e}")
-                print(f"[PPO DBG] adv    min/mean/max/std: {ad.min().item():.3f} {ad.mean().item():.3f} {ad.max().item():.3f} {ad.std().item():.3f}")
 
         # Losses
         L_pi = ppo_clip_loss(logp, logp_old, adv, clip_eps, mask)
@@ -300,6 +283,26 @@ class TrainerGAIL:
         nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.cfg.get('grad_clip', 1.0))
         self.opt_policy.step()
         self.policy.eval()
+
+        # Debug stats after PPO update: compare new logp vs frozen logp_old
+        with torch.no_grad():
+            out_post = self.policy.forward(qpos, image, out_mode='dist')
+            logp_post, _ = self.compute_logp_and_entropy(out_post, a_cont, a_bin, mask)
+            valid = mask > 0
+            num_valid = valid.sum().item()
+            print(f"[PPO DBG] (POST) mask valid sum={num_valid} shape={tuple(mask.shape)}")
+            if num_valid > 0:
+                lp = logp_post[valid]
+                lpo = logp_old[valid]
+                dv = (lp - lpo)
+                dv_clamped = torch.clamp(dv, -20.0, 20.0)
+                ratio = torch.exp(dv_clamped)
+                ad = adv[valid]
+                print(f"[PPO DBG] (POST) logp   min/mean/max: {lp.min().item():.3f} {lp.mean().item():.3f} {lp.max().item():.3f}")
+                print(f"[PPO DBG] (POST) logp_o min/mean/max: {lpo.min().item():.3f} {lpo.mean().item():.3f} {lpo.max().item():.3f}")
+                print(f"[PPO DBG] (POST) dlogp  min/mean/max: {dv.min().item():.3f} {dv.mean().item():.3f} {dv.max().item():.3f}")
+                print(f"[PPO DBG] (POST) ratio  min/mean/max: {ratio.min().item():.3e} {ratio.mean().item():.3e} {ratio.max().item():.3e}")
+                print(f"[PPO DBG] (POST) adv    min/mean/max/std: {ad.min().item():.3f} {ad.mean().item():.3f} {ad.max().item():.3f} {ad.std().item():.3f}")
         return {
             'loss_pi': L_pi.item(),
             'loss_v': L_v.item(),
