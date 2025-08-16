@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -206,6 +207,15 @@ class TrainerGAIL:
         adv, ret = compute_gae(r, v_old, dones, mask, gamma=gamma, lam=lam)
         adv = torch.clamp(adv, -10.0, 10.0)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+        # Recompute old log-probs with a frozen snapshot to ensure consistency
+        with torch.no_grad():
+            frozen_policy = copy.deepcopy(self.policy).to(self.device)
+            frozen_policy.eval()
+            out_old = frozen_policy.forward(qpos, image, out_mode='dist')
+            logp_old_frozen, _ = self.compute_logp_and_entropy(out_old, a_cont, a_bin, mask)
+            logp_old = logp_old_frozen.detach()
+            del frozen_policy, out_old, logp_old_frozen
 
         # Forward policy
         out = self.policy.forward(qpos, image, out_mode='dist')
