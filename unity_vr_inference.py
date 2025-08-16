@@ -195,7 +195,7 @@ class UnityVRInterface:
         
         # Load checkpoint
         ckpt_path = os.path.join(self.ckpt_dir, 'policy_best.ckpt')
-        policy.load_state_dict(torch.load(ckpt_path))
+        policy.load_state_dict(torch.load(ckpt_path), strict=False) # CAUTION : test only
         policy.cuda()
         policy.eval()
         

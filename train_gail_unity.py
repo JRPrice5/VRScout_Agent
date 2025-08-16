@@ -289,14 +289,10 @@ def main():
         h_exp = h_exp_full[:, 0:1, :]  # [B,1,H]
         mask_exp = torch.ones(B_exp, 1, device=device)
 
-        # Reshape policy data to have a temporal dimension of 1
+        # Ensure policy data has a temporal dimension of 1 (already present from buffer)
         B_pol = h_pol.shape[0]
-        # Use current timestep (query 0) then add temporal dim
+        # Use current timestep (query 0) for hidden; actions/mask already [B,1,...]
         h_pol = h_pol[:, 0:1, :]  # [B,1,H]
-        a_cont_pol = a_cont_pol.unsqueeze(1) # [B,1,A]
-        if a_bin_pol is not None:
-            a_bin_pol = a_bin_pol.unsqueeze(1) # [B,1,A]
-        mask_pol = mask_pol.unsqueeze(1) # [B,1]
 
         # To match batch sizes, sample from the larger policy batch
         if B_pol > B_exp:

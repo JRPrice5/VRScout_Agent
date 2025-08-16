@@ -208,14 +208,20 @@ class UnityVRGAILInterface:
                 self._mark_prev_done = False
 
             # Store transition in rollout buffer (mask=1 valid step, dones default 0)
-            mask = torch.ones_like(value)
-            dones = torch.zeros_like(value)
+            # Ensure tensors include an explicit time dimension T=1
+            mask = torch.ones_like(value).unsqueeze(1)   # [1,1]
+            dones = torch.zeros_like(value).unsqueeze(1) # [1,1]
+            a_cont_t = a_cont.unsqueeze(1)               # [1,1,Cc]
+            a_bin_t = None if a_bin is None else a_bin.unsqueeze(1)  # [1,1,Cb]
+            logp_t = logp.unsqueeze(1)                   # [1,1]
+            value_t = value.unsqueeze(1)                 # [1,1]
+
             self.buffer.add(
                 obs={'qpos': qpos, 'image': image},
-                a_cont=a_cont,
-                a_bin=a_bin,
-                logp=logp,
-                value=value,
+                a_cont=a_cont_t,
+                a_bin=a_bin_t,
+                logp=logp_t,
+                value=value_t,
                 dones=dones,
                 mask=mask,
             )

@@ -52,10 +52,21 @@ class TrainerGAIL:
         logstd_bt = reshape_BT(cont_dist.log_std)
 
         # Actions to [B,T,(Tq),C]
-        if a_cont.dim() == 4:  # [B,T,Tq,C]
-            a_cont_bt = reshape_BT(a_cont)
-        elif a_cont.dim() == 3:  # [B,T,C]
-            a_cont_bt = reshape_BT(a_cont)
+        if a_cont.dim() == 4:  # [B, T?, Tq, C]
+            # Only expand time dimension if it's 1
+            if a_cont.shape[0] == B_mask and a_cont.shape[1] == 1 and T_mask > 1:
+                a_cont_bt = a_cont.expand(B_mask, T_mask, a_cont.shape[2], a_cont.shape[3])
+            elif a_cont.shape[0] == B_mask and a_cont.shape[1] == T_mask:
+                a_cont_bt = a_cont
+            else:
+                raise ValueError(f"a_cont 4D incompatible with (B,T)=({B_mask},{T_mask}), got {tuple(a_cont.shape)}")
+        elif a_cont.dim() == 3:  # [B, T?, C]
+            if a_cont.shape[0] == B_mask and a_cont.shape[1] == 1 and T_mask > 1:
+                a_cont_bt = a_cont.expand(B_mask, T_mask, a_cont.shape[2])
+            elif a_cont.shape[0] == B_mask and a_cont.shape[1] == T_mask:
+                a_cont_bt = a_cont
+            else:
+                raise ValueError(f"a_cont 3D incompatible with (B,T)=({B_mask},{T_mask}), got {tuple(a_cont.shape)}")
         else:
             raise ValueError(f"Unexpected a_cont shape {tuple(a_cont.shape)}")
 
@@ -67,13 +78,14 @@ class TrainerGAIL:
 
         # If query dim exists, align with actions; reduce over queries by mean
         if mu_bt.dim() == 4:  # [B,T,Tq,C]
-            # If actions lack query dim, use first query of distribution
-            if a_cont_bt.dim() == 3:  # [B,T,C]
+            # If actions lack query dim or have singleton query dim, use first query of distribution
+            if a_cont_bt.dim() == 3 or (a_cont_bt.dim() == 4 and a_cont_bt.shape[2] == 1):
                 mu_use = mu_bt[:, :, 0, :]
                 logstd_use = logstd_bt[:, :, 0, :]
                 dist = DistClass(mu_use, logstd_use, min_log_std=min_ls, max_log_std=max_ls)  # batch [B,T]
-                logp_cont = dist.log_prob(a_cont_bt)  # [B,T]
-                ent_cont = dist.entropy()             # [B,T]
+                a_use = a_cont_bt if a_cont_bt.dim() == 3 else a_cont_bt[:, :, 0, :]
+                logp_cont = dist.log_prob(a_use)  # [B,T]
+                ent_cont = dist.entropy()         # [B,T]
             else:
                 # Both have query dim -> compute per-query then average over queries
                 dist = DistClass(mu_bt, logstd_bt, min_log_std=min_ls, max_log_std=max_ls)          # batch [B,T,Tq]
@@ -104,10 +116,20 @@ class TrainerGAIL:
                 make_bin = lambda t: BernoulliMulti(probs=t)
 
             # Align a_bin
-            if a_bin.dim() == 4:  # [B,T,Tq,Cb]
-                a_bin_bt = reshape_BT(a_bin)
-            elif a_bin.dim() == 3:  # [B,T,Cb]
-                a_bin_bt = reshape_BT(a_bin)
+            if a_bin.dim() == 4:  # [B, T?, Tq, Cb]
+                if a_bin.shape[0] == B_mask and a_bin.shape[1] == 1 and T_mask > 1:
+                    a_bin_bt = a_bin.expand(B_mask, T_mask, a_bin.shape[2], a_bin.shape[3])
+                elif a_bin.shape[0] == B_mask and a_bin.shape[1] == T_mask:
+                    a_bin_bt = a_bin
+                else:
+                    raise ValueError(f"a_bin 4D incompatible with (B,T)=({B_mask},{T_mask}), got {tuple(a_bin.shape)}")
+            elif a_bin.dim() == 3:  # [B, T?, Cb]
+                if a_bin.shape[0] == B_mask and a_bin.shape[1] == 1 and T_mask > 1:
+                    a_bin_bt = a_bin.expand(B_mask, T_mask, a_bin.shape[2])
+                elif a_bin.shape[0] == B_mask and a_bin.shape[1] == T_mask:
+                    a_bin_bt = a_bin
+                else:
+                    raise ValueError(f"a_bin 3D incompatible with (B,T)=({B_mask},{T_mask}), got {tuple(a_bin.shape)}")
             else:
                 raise ValueError(f"Unexpected a_bin shape {tuple(a_bin.shape)}")
 
@@ -115,10 +137,12 @@ class TrainerGAIL:
             param_bt = logits if hasattr(bin_dist, 'logits') and bin_dist.logits is not None else probs
 
             if param_bt.dim() == 4:  # [B,T,Tq,Cb]
-                if a_bin_bt.dim() == 3:  # [B,T,Cb]
+                if a_bin_bt.dim() == 3 or (a_bin_bt.dim() == 4 and a_bin_bt.shape[2] == 1):
+                    # Actions have no query dim or singleton query dim -> use first query of distribution
+                    a_bin_use = a_bin_bt if a_bin_bt.dim() == 3 else a_bin_bt[:, :, 0, :]
                     bin_dist_use = make_bin(param_bt[:, :, 0, :])
-                    logp_bin = bin_dist_use.log_prob(a_bin_bt)  # [B,T]
-                    ent_bin = bin_dist_use.entropy()            # [B,T]
+                    logp_bin = bin_dist_use.log_prob(a_bin_use)  # [B,T]
+                    ent_bin = bin_dist_use.entropy()             # [B,T]
                 else:
                     bin_dist_q = make_bin(param_bt)             # [B,T,Tq]
                     logp_q = bin_dist_q.log_prob(a_bin_bt)      # [B,T,Tq]
@@ -288,14 +312,13 @@ class TrainerGAIL:
             with torch.no_grad():
                 mean_ent_per_dim = (ent.sum() / mask.sum().clamp_min(1.0)) / cont_dim
                 print(f"[PPO DBG] mean entropy per dim: {mean_ent_per_dim.item():.4f} (cont_dim={cont_dim})")
-        # We do two separate optimization steps to avoid value gradients updating the shared trunk
-        # Policy step: optimize policy trunk + action heads on (pi + ent + optional BC)
-        policy_params = (
-            list(self.policy.policy_trunk.parameters()) +
-            list(self.policy.cont_mu_head.parameters()) +
-            list(self.policy.cont_log_std_head.parameters()) +
-            list(self.policy.bin_logits_head.parameters())
-        )
+        # We do two separate optimization steps to avoid value gradients updating the shared body
+        # Policy step: optimize all params EXCEPT value head on (pi + ent + optional BC)
+        value_params = list(self.policy.value_head.parameters())
+        policy_params = [
+            p for p in self.policy.parameters()
+            if all(p is not vp for vp in value_params)
+        ]
 
         # Optional BC anchor: encourage current policy to imitate expert actions on demo states
         L_bc = v.new_tensor(0.0)
@@ -319,9 +342,10 @@ class TrainerGAIL:
         self.opt_policy.step()
 
         # Value step: optimize only value_head on (vf_coef * L_v)
-        # Temporarily freeze shared trunk to avoid value gradients updating it
+        # Temporarily freeze all non-value params to avoid value gradients updating them
+        non_value_params = [p for p in self.policy.parameters() if all(p is not vp for vp in value_params)]
         trunk_requires = []
-        for p in self.policy.policy_trunk.parameters():
+        for p in non_value_params:
             trunk_requires.append(p.requires_grad)
             p.requires_grad = False
         try:
@@ -362,8 +386,8 @@ class TrainerGAIL:
             nn.utils.clip_grad_norm_(self.policy.value_head.parameters(), max_norm=self.cfg.get('grad_clip', 1.0))
             self.opt_value.step()
         finally:
-            # Restore trunk requires_grad flags
-            for p, req in zip(self.policy.policy_trunk.parameters(), trunk_requires):
+            # Restore requires_grad flags for frozen params
+            for p, req in zip(non_value_params, trunk_requires):
                 p.requires_grad = req
         self.policy.eval()
 
