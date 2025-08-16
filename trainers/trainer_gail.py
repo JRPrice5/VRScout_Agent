@@ -72,6 +72,39 @@ class TrainerGAIL:
         r = batch['reward'].to(self.device)
         dones = batch['dones'].to(self.device)
 
+        # --- Reconcile shapes to [B, T] ---
+        # Infer B from rewards or actions
+        B = r.shape[0] if r.dim() >= 1 else mask.shape[0]
+        # Infer T from any 1D tensors (ppo update step size = B*T)
+        T = 1
+        for x in (v_old, dones, mask):
+            if x.dim() == 1 and x.numel() % B == 0:
+                T = max(T, x.numel() // B)
+        # Reshape/expand r to [B, T]
+        if r.dim() == 2 and r.shape[1] == 1 and T > 1:
+            r = r.expand(B, T)
+        elif r.dim() == 1 and r.numel() == B * T:
+            r = r.view(B, T)
+        elif r.dim() == 2 and r.shape == (B, T):
+            pass
+        elif r.dim() == 1 and r.numel() == B and T > 1:
+            # Broadcast per-trajectory reward across timesteps as a fallback
+            r = r.view(B, 1).expand(B, T)
+        else:
+            raise ValueError(f"reward 'r' has incompatible shape {tuple(r.shape)} with inferred (B,T)=({B},{T})")
+        # Reshape v_old/dones/mask to [B, T]
+        if v_old.dim() == 1 and v_old.numel() == B * T:
+            v_old = v_old.view(B, T)
+        if dones.dim() == 1 and dones.numel() == B * T:
+            dones = dones.view(B, T)
+        if mask.dim() == 1 and mask.numel() == B * T:
+            mask = mask.view(B, T)
+        # Final shape assertions
+        assert r.shape == (B, T), f"r shape {tuple(r.shape)} != ({B},{T})"
+        assert v_old.shape == (B, T), f"v_old shape {tuple(v_old.shape)} != ({B},{T})"
+        assert dones.shape == (B, T), f"dones shape {tuple(dones.shape)} != ({B},{T})"
+        assert mask.shape == (B, T), f"mask shape {tuple(mask.shape)} != ({B},{T})"
+
         # Compute advantages/returns
         adv, ret = compute_gae(r, v_old, dones, mask, gamma=gamma, lam=lam)
         adv = torch.clamp(adv, -10.0, 10.0)
