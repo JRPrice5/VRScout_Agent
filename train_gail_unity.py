@@ -264,7 +264,7 @@ def main():
 
         # Policy forward to get h and value consistency
         out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
-        h_pol = out_pol['h']
+        h_pol = out_pol['h']  # [B, Q, H]
         value_pol = out_pol['value']  # can be used to compare with stored
 
         # Fetch an expert batch
@@ -277,17 +277,21 @@ def main():
         B_exp, T_exp, _ = action_exp.shape
         # To match policy data, sample a single random timestep from each expert trajectory
         t_idx = torch.randint(0, T_exp, (B_exp,), device=device)
-        qpos_exp_t = qpos_exp[torch.arange(B_exp), t_idx]
-        image_exp_t = image_exp[torch.arange(B_exp), t_idx]
-        action_exp_t = action_exp[torch.arange(B_exp), t_idx]
+        batch_idx = torch.arange(B_exp, device=device)
+        # Sample expert actions at random timestep per episode
+        action_exp_t = action_exp[batch_idx, t_idx]
 
         a_cont_exp, a_bin_exp = split_actions(action_exp_t.unsqueeze(1)) # -> [B,1,A]
-        h_exp = policy.encode_to_hidden(qpos_exp_t, image_exp_t)
+        # Expert observations are single-step; encode directly
+        h_exp_full = policy.encode_to_hidden(qpos_exp, image_exp)  # [B, Q, H]
+        # Use current timestep (query 0) for discriminator
+        h_exp = h_exp_full[:, 0:1, :]  # [B,1,H]
         mask_exp = torch.ones(B_exp, 1, device=device)
 
         # Reshape policy data to have a temporal dimension of 1
         B_pol = h_pol.shape[0]
-        h_pol = h_pol.unsqueeze(1) # [B,1,Q,H]
+        # Use current timestep (query 0) then add temporal dim
+        h_pol = h_pol[:, 0:1, :]  # [B,1,H]
         a_cont_pol = a_cont_pol.unsqueeze(1) # [B,1,A]
         if a_bin_pol is not None:
             a_bin_pol = a_bin_pol.unsqueeze(1) # [B,1,A]
@@ -295,7 +299,7 @@ def main():
 
         # To match batch sizes, sample from the larger policy batch
         if B_pol > B_exp:
-            sample_indices = torch.randperm(B_pol)[:B_exp]
+            sample_indices = torch.randperm(B_pol, device=h_pol.device)[:B_exp]
             h_pol = h_pol[sample_indices]
             a_cont_pol = a_cont_pol[sample_indices]
             if a_bin_pol is not None:
