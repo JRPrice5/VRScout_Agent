@@ -215,11 +215,20 @@ class TrainerGAIL:
         if v.dim() == 2:
             if v.shape == (B, T):
                 pass
-            elif v.shape[1] == 1 and T > 1:
+            elif v.shape[0] == B * T and v.shape[1] == 1:
+                # Flattened sequence of per-step values -> reshape to [B, T]
+                v = v.view(B, T)
+            elif v.shape[0] == B and v.shape[1] == 1 and T > 1:
                 v = v.expand(B, T)
-            elif v.shape[1] != T:
+            elif v.shape[0] == B and v.shape[1] != T:
                 # Reduce any extra dimension (e.g., queries) to a scalar per batch, then broadcast over T
                 v = v.mean(dim=1, keepdim=True).expand(B, T)
+            else:
+                # Try best-effort reshape if total elements match
+                if v.numel() == B * T:
+                    v = v.view(B, T)
+                else:
+                    raise ValueError(f"value 'v' has incompatible shape {tuple(v.shape)} with inferred (B,T)=({B},{T})")
         elif v.dim() == 1:
             if v.numel() == B * T:
                 v = v.view(B, T)
