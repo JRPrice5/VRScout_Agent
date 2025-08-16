@@ -151,16 +151,17 @@ class TrainerGAIL:
                    bc_data=None, bc_weight: float = 0.0):
         self.policy.train()
 
-        qpos = batch['obs']['qpos'].to(self.device)
-        image = batch['obs']['image'].to(self.device)
-        a_cont = batch['a_cont'].to(self.device)
+        # Inputs should not carry graphs from rollout storage
+        qpos = batch['obs']['qpos'].to(self.device).detach()
+        image = batch['obs']['image'].to(self.device).detach()
+        a_cont = batch['a_cont'].to(self.device).detach()
         a_bin = batch.get('a_bin')
-        a_bin = a_bin.to(self.device) if a_bin is not None else None
-        mask = batch['mask'].to(self.device)
-        logp_old = batch['logp'].to(self.device)
-        v_old = batch['value'].to(self.device)
-        r = batch['reward'].to(self.device)
-        dones = batch['dones'].to(self.device)
+        a_bin = a_bin.to(self.device).detach() if a_bin is not None else None
+        mask = batch['mask'].to(self.device).detach()
+        logp_old = batch['logp'].to(self.device).detach()
+        v_old = batch['value'].to(self.device).detach()
+        r = batch['reward'].to(self.device).detach()
+        dones = batch['dones'].to(self.device).detach()
 
         # --- Reconcile shapes to [B, T] ---
         # Infer B from rewards or actions
@@ -216,6 +217,8 @@ class TrainerGAIL:
             logp_old_frozen, _ = self.compute_logp_and_entropy(out_old, a_cont, a_bin, mask)
             logp_old = logp_old_frozen.detach()
             del frozen_policy, out_old, logp_old_frozen
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Forward policy
         out = self.policy.forward(qpos, image, out_mode='dist')

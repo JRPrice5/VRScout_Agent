@@ -262,10 +262,11 @@ def main():
         a_bin_pol = batch.get('a_bin', None)
         mask_pol = batch['mask']
 
-        # Policy forward to get h and value consistency
-        out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
-        h_pol = out_pol['h']  # [B, Q, H]
-        value_pol = out_pol['value']  # can be used to compare with stored
+        # Policy forward to get h and value consistency (no grad during rollout)
+        with torch.no_grad():
+            out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
+            h_pol = out_pol['h']  # [B, Q, H]
+            value_pol = out_pol['value']  # can be used to compare with stored
 
         # Fetch an expert batch
         image_exp, qpos_exp, action_exp, is_pad_exp = next(expert_iter)
@@ -282,8 +283,9 @@ def main():
         action_exp_t = action_exp[batch_idx, t_idx]
 
         a_cont_exp, a_bin_exp = split_actions(action_exp_t.unsqueeze(1)) # -> [B,1,A]
-        # Expert observations are single-step; encode directly
-        h_exp_full = policy.encode_to_hidden(qpos_exp, image_exp)  # [B, Q, H]
+        # Expert observations are single-step; encode directly (no grad for D input features)
+        with torch.no_grad():
+            h_exp_full = policy.encode_to_hidden(qpos_exp, image_exp)  # [B, Q, H]
         # Use current timestep (query 0) for discriminator
         h_exp = h_exp_full[:, 0:1, :]  # [B,1,H]
         mask_exp = torch.ones(B_exp, 1, device=device)
