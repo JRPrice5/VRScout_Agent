@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from policy import ACTPolicy
 from trainers.trainer_gail import TrainerGAIL
 from unity_vr_gail_interface import UnityVRGAILInterface
-from my_utils import load_data
+from my_utils import load_expert_step_loader
 from action_utils import ACTION_INDICES
 from gail.discriminator import reward_from_prob
 
@@ -201,18 +201,17 @@ def main():
                               'grad_clip': 1.0,
                           })
 
-    batch_size_train = args.batch_size
-    batch_size_val = args.batch_size
 
-    # Expert data loader
-    train_loader, _, _, _ = load_data(
+    expert_batch_size = args.update_every
+    expert_loader, _, _ = load_expert_step_loader(
         dataset_dir=dataset_dir,
         num_episodes=num_episodes,
         camera_names=camera_names,
-        batch_size_train=batch_size_train,
-        batch_size_val=batch_size_val,
+        batch_size=expert_batch_size,
+        shuffle=True,              # good for GAIL
+        prefetch_factor=2,         # keep GPU fed
     )
-    expert_iter = cycle(train_loader)
+    expert_iter = cycle(expert_loader)
 
     # Metrics accumulators
     hist = { 'loss_D': [], 'acc_exp': [], 'acc_pol': [], 'loss_pi': [], 'loss_v': [], 'ent': [], 'loss_bc': [] }
