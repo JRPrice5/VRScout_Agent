@@ -188,11 +188,19 @@ class TrainerGAIL:
             dones = dones.view(B, T)
         if mask.dim() == 1 and mask.numel() == B * T:
             mask = mask.view(B, T)
+        # Reshape logp_old to [B, T]
+        if logp_old.dim() == 1 and logp_old.numel() == B * T:
+            logp_old = logp_old.view(B, T)
+        elif logp_old.dim() == 2 and logp_old.shape == (B, T):
+            pass
+        else:
+            raise ValueError(f"logp_old has incompatible shape {tuple(logp_old.shape)} with inferred (B,T)=({B},{T})")
         # Final shape assertions
         assert r.shape == (B, T), f"r shape {tuple(r.shape)} != ({B},{T})"
         assert v_old.shape == (B, T), f"v_old shape {tuple(v_old.shape)} != ({B},{T})"
         assert dones.shape == (B, T), f"dones shape {tuple(dones.shape)} != ({B},{T})"
         assert mask.shape == (B, T), f"mask shape {tuple(mask.shape)} != ({B},{T})"
+        assert logp_old.shape == (B, T), f"logp_old shape {tuple(logp_old.shape)} != ({B},{T})"
 
         # Compute advantages/returns
         adv, ret = compute_gae(r, v_old, dones, mask, gamma=gamma, lam=lam)
