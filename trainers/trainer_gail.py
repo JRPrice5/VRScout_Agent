@@ -30,24 +30,47 @@ class TrainerGAIL:
         cont_dist = out_dist['cont_dist']
         bin_dist = out_dist['bin_dist']
 
-        # Slice first query for continuous distribution
+        # Prepare batch/time dims
+        assert mask.dim() == 2, f"mask must be [B,T], got {tuple(mask.shape)}"
+        B_mask, T_mask = mask.shape
+
+        def reshape_BT(x):
+            if x is None:
+                return None
+            n = x.shape[0]
+            if n == B_mask * T_mask:
+                return x.view(B_mask, T_mask, *x.shape[1:])
+            if n == B_mask:
+                # add time dim and broadcast along T
+                x_bt = x.view(B_mask, 1, *x.shape[1:])
+                return x_bt.expand(-1, T_mask, *([-1] * (x.dim() - 1)))
+            # Fallback: if n != B or B*T, raise for clarity
+            raise ValueError(f"Unexpected batch dimension {n} for tensor with shape {tuple(x.shape)}, expected {B_mask} or {B_mask*T_mask}")
+
+        # Align continuous params to [B,T,Tq,C]
         if hasattr(cont_dist, 'mu') and cont_dist.mu.dim() == 3:
-            B, T, Cc = cont_dist.mu.shape
-            mu_first = cont_dist.mu[:, 0, :]
-            log_std_first = cont_dist.log_std[:, 0, :]
+            mu_bt = reshape_BT(cont_dist.mu)          # [B,T,Tq,C]
+            logstd_bt = reshape_BT(cont_dist.log_std) # [B,T,Tq,C]
+            # Select first timestep and first query
+            mu_first = mu_bt[:, 0, 0, :]              # [B,C]
+            log_std_first = logstd_bt[:, 0, 0, :]     # [B,C]
         else:
-            # No time/query dimension; infer T from mask
-            B = cont_dist.mu.shape[0]
-            T = mask.shape[1] if mask.dim() == 2 else 1
-            mu_first = cont_dist.mu
-            log_std_first = cont_dist.log_std
+            # No query dim; just [B,T,C]
+            mu_bt = reshape_BT(cont_dist.mu)          # [B,T,C]
+            logstd_bt = reshape_BT(cont_dist.log_std) # [B,T,C]
+            mu_first = mu_bt[:, 0, :]
+            log_std_first = logstd_bt[:, 0, :]
 
         cont_first = DiagNormal(mu_first, log_std_first)
         # Align a_cont to [B, Cc]
         if a_cont.dim() == 3:
-            a_cont_first = a_cont[:, 0, :]
+            a_cont_bt = reshape_BT(a_cont)            # [B,T,Tq,C]
+            a_cont_first = a_cont_bt[:, 0, 0, :]      # [B,C]
+        elif a_cont.dim() == 2:
+            a_cont_bt = reshape_BT(a_cont)            # [B,T,C]
+            a_cont_first = a_cont_bt[:, 0, :]         # [B,C]
         else:
-            a_cont_first = a_cont
+            raise ValueError(f"Unexpected a_cont shape {tuple(a_cont.shape)}")
 
         cont_logp_first = cont_first.log_prob(a_cont_first)  # [B]
         ent_first = cont_first.entropy()  # [B]
@@ -57,14 +80,36 @@ class TrainerGAIL:
             # Build a first-query Bernoulli distribution
             if hasattr(bin_dist, 'logits') and bin_dist.logits is not None:
                 logits = bin_dist.logits
-                logits_first = logits[:, 0, :] if logits.dim() == 3 else logits
+                if logits.dim() == 3:
+                    logits_bt = reshape_BT(logits)      # [B,T,Tq,Cb]
+                    logits_first = logits_bt[:, 0, 0, :] # [B,Cb]
+                elif logits.dim() == 2:
+                    logits_bt = reshape_BT(logits)      # [B,T,Cb]
+                    logits_first = logits_bt[:, 0, :]
+                else:
+                    raise ValueError(f"Unexpected logits shape {tuple(logits.shape)}")
                 bin_first = BernoulliMulti(logits=logits_first)
             else:
                 probs = bin_dist.probs
-                probs_first = probs[:, 0, :] if probs.dim() == 3 else probs
+                if probs.dim() == 3:
+                    probs_bt = reshape_BT(probs)        # [B,T,Tq,Cb]
+                    probs_first = probs_bt[:, 0, 0, :]
+                elif probs.dim() == 2:
+                    probs_bt = reshape_BT(probs)        # [B,T,Cb]
+                    probs_first = probs_bt[:, 0, :]
+                else:
+                    raise ValueError(f"Unexpected probs shape {tuple(probs.shape)}")
                 bin_first = BernoulliMulti(probs=probs_first)
 
-            a_bin_first = a_bin[:, 0, :] if a_bin.dim() == 3 else a_bin
+            # Align a_bin to [B, Cb]
+            if a_bin.dim() == 3:
+                a_bin_bt = reshape_BT(a_bin)           # [B,T,Tq,Cb]
+                a_bin_first = a_bin_bt[:, 0, 0, :]
+            elif a_bin.dim() == 2:
+                a_bin_bt = reshape_BT(a_bin)           # [B,T,Cb]
+                a_bin_first = a_bin_bt[:, 0, :]
+            else:
+                raise ValueError(f"Unexpected a_bin shape {tuple(a_bin.shape)}")
             cont_logp_first = cont_logp_first + bin_first.log_prob(a_bin_first)
             ent_first = ent_first + bin_first.entropy()
 
