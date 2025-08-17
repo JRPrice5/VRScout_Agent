@@ -1,6 +1,7 @@
 from __future__ import annotations
 import copy
 import math
+from action_utils import ACTION_INDICES
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -430,13 +431,59 @@ class TrainerGAIL:
                 except Exception as e:
                     print(f"[BC DBG] per-dim NLL failed: {e}")
 
+            # Auxiliary alignment: pull RL mu toward ACT decoder a_hat (in pre-tanh space)
+            L_align = v.new_tensor(0.0)
+            align_w = float(self.cfg.get('align_mu_weight', 0.0))
+            if align_w > 0.0:
+                try:
+                    # Reuse current forward pass hidden outputs by calling forward again (cheap)
+                    # We need a_hat and cont_dist.mu aligned to [B,T,(Tq),C]
+                    out_align = out  # already computed above
+                    a_hat = out_align.get('a_hat', None)
+                    cont_mu = out_align['cont_dist'].mu
+                    if a_hat is not None:
+                        # Extract continuous part from a_hat
+                        from action_utils import ACTION_INDICES
+                        cont_idx = ACTION_INDICES['continuous']
+                        a_hat_cont = a_hat[..., cont_idx]  # [B,T,(Tq),C] or [B,T,C]
+                        # Ensure a_hat_cont has tanh range; convert to pre-tanh z via atanh
+                        eps = 1e-3
+                        # Align dims: if cont_mu has query dim, keep it; else, drop query dim from a_hat if present
+                        def to_match_dims(x, target_dims):
+                            if x.dim() == target_dims:
+                                return x
+                            if x.dim() == target_dims + 1 and x.shape[2] >= 1:
+                                return x[:, :, 0, :]
+                            return x
+                        a_hat_cont = to_match_dims(a_hat_cont, cont_mu.dim())
+                        # Now a_hat_cont and cont_mu should be broadcastable or equal
+                        a_hat_clipped = a_hat_cont.clamp(-1.0 + eps, 1.0 - eps)
+                        z_hat = 0.5 * (torch.log1p(a_hat_clipped) - torch.log1p(-a_hat_clipped))
+                        # Compute masked MSE between cont_mu and z_hat over [B,T,(Tq),C] -> reduce to [B,T] then mask
+                        # If dims differ (no query), broadcasting handles it
+                        diff = (cont_mu - z_hat) ** 2
+                        # Reduce over last dims (queries and channels) to per-step
+                        while diff.dim() > 2:
+                            diff = diff.mean(dim=-1)
+                        # Masked mean
+                        denom = mask.sum().clamp_min(1.0)
+                        L_align = (diff * mask).sum() / denom
+                except Exception as e:
+                    print(f"[ALIGN WARN] alignment loss failed: {e}")
+
             # KL penalty (computed against rollout logp_old)
             with torch.no_grad():
                 valid_now = mask > 0
                 approx_kl_now = (logp_old[valid_now] - logp[valid_now]).mean() if valid_now.any() else v.new_tensor(0.0)
             L_kl = kl_coef * approx_kl_now.abs()
 
-            loss_policy = L_pi + ent_coef * L_ent + (bc_weight * L_bc if bc_weight > 0.0 else v.new_tensor(0.0)) + L_kl
+            loss_policy = (
+                L_pi
+                + ent_coef * L_ent
+                + (bc_weight * L_bc if bc_weight > 0.0 else v.new_tensor(0.0))
+                + (align_w * L_align if align_w > 0.0 else v.new_tensor(0.0))
+                + L_kl
+            )
             self.opt_policy.zero_grad(set_to_none=True)
             loss_policy.backward()
             nn.utils.clip_grad_norm_(policy_params, max_norm=self.cfg.get('grad_clip', 1.0))
