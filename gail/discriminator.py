@@ -15,7 +15,7 @@ def masked_mean(x: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch
 
 
 class GAILDiscriminator(nn.Module):
-    def __init__(self, h_dim, cont_dim, bin_dim, hidden: int = 256, layers: int = 2, label_smooth: float = 0.9):
+    def __init__(self, h_dim, cont_dim, bin_dim, hidden: int = 256, layers: int = 2, label_smooth: float = 1.0):
         super().__init__()
         self.label_smooth = label_smooth
         in_dim = h_dim + cont_dim + (bin_dim or 0)
@@ -41,14 +41,26 @@ class GAILDiscriminator(nn.Module):
         return logits, prob
 
 
-def gail_loss_D(prob_exp: torch.Tensor, prob_pol: torch.Tensor, mask: torch.Tensor, smooth: float = 0.9, eps: float = 1e-6) -> torch.Tensor:
-    # -E[log D(exp)] - E[log(1-D(pol))]
-    if smooth is not None:
-        # label smoothing for expert: target in [smooth, 1]
-        prob_exp = torch.clamp(prob_exp, min=smooth, max=1.0)
-    pos = -torch.log(torch.clamp(prob_exp, eps, 1.0))
-    neg = -torch.log(torch.clamp(1.0 - prob_pol, eps, 1.0))
-    return masked_mean(pos, mask) + masked_mean(neg, mask)
+def gail_loss_D(prob_exp: torch.Tensor,
+                prob_pol: torch.Tensor,
+                mask_exp: torch.Tensor,
+                mask_pol: torch.Tensor,
+                smooth: float = 0.0,
+                eps: float = 1e-6) -> torch.Tensor:
+    """
+    Proper discriminator loss with optional label smoothing on expert targets.
+    - If smooth in (0,1), use BCE with target y_pos=smooth for experts.
+    - Policy negatives remain target 0.
+    Loss = -E_exp[ y*log D + (1-y)*log(1-D) ] - E_pol[ log(1 - D) ]
+    """
+    prob_exp_c = torch.clamp(prob_exp, eps, 1.0 - eps)
+    prob_pol_c = torch.clamp(prob_pol, eps, 1.0 - eps)
+    y_pos = float(smooth) if smooth is not None else 0.0
+    # Expert term with smoothed positive target
+    pos = -(y_pos * torch.log(prob_exp_c) + (1.0 - y_pos) * torch.log(1.0 - prob_exp_c))
+    # Policy term (negative target 0)
+    neg = -torch.log(1.0 - prob_pol_c)
+    return masked_mean(pos, mask_exp) + masked_mean(neg, mask_pol)
 
 
 def reward_from_prob(prob: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

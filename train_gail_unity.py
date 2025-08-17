@@ -67,6 +67,7 @@ def main():
     parser.add_argument('--lam', type=float, default=0.95)
     parser.add_argument('--ent_coef', type=float, default=0.0)
     parser.add_argument('--vf_coef', type=float, default=0.5)
+    parser.add_argument('--ppo_epochs', type=int, default=4, help='number of PPO epochs per update batch')
     # BC warmup for stochastic heads
     parser.add_argument('--bc_warmup_iters', type=int, default=0,
                         help='Number of initial update steps to run BC warmup on PPO heads')
@@ -217,6 +218,7 @@ def main():
                                   'lr_policy': 3e-4,
                                   'lr_disc': 1e-4,
                                   'grad_clip': 1.0,
+                                  'ppo_epochs': args.ppo_epochs,
                               })
 
         # Optionally resume discriminator/optimizers from the latest GAIL ckpt
@@ -252,15 +254,22 @@ def main():
         expert_iter = cycle(expert_loader)
 
         # Metrics accumulators
-        hist = { 'loss_D': [], 'acc_exp': [], 'acc_pol': [], 'loss_pi': [], 'loss_v': [], 'ent': [], 'loss_bc': [] }
+        hist = { 'loss_D': [], 'acc_exp': [], 'acc_pol': [], 'loss_pi': [], 'loss_v': [], 'ent': [], 'ent_raw': [], 'loss_bc': [] }
 
         def save_plots():
             try:
-                fig, axs = plt.subplots(2, 3, figsize=(10, 6))
-                keys = ['loss_D','acc_exp','acc_pol','loss_pi','loss_v','ent','loss_bc']
-                for ax, k in zip(axs.flatten(), keys):
+                keys = ['loss_D','acc_exp','acc_pol','loss_pi','loss_v','ent','ent_raw','loss_bc']
+                rows = 3
+                cols = 3
+                fig, axs = plt.subplots(rows, cols, figsize=(12, 9))
+                axes = axs.flatten()
+                for i, k in enumerate(keys):
+                    ax = axes[i]
                     ax.plot(hist[k])
                     ax.set_title(k)
+                # Hide any unused subplots
+                for j in range(len(keys), len(axes)):
+                    fig.delaxes(axes[j])
                 plt.tight_layout()
                 plot_path = os.path.join(args.ckpt_dir, 'gail_training_plots.png')
                 plt.savefig(plot_path)
@@ -300,10 +309,14 @@ def main():
             mask_pol = batch['mask']
 
             # Policy forward to get h and value consistency (no grad during rollout)
+            # Debug shapes for policy batch
+            print('[DBG][POL] qpos_pol', tuple(qpos_pol.shape))
+            print('[DBG][POL] image_pol', tuple(image_pol.shape))
             with torch.no_grad():
                 out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
                 h_pol = out_pol['h']  # [B, Q, H]
                 value_pol = out_pol['value']  # can be used to compare with stored
+            print('[DBG][POL] h_pol', tuple(h_pol.shape))
 
             # Fetch an expert batch
             image_exp, qpos_exp, action_exp, is_pad_exp = next(expert_iter)
@@ -312,25 +325,44 @@ def main():
             action_exp = action_exp.to(device).float()
             is_pad_exp = is_pad_exp.to(device)
 
-            B_exp, T_exp, _ = action_exp.shape
-            # To match policy data, sample a single random timestep from each expert trajectory
-            t_idx = torch.randint(0, T_exp, (B_exp,), device=device)
-            batch_idx = torch.arange(B_exp, device=device)
-            # Sample expert actions at random timestep per episode
-            action_exp_t = action_exp[batch_idx, t_idx]
+            print('[DBG][EXP] image_exp', tuple(image_exp.shape))
+            print('[DBG][EXP] qpos_exp', tuple(qpos_exp.shape))
+            print('[DBG][EXP] action_exp', tuple(action_exp.shape))
+            # Two cases: expert has time dim (T) or is single-step per episode
+            if qpos_exp.ndim == 3 and image_exp.ndim == 6:
+                B_exp, T_exp, _ = action_exp.shape
+                # Sample a single random timestep from each expert trajectory
+                t_idx = torch.randint(0, T_exp, (B_exp,), device=device)
+                batch_idx = torch.arange(B_exp, device=device)
+                action_exp_t = action_exp[batch_idx, t_idx]          # [B, A]
+                qpos_exp_t = qpos_exp[batch_idx, t_idx]              # [B, Dq]
+                image_exp_t = image_exp[batch_idx, t_idx]            # [B, Cams, C, H, W]
+                print('[DBG][EXP] (seq) t_idx', tuple(t_idx.shape))
+            else:
+                # Single-step expert batch already
+                B_exp = action_exp.shape[0]
+                action_exp_t = action_exp.squeeze(1) if action_exp.ndim == 3 and action_exp.shape[1] == 1 else action_exp  # [B, A]
+                qpos_exp_t = qpos_exp                                   # [B, Dq]
+                image_exp_t = image_exp                                 # [B, Cams, C, H, W]
+                print('[DBG][EXP] (single-step)')
 
+            print('[DBG][EXP] action_exp_t', tuple(action_exp_t.shape))
+            print('[DBG][EXP] qpos_exp_t', tuple(qpos_exp_t.shape))
+            print('[DBG][EXP] image_exp_t', tuple(image_exp_t.shape))
+
+            # Split actions and encode expert hidden
             a_cont_exp, a_bin_exp = split_actions(action_exp_t.unsqueeze(1)) # -> [B,1,A]
-            # Expert observations are single-step; encode directly (no grad for D input features)
             with torch.no_grad():
-                h_exp_full = policy.encode_to_hidden(qpos_exp, image_exp)  # [B, Q, H]
-            # Use current timestep (query 0) for discriminator
-            h_exp = h_exp_full[:, 0:1, :]  # [B,1,H]
+                h_exp_full = policy.encode_to_hidden(qpos_exp_t, image_exp_t)  # [B, Tq, H]
+                h_exp = h_exp_full[:, 0:1, :]  # [B,1,H]
+            print('[DBG][EXP] h_exp', tuple(h_exp.shape))
             mask_exp = torch.ones(B_exp, 1, device=device)
 
             # Ensure policy data has a temporal dimension of 1 (already present from buffer)
             B_pol = h_pol.shape[0]
             # Use current timestep (query 0) for hidden; actions/mask already [B,1,...]
             h_pol = h_pol[:, 0:1, :]  # [B,1,H]
+            print('[DBG][POL] h_pol (q0)', tuple(h_pol.shape))
 
             # To match batch sizes, sample from the larger policy batch
             if B_pol > B_exp:
@@ -340,6 +372,9 @@ def main():
                 if a_bin_pol is not None:
                     a_bin_pol = a_bin_pol[sample_indices]
                 mask_pol = mask_pol[sample_indices]
+            # Final tensors to D
+            print('[DBG][D IN] h_exp', tuple(h_exp.shape), 'a_cont_exp', tuple(a_cont_exp.shape), 'a_bin_exp', None if a_bin_exp is None else tuple(a_bin_exp.shape), 'mask_exp', tuple(mask_exp.shape))
+            print('[DBG][D IN] h_pol', tuple(h_pol.shape), 'a_cont_pol', tuple(a_cont_pol.shape), 'a_bin_pol', None if a_bin_pol is None else tuple(a_bin_pol.shape), 'mask_pol', tuple(mask_pol.shape))
 
             # Update discriminator
             loss_D, acc_exp, acc_pol = trainer.update_discriminator(
@@ -381,6 +416,7 @@ def main():
             hist['loss_pi'].append(ppo_logs['loss_pi'])
             hist['loss_v'].append(ppo_logs['loss_v'])
             hist['ent'].append(ppo_logs['ent'])
+            hist['ent_raw'].append(ppo_logs.get('ent_raw', 0.0))
             hist['loss_bc'].append(ppo_logs.get('loss_bc', 0.0))
             print({'loss_D': loss_D, 'acc_exp': acc_exp, 'acc_pol': acc_pol, **ppo_logs})
 
