@@ -55,19 +55,19 @@ def main():
     parser.add_argument('--query_frequency', type=int, default=1)
     parser.add_argument('--action_mode', type=str, choices=['sample','mean','ahat','mean_low_noise'], default='mean_low_noise',
                         help="How to generate env actions: 'sample' from dist, 'mean' of dist, 'mean_low_noise' (low-temp sampling), or 'ahat' from ACT decoder")
-    parser.add_argument('--mean_temperature', type=float, default=0.25,
+    parser.add_argument('--mean_temperature', type=float, default=0.18,
                         help='Temperature for mean_low_noise mode (effective std scaling)')
     parser.add_argument('--enc_layers', type=int, default=4)
     parser.add_argument('--dec_layers', type=int, default=7)
     parser.add_argument('--nheads', type=int, default=8)
     parser.add_argument('--activation', type=str, default='relu')
     # PPO/GAIL hyperparams
-    parser.add_argument('--lr_policy', type=float, default=1e-4)
+    parser.add_argument('--lr_policy', type=float, default=5e-5)
     parser.add_argument('--lr_disc', type=float, default=5e-5)
-    parser.add_argument('--clip_eps', type=float, default=0.1)
+    parser.add_argument('--clip_eps', type=float, default=0.05)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lam', type=float, default=0.95)
-    parser.add_argument('--ent_coef', type=float, default=0.003)
+    parser.add_argument('--ent_coef', type=float, default=0.001)
     parser.add_argument('--vf_coef', type=float, default=0.5)
     parser.add_argument('--ppo_epochs', type=int, default=4, help='number of PPO epochs per update batch')
     # BC warmup for stochastic heads
@@ -76,10 +76,10 @@ def main():
     parser.add_argument('--bc_warmup_weight', type=float, default=1.0,
                         help='Weight for BC warmup NLL loss')
     # Auxiliary alignment of RL head mean(mu) to ACT decoder a_hat (pre-tanh space)
-    parser.add_argument('--align_mu_weight', type=float, default=0.05,
+    parser.add_argument('--align_mu_weight', type=float, default=0.3,
                         help='Weight of auxiliary loss aligning RL mu to atanh(a_hat)')
     parser.add_argument('--ckpt_interval', type=int, default=5, help='save checkpoint every N updates')
-    parser.add_argument('--bc_weight', type=float, default=0.01, help='weight for BC anchor term')
+    parser.add_argument('--bc_weight', type=float, default=0.05, help='weight for BC anchor term')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
