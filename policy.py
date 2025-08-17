@@ -90,14 +90,15 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
 
         # Heads
         cont_mu = self.cont_mu_head(h)
-        cont_log_std = self.cont_log_std_head(h).clamp(min=-5.0, max=2.0)
+        # Clamp log_std tightly to keep std in a reasonable range: exp([-2.5, -0.3]) ≈ [0.082, 0.74]
+        cont_log_std = self.cont_log_std_head(h).clamp(min=-2.5, max=-0.3)
         bin_logits = self.bin_logits_head(h) if self.bin_dim > 0 else None
         value = self.value_head(h).squeeze(-1)
         a_hat = self.model.action_head(h)  # [1, Tq, A]
 
         if out_mode in ("dist", "distribution"):
             # Use squashed Gaussian to keep samples bounded in [-1,1]
-            cont_dist = TanhDiagNormal(cont_mu, cont_log_std, min_log_std=-5.0, max_log_std=2.0)
+            cont_dist = TanhDiagNormal(cont_mu, cont_log_std, min_log_std=-2.5, max_log_std=-0.3)
             bin_dist = BernoulliMulti(bin_logits) if bin_logits is not None else None
             return {
                 'a_hat': a_hat,
