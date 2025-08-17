@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,9 +16,16 @@ class TrainerGAIL:
         self.policy = policy.to(device)
         self.device = device
         self.cfg = cfg or {}
-        # Safer defaults for squashed Gaussian stability
-        self.cfg.setdefault('min_log_std', -1.5)
-        self.cfg.setdefault('max_log_std', 0.5)
+        # Std bounds defaults (match policy head clamp)
+        self.cfg.setdefault('min_log_std', -5.0)
+        self.cfg.setdefault('max_log_std', 2.0)
+        # PPO defaults
+        self.cfg.setdefault('clip_eps', 0.1)
+        # KL penalty defaults
+        self.cfg.setdefault('kl_coef', 0.02)
+        self.cfg.setdefault('kl_target_per_dim', 0.02)
+        self.cfg.setdefault('kl_adapt_up', 1.5)
+        self.cfg.setdefault('kl_adapt_down', 0.66)
         self.disc = GAILDiscriminator(h_dim=h_dim, cont_dim=cont_dim, bin_dim=bin_dim).to(device)
         # policy optimizer: policy trunk + action heads (NOT value)
         # build param groups so value_head is excluded from opt_policy
@@ -32,11 +40,13 @@ class TrainerGAIL:
     def compute_logp_and_entropy(self, out_dist, a_cont, a_bin, mask):
         """Compute log-prob and entropy for ALL timesteps.
         - Supports optional query dimension by averaging across queries.
-        - Supports squashed continuous policy via tanh correction when cfg['squashed_cont'] is True.
+        - Computes continuous log-probs under an unsquashed DiagNormal in standardized space.
+          This expects pre-tanh actions (z). Squashing (tanh) is only used when sending to env.
         Returns: [B, T] tensors (logp, ent), masked by `mask`.
         """
-        from distributions import TanhDiagNormal, BernoulliMulti
+        from distributions import DiagNormal, BernoulliMulti
 
+        # Use the policy's parameter heads (mu/log_std) to form an unsquashed DiagNormal
         cont_dist = out_dist['cont_dist']
         bin_dist = out_dist['bin_dist']
 
@@ -78,8 +88,8 @@ class TrainerGAIL:
         else:
             raise ValueError(f"Unexpected a_cont shape {tuple(a_cont.shape)}")
 
-        # Build distribution and compute per-step logp/entropy using squashed Gaussian consistently
-        DistClass = TanhDiagNormal
+        # Build distribution and compute per-step logp/entropy using unsquashed Gaussian consistently
+        DistClass = DiagNormal
         min_ls = float(self.cfg.get('min_log_std', -5.0))
         max_ls = float(self.cfg.get('max_log_std', 2.0))
 
@@ -90,6 +100,7 @@ class TrainerGAIL:
                 mu_use = mu_bt[:, :, 0, :]
                 logstd_use = logstd_bt[:, :, 0, :]
                 dist = DistClass(mu_use, logstd_use, min_log_std=min_ls, max_log_std=max_ls)  # batch [B,T]
+                # Expect pre-tanh (standardized) actions 'z'
                 a_use = a_cont_bt if a_cont_bt.dim() == 3 else a_cont_bt[:, :, 0, :]
                 logp_cont = dist.log_prob(a_use)  # [B,T]
                 ent_cont = dist.entropy()         # [B,T]
@@ -307,6 +318,9 @@ class TrainerGAIL:
         # Keep rollout-time logp_old as the behavior policy reference
         # Perform multiple PPO epochs per batch with fixed logp_old
         ppo_epochs = int(self.cfg.get('ppo_epochs', 4))
+        # Override clip_eps from cfg if provided
+        clip_eps = float(self.cfg.get('clip_eps', clip_eps))
+        kl_coef = float(self.cfg.get('kl_coef', 0.0))
         cont_dim = None
         for epoch in range(max(1, ppo_epochs)):
             # Forward policy
@@ -387,7 +401,42 @@ class TrainerGAIL:
                 # Negative log-likelihood averaged over valid steps
                 L_bc = -(logp_exp.sum() / mask_exp.sum().clamp_min(1.0))
 
-            loss_policy = L_pi + ent_coef * L_ent + (bc_weight * L_bc if bc_weight > 0.0 else v.new_tensor(0.0))
+                # Debug: per-dim BC NLL to detect problematic dims (continuous only)
+                try:
+                    from distributions import DiagNormal
+                    mu_e = out_exp['cont_dist'].mu  # [B,T(?,)C]
+                    ls_e = out_exp['cont_dist'].log_std
+                    # Align shapes to [B,T,C]
+                    def to_BT(x):
+                        if x.dim() == 4:
+                            return x[:, :, 0, :]
+                        return x
+                    mu_e = to_BT(mu_e)
+                    ls_e = to_BT(ls_e)
+                    if a_cont_exp.dim() == 4:
+                        a_e = a_cont_exp[:, :, 0, :]
+                    else:
+                        a_e = a_cont_exp
+                    std_e = ls_e.exp()
+                    # Per-dim logp (no sum over dims)
+                    log_unn = -0.5 * (((a_e - mu_e) / (std_e + 1e-8)) ** 2)
+                    log_norm = -ls_e - 0.5 * math.log(2 * math.pi)
+                    logp_per_dim = log_unn + log_norm  # [B,T,C]
+                    nll_per_dim = -(logp_per_dim * mask_exp.unsqueeze(-1)).sum(dim=(0, 1)) / mask_exp.sum().clamp_min(1.0)
+                    # Print top-5 worst dims
+                    C = nll_per_dim.shape[0]
+                    vals, idx = torch.topk(nll_per_dim, k=min(5, C))
+                    print(f"[BC DBG] top-N cont dims by NLL: {[(int(i), float(v)) for v,i in zip(vals, idx)]}")
+                except Exception as e:
+                    print(f"[BC DBG] per-dim NLL failed: {e}")
+
+            # KL penalty (computed against rollout logp_old)
+            with torch.no_grad():
+                valid_now = mask > 0
+                approx_kl_now = (logp_old[valid_now] - logp[valid_now]).mean() if valid_now.any() else v.new_tensor(0.0)
+            L_kl = kl_coef * approx_kl_now.abs()
+
+            loss_policy = L_pi + ent_coef * L_ent + (bc_weight * L_bc if bc_weight > 0.0 else v.new_tensor(0.0)) + L_kl
             self.opt_policy.zero_grad(set_to_none=True)
             loss_policy.backward()
             nn.utils.clip_grad_norm_(policy_params, max_norm=self.cfg.get('grad_clip', 1.0))
@@ -441,6 +490,44 @@ class TrainerGAIL:
                 # Restore requires_grad flags for frozen params
                 for p, req in zip(non_value_params, trunk_requires):
                     p.requires_grad = req
+            # After finishing this epoch's updates, compute approx KL and stop if too large (per-dimension)
+            with torch.no_grad():
+                valid = mask > 0
+                if valid.any():
+                    out_now = self.policy.forward(qpos, image, out_mode='dist')
+                    logp_now, _ = self.compute_logp_and_entropy(out_now, a_cont, a_bin, mask)
+                    approx_kl = (logp_old[valid] - logp_now[valid]).mean().item()
+                    # Compute total action dimensionality for per-dim thresholding
+                    total_dim = 0
+                    # Continuous dims
+                    try:
+                        cdim = out_now['cont_dist'].mu.shape[-1]
+                        total_dim += int(cdim)
+                    except Exception:
+                        pass
+                    # Binary dims (if present)
+                    if a_bin is not None:
+                        try:
+                            if a_bin.dim() >= 1:
+                                total_dim += int(a_bin.shape[-1])
+                        except Exception:
+                            pass
+                    total_dim = max(1, total_dim)
+                    approx_kl_abs = abs(approx_kl)
+                    approx_kl_per_dim = approx_kl_abs / float(total_dim)
+                    kl_target_per_dim = float(self.cfg.get('kl_target_per_dim', 0.02))
+                    print(f"[PPO DBG] approx_kl(end)={approx_kl:.6f} |abs|={approx_kl_abs:.6f} per_dim={approx_kl_per_dim:.6f} dims={total_dim} (epoch {epoch+1}/{ppo_epochs})")
+                    # Adaptive KL coefficient update for next epochs
+                    if approx_kl_per_dim > kl_target_per_dim:
+                        print(f"[PPO DBG] Early stopping PPO epochs after epoch {epoch+1} due to |KL|/dim {approx_kl_per_dim:.6f} > target {kl_target_per_dim:.6f}")
+                        break
+                    # Adjust kl_coef for future updates within this ppo_update loop
+                    if kl_coef > 0.0:
+                        if approx_kl_per_dim > kl_target_per_dim:
+                            kl_coef = kl_coef * float(self.cfg.get('kl_adapt_up', 1.5))
+                        elif approx_kl_per_dim < 0.5 * kl_target_per_dim:
+                            kl_coef = kl_coef * float(self.cfg.get('kl_adapt_down', 0.66))
+                        self.cfg['kl_coef'] = float(kl_coef)
         self.policy.eval()
 
         # Debug stats after PPO update: compare new logp vs frozen logp_old
@@ -454,7 +541,7 @@ class TrainerGAIL:
                 lp = logp_post[valid]
                 lpo = logp_old[valid]
                 dv = (lp - lpo)
-                dv_clamped = torch.clamp(dv, -20.0, 20.0)
+                dv_clamped = torch.clamp(dv, -5.0, 5.0)
                 ratio = torch.exp(dv_clamped)
                 ad = adv[valid]
                 print(f"[PPO DBG] (POST) logp   min/mean/max: {lp.min().item():.3f} {lp.mean().item():.3f} {lp.max().item():.3f}")

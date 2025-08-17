@@ -62,10 +62,12 @@ def main():
     parser.add_argument('--nheads', type=int, default=8)
     parser.add_argument('--activation', type=str, default='relu')
     # PPO/GAIL hyperparams
-    parser.add_argument('--clip_eps', type=float, default=0.2)
+    parser.add_argument('--lr_policy', type=float, default=1e-4)
+    parser.add_argument('--lr_disc', type=float, default=5e-5)
+    parser.add_argument('--clip_eps', type=float, default=0.1)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lam', type=float, default=0.95)
-    parser.add_argument('--ent_coef', type=float, default=0.0)
+    parser.add_argument('--ent_coef', type=float, default=0.003)
     parser.add_argument('--vf_coef', type=float, default=0.5)
     parser.add_argument('--ppo_epochs', type=int, default=4, help='number of PPO epochs per update batch')
     # BC warmup for stochastic heads
@@ -74,7 +76,7 @@ def main():
     parser.add_argument('--bc_warmup_weight', type=float, default=1.0,
                         help='Weight for BC warmup NLL loss')
     parser.add_argument('--ckpt_interval', type=int, default=5, help='save checkpoint every N updates')
-    parser.add_argument('--bc_weight', type=float, default=0.0, help='weight for BC anchor term')
+    parser.add_argument('--bc_weight', type=float, default=0.001, help='weight for BC anchor term')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -215,8 +217,8 @@ def main():
                               h_dim=policy.hidden_dim,
                               device=device,
                               cfg={
-                                  'lr_policy': 3e-4,
-                                  'lr_disc': 1e-4,
+                                  'lr_policy': args.lr_policy,
+                                  'lr_disc': args.lr_disc,
                                   'grad_clip': 1.0,
                                   'ppo_epochs': args.ppo_epochs,
                               })
@@ -352,11 +354,30 @@ def main():
 
             # Split actions and encode expert hidden
             a_cont_exp, a_bin_exp = split_actions(action_exp_t.unsqueeze(1)) # -> [B,1,A]
+            # Diagnostics: check expert continuous action scale vs policy expectation (TanhDiagNormal in [-1,1])
+            try:
+                cont_chk = a_cont_exp.squeeze(1)  # [B, C]
+                print(f"[CHK][EXP] a_cont_exp range per-batch: min={cont_chk.min().item():.3f} max={cont_chk.max().item():.3f}")
+                # print small head for a quick glance
+                print(f"[CHK][EXP] a_cont_exp head (BxC up to 4x4):\n{cont_chk[:4, :4]}")
+            except Exception as e:
+                print(f"[CHK][EXP] a_cont_exp diagnostics failed: {e}")
             with torch.no_grad():
                 h_exp_full = policy.encode_to_hidden(qpos_exp_t, image_exp_t)  # [B, Tq, H]
                 h_exp = h_exp_full[:, 0:1, :]  # [B,1,H]
             print('[DBG][EXP] h_exp', tuple(h_exp.shape))
             mask_exp = torch.ones(B_exp, 1, device=device)
+
+            # Diagnostics: sample policy-continuous actions to verify they live in [-1,1]
+            try:
+                with torch.no_grad():
+                    out_dbg = policy.forward(qpos_exp_t, image_exp_t, out_mode='dist')
+                    dist_dbg = out_dbg['cont_dist']
+                    a_samp = dist_dbg.rsample()
+                    print(f"[CHK][POL] sampled cont action range: min={a_samp.min().item():.3f} max={a_samp.max().item():.3f}")
+                print("[CHK] TanhDiagNormal expects actions in [-1,1]; if |a_cont_exp|>1 often, there is a scale mismatch.")
+            except Exception as e:
+                print(f"[CHK][POL] sampling diagnostics failed: {e}")
 
             # Ensure policy data has a temporal dimension of 1 (already present from buffer)
             B_pol = h_pol.shape[0]

@@ -39,7 +39,7 @@ def ppo_clip_loss(logp: torch.Tensor, logp_old: torch.Tensor, adv: torch.Tensor,
     returns scalar loss (negative surrogate, to minimize)
     """
     # Clamp the log-prob difference to avoid numerical overflow/instability in exp
-    dv = torch.clamp(logp - logp_old, -10.0, 10.0)
+    dv = torch.clamp(logp - logp_old, -5.0, 5.0)
     ratio = torch.exp(dv)
     unclipped = ratio * adv
     clipped = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv

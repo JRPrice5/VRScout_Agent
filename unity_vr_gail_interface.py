@@ -35,7 +35,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from action_utils import ACTION_INDICES
 from action_io import preprocess_qpos, postprocess_action_to_env
 from rl.rollout import RolloutBuffer
-from distributions import TanhDiagNormal
+from distributions import TanhDiagNormal, DiagNormal
 
 
 class UnityVRGAILInterface:
@@ -203,42 +203,57 @@ class UnityVRGAILInterface:
 
                 # Choose action generation mode and compute matching log-probs
                 if self.action_mode == 'ahat' and a_hat is not None:
-                    a_cont_seq = a_hat[:, :, ACTION_INDICES['continuous']]
+                    # a_hat is in policy output space. We will execute tanh(a_hat_cont) for env, but for training
+                    # we need pre-tanh z and log-prob under DiagNormal.
+                    a_cont_tanh = torch.tanh(a_hat[:, :, ACTION_INDICES['continuous']]).clamp_(-0.999, 0.999)
                     a_bin_seq = a_hat[:, :, ACTION_INDICES['boolean']] if bin_dist is not None else None
-                    # Ensure continuous actions are in (-1,1) for TanhDiagNormal
-                    # Using tanh is safe; also clamp away from boundaries to avoid numerical issues
-                    a_cont_seq = torch.tanh(a_cont_seq).clamp_(-0.999, 0.999)
-                    # Compute logp under current dists at the executed action
-                    logp_seq = cont_dist.log_prob(a_cont_seq)
+                    # Invert tanh to obtain z for DiagNormal logp
+                    eps = 1e-3
+                    clipped = a_cont_tanh.clamp(-1 + eps, 1 - eps)
+                    z_seq = 0.5 * (torch.log1p(clipped) - torch.log1p(-clipped))
+                    # Build DiagNormal from mu/log_std
+                    mu = cont_dist.mu
+                    log_std = cont_dist.log_std
+                    diag = DiagNormal(mu, log_std)
+                    logp_seq = diag.log_prob(z_seq)
                     if bin_dist is not None:
+                        # Use hard 0/1 for BCE/logp stability
+                        a_bin_seq = (torch.sigmoid(a_bin_seq) > 0.5).float()
                         logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)
+                    # For buffer we store pre-tanh z
+                    a_cont_seq = z_seq
                 elif self.action_mode == 'mean':
-                    a_cont_seq = cont_dist.mean
+                    # Use mu as pre-tanh z, logp under DiagNormal
+                    mu = cont_dist.mu
+                    log_std = cont_dist.log_std
+                    diag = DiagNormal(mu, log_std)
+                    a_cont_seq = mu
                     a_bin_seq = bin_dist.mean if bin_dist is not None else None
-                    # For deterministic booleans, use hard 0/1 for env but compute logp at the same hard value
                     if a_bin_seq is not None:
                         a_bin_seq = (a_bin_seq > 0.5).float()
-                    logp_seq = cont_dist.log_prob(a_cont_seq)
+                    logp_seq = diag.log_prob(a_cont_seq)
                     if bin_dist is not None:
                         logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)
                 elif self.action_mode == 'mean_low_noise':
                     # Sample with reduced std for continuous; sample booleans
-                    # Use current cont_dist to compute logp on the sampled action
-                    if hasattr(cont_dist, 'mu') and hasattr(cont_dist, 'log_std'):
-                        mu = cont_dist.mu
-                        log_std = cont_dist.log_std + math.log(max(self.mean_temperature, 1e-3))
-                        # Rebuild a temp distribution matching cont_dist type
-                        cont_temp = TanhDiagNormal(mu, log_std)
-                        a_cont_seq = cont_temp.sample()
-                    else:
-                        a_cont_seq = cont_dist.sample()  # fallback
+                    # Sample z from a tempered DiagNormal, compute logp under base DiagNormal
+                    mu = cont_dist.mu
+                    base_log_std = cont_dist.log_std
+                    diag = DiagNormal(mu, base_log_std)
+                    temp_log_std = base_log_std + math.log(max(self.mean_temperature, 1e-3))
+                    diag_temp = DiagNormal(mu, temp_log_std)
+                    a_cont_seq = diag_temp.sample()
                     a_bin_seq = bin_dist.sample() if bin_dist is not None else None
-                    logp_seq = cont_dist.log_prob(a_cont_seq)
+                    logp_seq = diag.log_prob(a_cont_seq)
                     if bin_dist is not None:
                         logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)
                 else:  # 'sample'
-                    a_cont_seq = cont_dist.sample()
-                    logp_seq = cont_dist.log_prob(a_cont_seq)
+                    # Sample z ~ DiagNormal, compute logp under DiagNormal
+                    mu = cont_dist.mu
+                    log_std = cont_dist.log_std
+                    diag = DiagNormal(mu, log_std)
+                    a_cont_seq = diag.sample()
+                    logp_seq = diag.log_prob(a_cont_seq)
                     a_bin_seq = None
                     if bin_dist is not None:
                         a_bin_seq = bin_dist.sample()
@@ -252,7 +267,7 @@ class UnityVRGAILInterface:
                     use_T = 1
 
                 self._chunk_cache = {
-                    # Store actions (exactly what we execute and compute logp for)
+                    # Store pre-tanh actions z for training
                     'a_cont': a_cont_seq[:, :use_T],
                     'a_bin': a_bin_seq[:, :use_T] if a_bin_seq is not None else None,
                     'logp': logp_seq[:, :use_T],
@@ -298,16 +313,15 @@ class UnityVRGAILInterface:
 
             # Send action back to Unity (denormalized + sigmoid booleans)
             # Merge cont/bin into full vector in normalized space
-            # Here we assume action head outputs are already normalized space predictions
-            # For env, we postprocess including boolean sigmoid + denorm
+            # For env, apply tanh to pre-tanh continuous actions, then postprocess (denorm + sigmoid booleans)
             if a_bin is not None:
                 # Merge continuous and boolean sampled actions into full vector
                 A = len(self.stats['action_mean'])
                 a_full = torch.zeros((A,), dtype=a_cont.dtype, device=a_cont.device)
-                a_full[ACTION_INDICES['continuous']] = a_cont.squeeze(0)
+                a_full[ACTION_INDICES['continuous']] = torch.tanh(a_cont).squeeze(0)
                 a_full[ACTION_INDICES['boolean']] = a_bin.squeeze(0)
             else:
-                a_full = a_cont.squeeze(0)
+                a_full = torch.tanh(a_cont).squeeze(0)
 
             action_env = postprocess_action_to_env(a_full, self.stats, self.boolean_indices)
             self._send_action(action_env)
