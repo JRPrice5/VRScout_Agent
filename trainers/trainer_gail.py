@@ -7,7 +7,7 @@ from typing import Optional, Dict
 
 from gail.discriminator import GAILDiscriminator, gail_loss_D, reward_from_prob, masked_mean
 from rl.ppo import compute_gae, ppo_clip_loss, value_loss
-from distributions import DiagNormal, BernoulliMulti
+from distributions import BernoulliMulti
 
 
 class TrainerGAIL:
@@ -17,8 +17,13 @@ class TrainerGAIL:
         self.cfg = cfg or {}
         self.disc = GAILDiscriminator(h_dim=h_dim, cont_dim=cont_dim, bin_dim=bin_dim).to(device)
         # policy optimizer: policy trunk + action heads (NOT value)
-        self.opt_policy = optim.Adam(self.policy.parameters(), lr=self.cfg.get('lr_policy', 3e-4))
-        self.opt_value = optim.Adam(self.policy.value_head.parameters(), lr=self.cfg.get('lr_policy', 3e-4))
+        # build param groups so value_head is excluded from opt_policy
+        value_params = list(self.policy.value_head.parameters())
+        value_param_ids = {id(p) for p in value_params}
+        policy_params = [p for p in self.policy.parameters() if id(p) not in value_param_ids]
+        self.opt_policy = optim.Adam(policy_params, lr=self.cfg.get('lr_policy', 3e-4))
+        # allow separate LR for value head, fallback to lr_policy for backward compat
+        self.opt_value = optim.Adam(value_params, lr=self.cfg.get('lr_value', self.cfg.get('lr_policy', 3e-4)))
         self.opt_disc = optim.Adam(self.disc.parameters(), lr=self.cfg.get('lr_disc', 1e-4))
 
     def compute_logp_and_entropy(self, out_dist, a_cont, a_bin, mask):
@@ -27,7 +32,7 @@ class TrainerGAIL:
         - Supports squashed continuous policy via tanh correction when cfg['squashed_cont'] is True.
         Returns: [B, T] tensors (logp, ent), masked by `mask`.
         """
-        from distributions import DiagNormal, TanhDiagNormal, BernoulliMulti
+        from distributions import TanhDiagNormal, BernoulliMulti
 
         cont_dist = out_dist['cont_dist']
         bin_dist = out_dist['bin_dist']
@@ -70,9 +75,8 @@ class TrainerGAIL:
         else:
             raise ValueError(f"Unexpected a_cont shape {tuple(a_cont.shape)}")
 
-        # Build distribution and compute per-step logp/entropy
-        use_squash = bool(self.cfg.get('squashed_cont', True))
-        DistClass = TanhDiagNormal if use_squash else DiagNormal
+        # Build distribution and compute per-step logp/entropy using squashed Gaussian consistently
+        DistClass = TanhDiagNormal
         min_ls = float(self.cfg.get('min_log_std', -5.0))
         max_ls = float(self.cfg.get('max_log_std', 2.0))
 
@@ -190,6 +194,31 @@ class TrainerGAIL:
         self.disc.eval()
         return loss_D.item(), acc_exp.item(), acc_pol.item()
 
+    def bc_warmup_step(self, qpos_exp, image_exp, a_cont_exp, a_bin_exp, mask_exp, iters: int = 1, weight: float = 1.0):
+        """Pretrain stochastic heads by maximizing log-prob of expert actions.
+        Only updates policy (excluding value head). Returns avg NLL over valid steps.
+        """
+        if weight <= 0.0 or iters <= 0:
+            return 0.0
+        self.policy.train()
+        value_params = list(self.policy.value_head.parameters())
+        policy_params = [p for p in self.policy.parameters() if all(p is not vp for vp in value_params)]
+        total_loss = 0.0
+        for _ in range(iters):
+            out = self.policy.forward(qpos_exp, image_exp, out_mode='dist')
+            logp_exp, _ = self.compute_logp_and_entropy(out, a_cont_exp, a_bin_exp, mask_exp)
+            # Negative log-likelihood averaged over valid steps
+            denom = mask_exp.sum().clamp_min(1.0)
+            nll = -(logp_exp.sum() / denom)
+            loss = weight * nll
+            self.opt_policy.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(policy_params, max_norm=self.cfg.get('grad_clip', 1.0))
+            self.opt_policy.step()
+            total_loss += nll.item()
+        self.policy.eval()
+        return total_loss / max(1, iters)
+
     def ppo_update(self, batch, clip_eps=0.2, gamma=0.99, lam=0.95, ent_coef=1e-3, vf_coef=0.5,
                    bc_data=None, bc_weight: float = 0.0):
         self.policy.train()
@@ -250,7 +279,16 @@ class TrainerGAIL:
         # Compute advantages/returns
         adv, ret = compute_gae(r, v_old, dones, mask, gamma=gamma, lam=lam)
         adv = torch.clamp(adv, -10.0, 10.0)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        # Normalize advantages using only valid (mask>0) timesteps
+        valid = mask > 0
+        if valid.any():
+            adv_mean = adv[valid].mean()
+            adv_std = adv[valid].std(unbiased=False)
+            adv_norm = torch.zeros_like(adv)
+            adv_norm[valid] = (adv[valid] - adv_mean) / (adv_std + 1e-8)
+            adv = adv_norm
+        else:
+            adv = torch.zeros_like(adv)
 
         # Recompute old log-probs with a frozen snapshot to ensure consistency
         with torch.no_grad():

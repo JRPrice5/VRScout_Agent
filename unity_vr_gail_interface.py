@@ -16,6 +16,7 @@ Delimiter: "END_OF_MESSAGE"
 Port: default 5557 (separate from inference 5556)
 """
 import os
+import math
 import sys
 import io
 import json
@@ -34,6 +35,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from action_utils import ACTION_INDICES
 from action_io import preprocess_qpos, postprocess_action_to_env
 from rl.rollout import RolloutBuffer
+from distributions import TanhDiagNormal
 
 
 class UnityVRGAILInterface:
@@ -44,7 +46,9 @@ class UnityVRGAILInterface:
                  port: int = 5557,
                  update_every: int = 1024,
                  query_frequency: int = 1,
-                 on_batch: Optional[Callable[[Dict[str, torch.Tensor]], None]] = None):
+                 on_batch: Optional[Callable[[Dict[str, torch.Tensor]], None]] = None,
+                 action_mode: str = 'sample',
+                 mean_temperature: float = 0.25):
         self.policy = policy.eval().cuda()
         self.stats = stats
         self.host = host
@@ -52,6 +56,9 @@ class UnityVRGAILInterface:
         self.update_every = update_every
         self.query_frequency = query_frequency
         self.on_batch = on_batch
+        assert action_mode in ('sample', 'mean', 'ahat', 'mean_low_noise'), "action_mode must be 'sample', 'mean', 'ahat', or 'mean_low_noise'"
+        self.action_mode = action_mode
+        self.mean_temperature = float(mean_temperature)
 
         self.socket = None
         self.client_socket = None
@@ -167,24 +174,62 @@ class UnityVRGAILInterface:
                 cont_dist = out['cont_dist']
                 bin_dist = out.get('bin_dist', None)
                 value_seq = out['value']  # [1, T]
-                a_hat_seq = out['a_hat']
+                a_hat = out.get('a_hat', None)  # [1, T, A]
 
-                a_cont_seq = cont_dist.sample()  # [1, T, Cc]
-                logp_seq = cont_dist.log_prob(a_cont_seq)  # [1, T]
-                a_bin_seq = None
-                if bin_dist is not None:
-                    a_bin_seq = bin_dist.sample()  # [1, T, Cb]
-                    logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)  # [1, T]
+                # Choose action generation mode and compute matching log-probs
+                if self.action_mode == 'ahat' and a_hat is not None:
+                    a_cont_seq = a_hat[:, :, ACTION_INDICES['continuous']]
+                    a_bin_seq = a_hat[:, :, ACTION_INDICES['boolean']] if bin_dist is not None else None
+                    # Ensure continuous actions are in (-1,1) for TanhDiagNormal
+                    # Using tanh is safe; also clamp away from boundaries to avoid numerical issues
+                    a_cont_seq = torch.tanh(a_cont_seq).clamp_(-0.999, 0.999)
+                    # Compute logp under current dists at the executed action
+                    logp_seq = cont_dist.log_prob(a_cont_seq)
+                    if bin_dist is not None:
+                        logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)
+                elif self.action_mode == 'mean':
+                    a_cont_seq = cont_dist.mean
+                    a_bin_seq = bin_dist.mean if bin_dist is not None else None
+                    # For deterministic booleans, use hard 0/1 for env but compute logp at the same hard value
+                    if a_bin_seq is not None:
+                        a_bin_seq = (a_bin_seq > 0.5).float()
+                    logp_seq = cont_dist.log_prob(a_cont_seq)
+                    if bin_dist is not None:
+                        logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)
+                elif self.action_mode == 'mean_low_noise':
+                    # Sample with reduced std for continuous; sample booleans
+                    # Use current cont_dist to compute logp on the sampled action
+                    if hasattr(cont_dist, 'mu') and hasattr(cont_dist, 'log_std'):
+                        mu = cont_dist.mu
+                        log_std = cont_dist.log_std + math.log(max(self.mean_temperature, 1e-3))
+                        # Rebuild a temp distribution matching cont_dist type
+                        cont_temp = TanhDiagNormal(mu, log_std)
+                        a_cont_seq = cont_temp.sample()
+                    else:
+                        a_cont_seq = cont_dist.sample()  # fallback
+                    a_bin_seq = bin_dist.sample() if bin_dist is not None else None
+                    logp_seq = cont_dist.log_prob(a_cont_seq)
+                    if bin_dist is not None:
+                        logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)
+                else:  # 'sample'
+                    a_cont_seq = cont_dist.sample()
+                    logp_seq = cont_dist.log_prob(a_cont_seq)
+                    a_bin_seq = None
+                    if bin_dist is not None:
+                        a_bin_seq = bin_dist.sample()
+                        logp_seq = logp_seq + bin_dist.log_prob(a_bin_seq)
 
                 # Limit the usable horizon to query_frequency to control emission span
-                T = a_hat_seq.shape[1]
+                # Limit by available temporal horizon
+                T = a_cont_seq.shape[1]
                 use_T = int(min(self.query_frequency, T))
                 if use_T <= 0:
                     use_T = 1
 
                 self._chunk_cache = {
-                    'a_cont': a_hat_seq[:, :use_T, ACTION_INDICES['continuous']],
-                    'a_bin': a_hat_seq[:, :use_T, ACTION_INDICES['boolean']],
+                    # Store actions (exactly what we execute and compute logp for)
+                    'a_cont': a_cont_seq[:, :use_T],
+                    'a_bin': a_bin_seq[:, :use_T] if a_bin_seq is not None else None,
                     'logp': logp_seq[:, :use_T],
                     'value': value_seq[:, :use_T],
                     'idx': 0,
@@ -231,7 +276,7 @@ class UnityVRGAILInterface:
             # Here we assume action head outputs are already normalized space predictions
             # For env, we postprocess including boolean sigmoid + denorm
             if a_bin is not None:
-                # place into full vector by index; initialize with zeros
+                # Merge continuous and boolean sampled actions into full vector
                 A = len(self.stats['action_mean'])
                 a_full = torch.zeros((A,), dtype=a_cont.dtype, device=a_cont.device)
                 a_full[ACTION_INDICES['continuous']] = a_cont.squeeze(0)

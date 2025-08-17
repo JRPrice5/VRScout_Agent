@@ -53,6 +53,10 @@ def main():
     parser.add_argument('--dim_feedforward', type=int, default=1024)
     parser.add_argument('--temporal_agg', action='store_true')
     parser.add_argument('--query_frequency', type=int, default=1)
+    parser.add_argument('--action_mode', type=str, choices=['sample','mean','ahat','mean_low_noise'], default='mean',
+                        help="How to generate env actions: 'sample' from dist, 'mean' of dist, 'mean_low_noise' (low-temp sampling), or 'ahat' from ACT decoder")
+    parser.add_argument('--mean_temperature', type=float, default=0.25,
+                        help='Temperature for mean_low_noise mode (effective std scaling)')
     parser.add_argument('--enc_layers', type=int, default=4)
     parser.add_argument('--dec_layers', type=int, default=7)
     parser.add_argument('--nheads', type=int, default=8)
@@ -63,6 +67,11 @@ def main():
     parser.add_argument('--lam', type=float, default=0.95)
     parser.add_argument('--ent_coef', type=float, default=0.0)
     parser.add_argument('--vf_coef', type=float, default=0.5)
+    # BC warmup for stochastic heads
+    parser.add_argument('--bc_warmup_iters', type=int, default=0,
+                        help='Number of initial update steps to run BC warmup on PPO heads')
+    parser.add_argument('--bc_warmup_weight', type=float, default=1.0,
+                        help='Weight for BC warmup NLL loss')
     parser.add_argument('--ckpt_interval', type=int, default=5, help='save checkpoint every N updates')
     parser.add_argument('--bc_weight', type=float, default=0.0, help='weight for BC anchor term')
     args = parser.parse_args()
@@ -338,6 +347,15 @@ def main():
                 h_pol, a_cont_pol, a_bin_pol, mask_pol
             )
 
+            # Optional BC warmup to initialize stochastic heads
+            nonlocal update_count
+            if args.bc_warmup_iters > 0 and update_count < args.bc_warmup_iters:
+                warmup_nll = trainer.bc_warmup_step(
+                    qpos_exp, image_exp, a_cont_exp, a_bin_exp, mask_exp,
+                    iters=1, weight=args.bc_warmup_weight
+                )
+                print(f"[Warmup] BC NLL: {warmup_nll:.4f}")
+
             # Compute GAIL rewards for policy batch
             with torch.no_grad():
                 logits_pol, prob_pol = trainer.disc(h_pol, a_cont_pol, a_bin_pol, mask_pol)
@@ -366,7 +384,6 @@ def main():
             hist['loss_bc'].append(ppo_logs.get('loss_bc', 0.0))
             print({'loss_D': loss_D, 'acc_exp': acc_exp, 'acc_pol': acc_pol, **ppo_logs})
 
-            nonlocal update_count
             update_count += 1
             if update_count % args.ckpt_interval == 0:
                 save_plots()
@@ -381,6 +398,8 @@ def main():
         update_every=args.update_every,
         on_batch=on_batch,  # None in eval mode disables training updates
         query_frequency=args.query_frequency,
+        action_mode=args.action_mode,
+        mean_temperature=args.mean_temperature,
     )
 
     try:

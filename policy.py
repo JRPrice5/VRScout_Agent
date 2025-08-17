@@ -5,7 +5,7 @@ import torchvision.transforms as transforms
 
 from detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
 from action_utils import compute_mixed_loss, split_actions_by_type, ACTION_INDICES
-from distributions import TanhDiagNormal, BernoulliMulti, DiagNormal
+from distributions import TanhDiagNormal, BernoulliMulti
 import IPython
 e = IPython.embed
 
@@ -96,8 +96,8 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
         a_hat = self.model.action_head(h)  # [1, Tq, A]
 
         if out_mode in ("dist", "distribution"):
-            # Unsquashed diagonal Gaussian as requested
-            cont_dist = DiagNormal(cont_mu, cont_log_std)
+            # Use squashed Gaussian to keep samples bounded in [-1,1]
+            cont_dist = TanhDiagNormal(cont_mu, cont_log_std, min_log_std=-5.0, max_log_std=2.0)
             bin_dist = BernoulliMulti(bin_logits) if bin_logits is not None else None
             return {
                 'a_hat': a_hat,

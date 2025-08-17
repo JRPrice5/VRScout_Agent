@@ -38,10 +38,12 @@ def postprocess_action_to_env(
     else:
         a = action_norm.detach().float().cpu()
 
-    # Sigmoid on boolean dims first (still in normalized space)
+    # Handle boolean dims: if values are outside [0,1], treat as logits and apply sigmoid;
+    # if already within [0,1] (e.g., Bernoulli samples or probabilities), leave as-is.
     if len(boolean_indices) > 0:
         a_b = a[boolean_indices]
-        a[boolean_indices] = torch.sigmoid(a_b)
+        if (a_b.min() < 0.0) or (a_b.max() > 1.0):
+            a[boolean_indices] = torch.sigmoid(a_b)
 
     # Denormalize
     action_mean = torch.as_tensor(stats['action_mean'], dtype=torch.float32)

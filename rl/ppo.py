@@ -38,7 +38,9 @@ def ppo_clip_loss(logp: torch.Tensor, logp_old: torch.Tensor, adv: torch.Tensor,
     logp, logp_old, adv, mask: [B, T]
     returns scalar loss (negative surrogate, to minimize)
     """
-    ratio = torch.exp(logp - logp_old)
+    # Clamp the log-prob difference to avoid numerical overflow/instability in exp
+    dv = torch.clamp(logp - logp_old, -20.0, 20.0)
+    ratio = torch.exp(dv)
     unclipped = ratio * adv
     clipped = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv
     # take min and average over masked positions
