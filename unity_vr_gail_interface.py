@@ -90,6 +90,15 @@ class UnityVRGAILInterface:
                     self._handle_client()
                 except socket.timeout:
                     continue
+                except Exception as e:
+                    # Keep server alive on unexpected client handling errors
+                    print(f"[GAIL] Client handling error: {e}")
+                    try:
+                        if self.client_socket:
+                            self.client_socket.close()
+                    except Exception:
+                        pass
+                    self.client_socket = None
         finally:
             self.stop_server()
 
@@ -119,7 +128,12 @@ class UnityVRGAILInterface:
         recv_buf = b''
         try:
             while self.running:
-                chunk = self.client_socket.recv(4096)
+                try:
+                    chunk = self.client_socket.recv(4096)
+                except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                    # Remote closed or socket error: exit client loop gracefully
+                    print(f"[GAIL] recv error (client likely disconnected): {e}")
+                    break
                 if not chunk:
                     break
                 recv_buf += chunk
@@ -137,6 +151,17 @@ class UnityVRGAILInterface:
                     self._process_message(msg)
         finally:
             print("[GAIL] Client disconnected")
+            # Ensure client socket is cleaned up so server can accept new clients
+            try:
+                if self.client_socket:
+                    try:
+                        self.client_socket.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    self.client_socket.close()
+            except Exception:
+                pass
+            self.client_socket = None
 
     # ---------- Message processing ----------
     def _process_message(self, msg: Dict):
