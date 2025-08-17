@@ -15,7 +15,7 @@ def masked_mean(x: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch
 
 
 class GAILDiscriminator(nn.Module):
-    def __init__(self, h_dim, cont_dim, bin_dim, hidden: int = 256, layers: int = 2, label_smooth: float = 1.0):
+    def __init__(self, h_dim, cont_dim, bin_dim, hidden: int = 256, layers: int = 2, label_smooth: float = 0.9):
         super().__init__()
         self.label_smooth = label_smooth
         in_dim = h_dim + cont_dim + (bin_dim or 0)

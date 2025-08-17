@@ -44,13 +44,13 @@ class TanhDiagNormal(Distribution):
             return self.rsample()
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        eps = 1e-6
+        eps = 1e-3
         clipped = torch.clamp(value, -1 + eps, 1 - eps)
         pre_tanh = 0.5 * (torch.log1p(clipped) - torch.log1p(-clipped))
         log_unnorm = -0.5 * (((pre_tanh - self.mu) / (self.std + 1e-8)) ** 2)
         log_norm = -self.log_std - 0.5 * math.log(2 * math.pi)
         log_prob_gauss = (log_unnorm + log_norm).sum(dim=-1)
-        log_det = torch.log(1 - clipped * clipped + 1e-6).sum(dim=-1)
+        log_det = torch.log(1 - clipped * clipped + eps).sum(dim=-1)
         return log_prob_gauss - log_det
 
     def entropy(self) -> torch.Tensor:

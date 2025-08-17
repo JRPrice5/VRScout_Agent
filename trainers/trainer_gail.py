@@ -15,6 +15,9 @@ class TrainerGAIL:
         self.policy = policy.to(device)
         self.device = device
         self.cfg = cfg or {}
+        # Safer defaults for squashed Gaussian stability
+        self.cfg.setdefault('min_log_std', -1.5)
+        self.cfg.setdefault('max_log_std', 0.5)
         self.disc = GAILDiscriminator(h_dim=h_dim, cont_dim=cont_dim, bin_dim=bin_dim).to(device)
         # policy optimizer: policy trunk + action heads (NOT value)
         # build param groups so value_head is excluded from opt_policy
@@ -315,6 +318,12 @@ class TrainerGAIL:
                 cont_dim = out['cont_dist'].mu.shape[-1]
             except Exception:
                 cont_dim = None
+            # Log std diagnostics to catch min/max floors
+            try:
+                ls = out['cont_dist'].log_std
+                print(f"[PPO DBG] log_std min/mean/max: {ls.min().item():.3f} {ls.mean().item():.3f} {ls.max().item():.3f}")
+            except Exception:
+                pass
 
             # --- Align value tensor to [B, T] ---
             if v.dim() == 2:
