@@ -255,12 +255,47 @@ class TrainerGAIL:
         if has_chunk:
             chunk_obs = batch['chunk_obs']
             qpos_chunks = chunk_obs['qpos'].to(self.device).detach()  # [C, ...]
-            image_chunks = chunk_obs['image'].to(self.device).detach()  # [C, K(or 1), C, H, W] with batch dim C
-            chunk_id = batch['chunk_id'].to(self.device).detach().view(-1)  # [N]
-            chunk_pos = batch['chunk_pos'].to(self.device).detach().view(-1)  # [N]
-            # Build per-step start obs by indexing chunk arrays
-            qpos = qpos_chunks[chunk_id]
-            image = image_chunks[chunk_id]
+            image_chunks = chunk_obs['image'].to(self.device).detach()  # [C, K(or 1), C, H, W]
+            chunk_id = batch['chunk_id'].to(self.device).detach().view(-1).long()  # [N]
+            chunk_pos = batch['chunk_pos'].to(self.device).detach().view(-1).long()  # [N]
+            num_chunks = qpos_chunks.size(0)
+            # Validate chunk_id range; if invalid, remap compactly to avoid OOB
+            if chunk_id.numel() > 0:
+                cid_min = int(chunk_id.min().item()); cid_max = int(chunk_id.max().item())
+            else:
+                cid_min = 0; cid_max = -1
+            if not (cid_min >= 0 and cid_max < num_chunks):
+                print(f"[WARN][PPO] chunk_id out of range (min={cid_min}, max={cid_max}, num_chunks={num_chunks}); remapping")
+                cids_unique, inv_idx = torch.unique(chunk_id, sorted=False, return_inverse=True)
+                safe_rows = torch.arange(min(cids_unique.numel(), num_chunks), device=chunk_id.device)
+                qpos_pool = qpos_chunks.index_select(0, safe_rows)
+                image_pool = image_chunks.index_select(0, safe_rows)
+                # Clamp inverse index to pool size to ensure safety
+                if qpos_pool.size(0) > 0:
+                    inv_idx_clamped = inv_idx.clamp(0, qpos_pool.size(0) - 1)
+                    if torch.any(inv_idx_clamped != inv_idx):
+                        diff = int((inv_idx_clamped != inv_idx).sum().item())
+                        print(f"[WARN][PPO] clamped {diff} inv_idx entries to [0,{qpos_pool.size(0)-1}] in remap")
+                    qpos = qpos_pool[inv_idx_clamped]
+                    image = image_pool[inv_idx_clamped]
+                else:
+                    # Degenerate: no chunks available; create zero-sized to avoid crash
+                    print("[ERR][PPO] qpos_pool empty after remap; creating empty batch")
+                    qpos = qpos_chunks[:0]
+                    image = image_chunks[:0]
+            else:
+                # Direct mapping branch: still guard against accidental OOB with clamp
+                if num_chunks > 0:
+                    cid_clamped = chunk_id.clamp(0, num_chunks - 1)
+                    if torch.any(cid_clamped != chunk_id):
+                        diff = int((cid_clamped != chunk_id).sum().item())
+                        print(f"[WARN][PPO] clamped {diff} chunk_id entries to [0,{num_chunks-1}] in direct mapping")
+                    qpos = qpos_chunks[cid_clamped]
+                    image = image_chunks[cid_clamped]
+                else:
+                    print("[ERR][PPO] num_chunks == 0; creating empty batch for qpos/image")
+                    qpos = qpos_chunks[:0]
+                    image = image_chunks[:0]
             # Remove singleton time/query dims on qpos; keep camera dim on image even if K==1
             if qpos.dim() >= 2 and qpos.size(1) == 1:
                 qpos = qpos.squeeze(1)
@@ -346,6 +381,30 @@ class TrainerGAIL:
                 cont_dist = out['cont_dist']
                 bin_dist = out.get('bin_dist', None)
                 v_full = out['value']  # [N, Tq] or [N, Tq, 1]
+                # Clamp chunk_pos to valid query range when needed
+                try:
+                    # infer Tq from cont_dist or v_full
+                    if hasattr(cont_dist, 'mu') and cont_dist.mu.dim() >= 3:
+                        Tq = cont_dist.mu.size(1)
+                    elif v_full.dim() >= 2:
+                        Tq = v_full.size(1)
+                    else:
+                        Tq = 1
+                    assert Tq > 0, f"Invalid Tq inferred: {Tq}"
+                    # Diagnostics
+                    try:
+                        print(f"[PPO DBG] Tq={Tq} mu_shape={tuple(getattr(cont_dist, 'mu', torch.empty(0)).shape)} v_full_shape={tuple(v_full.shape)}")
+                        print(f"[PPO DBG] chunk_pos range {int(chunk_pos.min().item()) if chunk_pos.numel()>0 else 'NA'}..{int(chunk_pos.max().item()) if chunk_pos.numel()>0 else 'NA'} (N={chunk_pos.numel()})")
+                    except Exception:
+                        pass
+                    if Tq > 0:
+                        pos_clamped = chunk_pos.clamp(min=0, max=Tq - 1)
+                        if torch.any(pos_clamped != chunk_pos):
+                            diff = (pos_clamped != chunk_pos).sum().item()
+                            print(f"[WARN][PPO] clamped {diff} chunk_pos indices to [0,{Tq-1}]")
+                        chunk_pos = pos_clamped
+                except Exception as e:
+                    print(f"[WARN][PPO] failed to clamp chunk_pos: {e}")
 
                 def select_query(tensor_BTQC, pos_idx):
                     # tensor can be [N,Tq,C] or [N,Tq] or [N,Tq,1]; gather along dim=1 using pos_idx

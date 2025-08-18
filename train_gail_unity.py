@@ -308,27 +308,66 @@ def main():
                 elif torch.is_tensor(v):
                     batch[k] = v.to(device)
 
-            # Gather start obs once per unique chunk_id, then map back to per-step order
-            chunk_id = batch['chunk_id'].view(-1)
-            cids_unique, inv_idx = torch.unique(chunk_id, sorted=False, return_inverse=True)
-            qpos_chunks = batch['chunk_obs']['qpos']
-            image_chunks = batch['chunk_obs']['image']
-            qpos_pol = qpos_chunks[cids_unique]
-            image_pol = image_chunks[cids_unique]
+            # Gather start obs per chunk, then map back to per-step order
+            chunk_id = batch['chunk_id'].view(-1).long()
+            qpos_chunks = batch['chunk_obs']['qpos']  # [N_chunks, Dq]
+            image_chunks = batch['chunk_obs']['image']  # [N_chunks, K, C, H, W]
+            num_chunks = qpos_chunks.size(0)
+            # Prefer using chunk_id directly as the inverse mapping into chunk_obs rows when in-range
+            if chunk_id.numel() > 0:
+                cid_min = int(chunk_id.min().item())
+                cid_max = int(chunk_id.max().item())
+            else:
+                cid_min = 0; cid_max = -1
+            if cid_min >= 0 and cid_max < num_chunks:
+                # Valid direct mapping: rows in chunk_obs are indexed by chunk_id
+                qpos_pol = qpos_chunks
+                image_pol = image_chunks
+                inv_idx = chunk_id
+            else:
+                # Fallback: build a compact reindex over appearing IDs to avoid OOB
+                print(f"[WARN][POL] chunk_id out of range (min={cid_min}, max={cid_max}, num_chunks={num_chunks}); remapping via unique IDs")
+                cids_unique, inv_idx = torch.unique(chunk_id, sorted=False, return_inverse=True)
+                # Clamp unique ids to available rows as a last resort safety net
+                safe_rows = torch.arange(min(cids_unique.numel(), num_chunks), device=chunk_id.device)
+                qpos_pol = qpos_chunks.index_select(0, safe_rows)
+                image_pol = image_chunks.index_select(0, safe_rows)
             a_cont_pol = batch['a_cont']
             a_bin_pol = batch.get('a_bin', None)
             mask_pol = batch['mask']
-
             # Policy forward to get h and value consistency (no grad during rollout)
             # Debug shapes for policy batch
             print('[DBG][POL] qpos_pol', tuple(qpos_pol.shape))
             print('[DBG][POL] image_pol', tuple(image_pol.shape))
+            try:
+                print('[DBG][POL] cams', len(getattr(policy.model, 'camera_names', [])))
+            except Exception:
+                pass
             with torch.no_grad():
                 out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
                 h_unique = out_pol['h']  # [B_unique, Q, H]
                 value_pol = out_pol['value']  # can be used to compare with stored
-            # Map hidden back to per-step order
-            h_pol = h_unique[inv_idx]
+            # Map hidden back to per-step order with diagnostics
+            try:
+                print('[DBG][POL] pre index h_unique[inv_idx]',
+                      'h_unique', tuple(h_unique.shape), 'device', h_unique.device,
+                      'inv_idx', tuple(inv_idx.shape), 'device', inv_idx.device)
+                inv_min = int(inv_idx.min().item())
+                inv_max = int(inv_idx.max().item())
+                print('[DBG][POL] inv_idx range', inv_min, 'to', inv_max, 'vs B_unique', h_unique.shape[0])
+                if not (inv_min >= 0 and inv_max < h_unique.shape[0]):
+                    print(f"[WARN][POL] inv_idx out of bounds before clamp: [{inv_min},{inv_max}] for size {h_unique.shape[0]}")
+            except Exception as e:
+                print('[ERR][POL] pre-index diagnostics failed:', e)
+            # Clamp indices to valid range to avoid OOB
+            inv_idx_clamped = inv_idx.clamp(min=0, max=h_unique.shape[0]-1)
+            if torch.any(inv_idx_clamped != inv_idx):
+                try:
+                    diff = (inv_idx_clamped != inv_idx).sum().item()
+                except Exception:
+                    diff = -1
+                print(f"[WARN][POL] clamped {diff} indices for h_unique gather (max allowed {h_unique.shape[0]-1})")
+            h_pol = h_unique[inv_idx_clamped]
             print('[DBG][POL] h_unique', tuple(h_unique.shape), '-> h_pol', tuple(h_pol.shape))
 
             # Fetch an expert batch

@@ -95,14 +95,65 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
 
         # Compute hidden states h using the backbone/transformer as-is
         h = self.encode_to_hidden(qpos, image, env_state)  # [B, T, H]
+        try:
+            print('[DBG][FWD] h', tuple(h.shape))
+        except Exception:
+            pass
 
         # Heads
+        try:
+            print('[DBG][FWD] pre cont_mu_head')
+        except Exception:
+            pass
         cont_mu = self.cont_mu_head(h)
+        try:
+            print('[DBG][FWD] post cont_mu_head')
+        except Exception:
+            pass
         # Clamp log_std tightly to keep std in a reasonable range: exp([-2.5, -0.3]) ≈ [0.082, 0.74]
+        try:
+            print('[DBG][FWD] pre cont_log_std_head')
+        except Exception:
+            pass
         cont_log_std = self.cont_log_std_head(h).clamp(min=-2.5, max=-0.3)
-        bin_logits = self.bin_logits_head(h) if self.bin_dim > 0 else None
+        try:
+            print('[DBG][FWD] post cont_log_std_head')
+        except Exception:
+            pass
+        bin_logits = None
+        if self.bin_dim > 0:
+            try:
+                print('[DBG][FWD] pre bin_logits_head')
+            except Exception:
+                pass
+            bin_logits = self.bin_logits_head(h)
+            try:
+                print('[DBG][FWD] post bin_logits_head')
+            except Exception:
+                pass
+        try:
+            print('[DBG][FWD] pre value_head')
+        except Exception:
+            pass
         value = self.value_head(h).squeeze(-1)
-        a_hat = self.model.action_head(h)  # [1, Tq, A]
+        try:
+            print('[DBG][FWD] post value_head')
+        except Exception:
+            pass
+        try:
+            print('[DBG][FWD] pre action_head')
+        except Exception:
+            pass
+        a_hat = self.model.action_head(h)  # [B, Tq, A]
+        try:
+            print('[DBG][FWD] post action_head')
+        except Exception:
+            pass
+        try:
+            print('[DBG][FWD] cont_mu', tuple(cont_mu.shape), 'log_std', tuple(cont_log_std.shape),
+                  'bin', None if bin_logits is None else tuple(bin_logits.shape), 'value', tuple(value.shape), 'ahat', tuple(a_hat.shape))
+        except Exception:
+            pass
 
         if out_mode in ("dist", "distribution"):
             # Use squashed Gaussian to keep samples bounded in [-1,1]
@@ -137,8 +188,17 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             bs, _ = qpos.shape
             if getattr(self.model, 'backbones', None) is not None:
                 all_cam_features, all_cam_pos = [], []
+                # Strict check: batch camera count must match model expectation
+                K = image.shape[1]
+                N = len(self.model.camera_names)
+                assert K == N, f"Camera count mismatch: batch has K={K} images, model expects N={N} (camera_names). Align data or config."
                 for cam_id, _ in enumerate(self.model.camera_names):
-                    features, pos = self.model.backbones[0](image[:, cam_id])  # HARDCODED like model.forward
+                    x = image[:, cam_id].contiguous().float()
+                    try:
+                        print(f"[DBG][ENC] cam {cam_id} x {tuple(x.shape)} dtype={x.dtype} contiguous={x.is_contiguous()}")
+                    except Exception:
+                        pass
+                    features, pos = self.model.backbones[0](x)  # HARDCODED like model.forward
                     features = features[-1]
                     pos = pos[-1]
                     all_cam_features.append(self.model.input_proj(features))
@@ -149,18 +209,34 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                 # Create zero latent and project to match model.forward
                 latent = torch.zeros((bs, getattr(self.model, 'latent_dim', 32)), device=qpos.device, dtype=qpos.dtype)
                 latent_input = self.model.latent_out_proj(latent) if hasattr(self.model, 'latent_out_proj') else None
+                try:
+                    print("[DBG][ENC] src", tuple(src.shape), "pos", tuple(pos.shape),
+                          "qe", tuple(self.model.query_embed.weight.shape),
+                          "add_pos", tuple(self.model.additional_pos_embed.weight.shape),
+                          "lat", tuple(latent_input.shape), "prop", tuple(proprio_input.shape))
+                except Exception:
+                    pass
+                try:
+                    print("[DBG][ENC] pre-transformer")
+                except Exception:
+                    pass
                 hs = self.model.transformer(
                     src, None, self.model.query_embed.weight, pos,
                     latent_input,
                     proprio_input,
                     self.model.additional_pos_embed.weight
                 )[0]
+                try:
+                    print("[DBG][ENC] post-transformer")
+                except Exception:
+                    pass
             else:
                 # Fallback to state-only path
                 qpos_proj = self.model.input_proj_robot_state(qpos)
                 env_proj = self.model.input_proj_env_state(env_state)
                 transformer_input = torch.cat([qpos_proj, env_proj], axis=1)
                 hs = self.model.transformer(transformer_input, None, self.model.query_embed.weight, self.model.pos.weight)[0]
+        # hs is already [B, T, H] because transformer(...)[0] selects first decoder layer output with shape [B,T,H]
         return hs  # [B, T, H]
 
     def configure_optimizers(self):
