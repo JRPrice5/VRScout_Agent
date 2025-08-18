@@ -261,11 +261,9 @@ class TrainerGAIL:
             # Build per-step start obs by indexing chunk arrays
             qpos = qpos_chunks[chunk_id]
             image = image_chunks[chunk_id]
-            # Remove singleton time/query dims if present
+            # Remove singleton time/query dims on qpos; keep camera dim on image even if K==1
             if qpos.dim() >= 2 and qpos.size(1) == 1:
                 qpos = qpos.squeeze(1)
-            if image.dim() >= 2 and image.size(1) == 1:
-                image = image.squeeze(1)
         else:
             qpos = batch['obs']['qpos'].to(self.device).detach()
             image = batch['obs']['image'].to(self.device).detach()
