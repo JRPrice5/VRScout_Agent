@@ -308,10 +308,13 @@ def main():
                 elif torch.is_tensor(v):
                     batch[k] = v.to(device)
 
-            # Gather start obs by chunk_id (rolled out from same start context)
+            # Gather start obs once per unique chunk_id, then map back to per-step order
             chunk_id = batch['chunk_id'].view(-1)
-            qpos_pol = batch['chunk_obs']['qpos'][chunk_id]
-            image_pol = batch['chunk_obs']['image'][chunk_id]
+            cids_unique, inv_idx = torch.unique(chunk_id, sorted=False, return_inverse=True)
+            qpos_chunks = batch['chunk_obs']['qpos']
+            image_chunks = batch['chunk_obs']['image']
+            qpos_pol = qpos_chunks[cids_unique]
+            image_pol = image_chunks[cids_unique]
             a_cont_pol = batch['a_cont']
             a_bin_pol = batch.get('a_bin', None)
             mask_pol = batch['mask']
@@ -322,9 +325,11 @@ def main():
             print('[DBG][POL] image_pol', tuple(image_pol.shape))
             with torch.no_grad():
                 out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
-                h_pol = out_pol['h']  # [B, Q, H]
+                h_unique = out_pol['h']  # [B_unique, Q, H]
                 value_pol = out_pol['value']  # can be used to compare with stored
-            print('[DBG][POL] h_pol', tuple(h_pol.shape))
+            # Map hidden back to per-step order
+            h_pol = h_unique[inv_idx]
+            print('[DBG][POL] h_unique', tuple(h_unique.shape), '-> h_pol', tuple(h_pol.shape))
 
             # Fetch an expert batch
             image_exp, qpos_exp, action_exp, is_pad_exp = next(expert_iter)
@@ -385,11 +390,18 @@ def main():
             except Exception as e:
                 print(f"[CHK][POL] sampling diagnostics failed: {e}")
 
-            # Ensure policy data has a temporal dimension of 1 (query 0)
+            # Ensure policy data has a temporal dimension of 1 aligned to this step's query via chunk_pos
             B_pol = h_pol.shape[0]
-            # Use current timestep (query 0) for hidden; actions/mask already [B,1,...]
-            h_pol = h_pol[:, 0:1, :]  # [B,1,H]
-            print('[DBG][POL] h_pol (q0)', tuple(h_pol.shape))
+            pos = batch['chunk_pos'].view(-1).long()  # per-step query indices
+            # Clamp to valid range to avoid any OOB when Tq varies across configs
+            Tq = h_pol.size(1)
+            if Tq <= 0:
+                raise RuntimeError(f"Invalid Tq={Tq} for h_pol with shape {tuple(h_pol.shape)}")
+            pos_clamped = pos.clamp(min=0, max=Tq - 1)
+            if torch.any(pos != pos_clamped):
+                print(f"[WARN] clamped chunk_pos: max(pos)={int(pos.max().item())} Tq={Tq}")
+            h_pol = h_pol.gather(dim=1, index=pos_clamped.view(-1, 1, 1).expand(-1, 1, h_pol.size(2)))  # [B,1,H]
+            print('[DBG][POL] h_pol (gathered by chunk_pos)', tuple(h_pol.shape), 'max_pos', int(pos_clamped.max().item()), 'Tq', Tq)
 
             # To match batch sizes, sample from the larger policy batch
             if B_pol > B_exp:
