@@ -250,8 +250,25 @@ class TrainerGAIL:
         self.policy.train()
 
         # Inputs should not carry graphs from rollout storage
-        qpos = batch['obs']['qpos'].to(self.device).detach()
-        image = batch['obs']['image'].to(self.device).detach()
+        # Prefer chunk-level start obs when provided; fallback to per-step obs for backward-compat
+        has_chunk = ('chunk_obs' in batch) and ('chunk_id' in batch) and ('chunk_pos' in batch)
+        if has_chunk:
+            chunk_obs = batch['chunk_obs']
+            qpos_chunks = chunk_obs['qpos'].to(self.device).detach()  # [C, ...]
+            image_chunks = chunk_obs['image'].to(self.device).detach()  # [C, K(or 1), C, H, W] with batch dim C
+            chunk_id = batch['chunk_id'].to(self.device).detach().view(-1)  # [N]
+            chunk_pos = batch['chunk_pos'].to(self.device).detach().view(-1)  # [N]
+            # Build per-step start obs by indexing chunk arrays
+            qpos = qpos_chunks[chunk_id]
+            image = image_chunks[chunk_id]
+            # Remove singleton time/query dims if present
+            if qpos.dim() >= 2 and qpos.size(1) == 1:
+                qpos = qpos.squeeze(1)
+            if image.dim() >= 2 and image.size(1) == 1:
+                image = image.squeeze(1)
+        else:
+            qpos = batch['obs']['qpos'].to(self.device).detach()
+            image = batch['obs']['image'].to(self.device).detach()
         a_cont = batch['a_cont'].to(self.device).detach()
         a_bin = batch.get('a_bin')
         a_bin = a_bin.to(self.device).detach() if a_bin is not None else None
@@ -324,10 +341,101 @@ class TrainerGAIL:
         kl_coef = float(self.cfg.get('kl_coef', 0.0))
         cont_dim = None
         for epoch in range(max(1, ppo_epochs)):
-            # Forward policy
+            # Forward policy from start obs, then select per-sample query index when chunk-aware
             out = self.policy.forward(qpos, image, out_mode='dist')
-            logp, ent = self.compute_logp_and_entropy(out, a_cont, a_bin, mask)
-            v = out['value']
+            if has_chunk:
+                # Extract distributions and select the appropriate query per sample
+                cont_dist = out['cont_dist']
+                bin_dist = out.get('bin_dist', None)
+                v_full = out['value']  # [N, Tq] or [N, Tq, 1]
+
+                def select_query(tensor_BTQC, pos_idx):
+                    # tensor can be [N,Tq,C] or [N,Tq] or [N,Tq,1]; gather along dim=1 using pos_idx
+                    if tensor_BTQC.dim() == 3:
+                        # [N,Tq,C]
+                        idx = pos_idx.view(-1, 1, 1).expand(-1, 1, tensor_BTQC.size(2))
+                        return tensor_BTQC.gather(dim=1, index=idx).squeeze(1)  # [N,C]
+                    elif tensor_BTQC.dim() == 2:
+                        # [N,Tq]
+                        idx = pos_idx.view(-1, 1)
+                        return tensor_BTQC.gather(dim=1, index=idx).squeeze(1)  # [N]
+                    elif tensor_BTQC.dim() == 4 and tensor_BTQC.size(2) == 1:
+                        # [N,Tq,1,C] -> treat like has extra singleton
+                        t = tensor_BTQC.squeeze(2)  # [N,Tq,C]
+                        idx = pos_idx.view(-1, 1, 1).expand(-1, 1, t.size(2))
+                        return t.gather(dim=1, index=idx).squeeze(1)
+                    else:
+                        return tensor_BTQC
+
+                # Continuous params
+                mu = getattr(cont_dist, 'mu', None)
+                log_std = getattr(cont_dist, 'log_std', None)
+                if mu is not None and mu.dim() >= 3 and mu.size(1) > 1:
+                    mu_sel = select_query(mu, chunk_pos)
+                    ls_sel = select_query(log_std, chunk_pos)
+                    from distributions import DiagNormal
+                    cont_dist_sel = DiagNormal(mu_sel, ls_sel,
+                                               min_log_std=float(self.cfg.get('min_log_std', -5.0)),
+                                               max_log_std=float(self.cfg.get('max_log_std', 2.0)))
+                    logp_cont = cont_dist_sel.log_prob(a_cont.squeeze(1))  # [N]
+                    ent_cont = cont_dist_sel.entropy()  # [N]
+                else:
+                    # No query dim; fall back to existing path
+                    logp_cont = None
+                    ent_cont = None
+
+                logp_BT = None
+                ent_BT = None
+                if logp_cont is not None:
+                    logp_BT = logp_cont.view(B, T)
+                    ent_BT = ent_cont.view(B, T)
+
+                # Binary params
+                if bin_dist is not None:
+                    from distributions import BernoulliMulti
+                    if hasattr(bin_dist, 'logits') and bin_dist.logits is not None and bin_dist.logits.dim() >= 3 and bin_dist.logits.size(1) > 1:
+                        logits_sel = select_query(bin_dist.logits, chunk_pos)
+                        bin_sel = BernoulliMulti(logits=logits_sel)
+                    elif hasattr(bin_dist, 'probs') and bin_dist.probs is not None and bin_dist.probs.dim() >= 3 and bin_dist.probs.size(1) > 1:
+                        probs_sel = select_query(bin_dist.probs, chunk_pos)
+                        bin_sel = BernoulliMulti(probs=probs_sel)
+                    else:
+                        bin_sel = None
+                    if bin_sel is not None and a_bin is not None:
+                        lp_bin = bin_sel.log_prob(a_bin.squeeze(1))
+                        ent_bin = bin_sel.entropy()
+                        if logp_BT is None:
+                            logp_BT = lp_bin.view(B, T)
+                            ent_BT = ent_bin.view(B, T)
+                        else:
+                            logp_BT = logp_BT + lp_bin.view(B, T)
+                            ent_BT = ent_BT + ent_bin.view(B, T)
+
+                if logp_BT is None or ent_BT is None:
+                    # Fallback to generic path if selection could not be applied
+                    logp, ent = self.compute_logp_and_entropy(out, a_cont, a_bin, mask)
+                else:
+                    # Apply mask
+                    logp = logp_BT * mask
+                    ent = ent_BT * mask
+
+                # Select value at the chosen query index
+                v = v_full
+                if v_full.dim() >= 2 and v_full.size(1) > 1:
+                    v_sel = select_query(v_full, chunk_pos)  # [N] or [N,1]
+                    if v_sel.dim() == 1:
+                        v = v_sel.view(B, T)
+                    elif v_sel.dim() == 2 and v_sel.size(1) == 1:
+                        v = v_sel.view(B, T)
+                    else:
+                        # Reduce extra dims if any
+                        while v_sel.dim() > 2:
+                            v_sel = v_sel.squeeze(-1)
+                        v = v_sel.view(B, T)
+            else:
+                # Legacy path: compute with per-step obs
+                logp, ent = self.compute_logp_and_entropy(out, a_cont, a_bin, mask)
+                v = out['value']
             # Log mean entropy per continuous action dim for exploration diagnostics
             try:
                 cont_dim = out['cont_dist'].mu.shape[-1]

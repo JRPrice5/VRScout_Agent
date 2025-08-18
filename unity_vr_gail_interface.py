@@ -71,6 +71,8 @@ class UnityVRGAILInterface:
         # Cached multi-step chunk sampled from policy; consumed across timesteps
         # Structure: {'a_cont': [1,T,Cc], 'a_bin': [1,T,Cb] or None, 'logp': [1,T], 'value': [1,T], 'idx': int, 'len': int}
         self._chunk_cache = None
+        # Monotonic chunk id for chunk-level storage
+        self._next_chunk_id = 0
 
     # ---------- Networking ----------
     def start_server(self):
@@ -266,6 +268,12 @@ class UnityVRGAILInterface:
                 if use_T <= 0:
                     use_T = 1
 
+                # Register chunk-level observation once and assign a new chunk id
+                cid = int(self._next_chunk_id)
+                self._next_chunk_id += 1
+                # Store start obs once per chunk
+                self.buffer.add(chunk_obs={'qpos': qpos, 'image': image})
+
                 self._chunk_cache = {
                     # Store pre-tanh actions z for training
                     'a_cont': a_cont_seq[:, :use_T],
@@ -274,6 +282,7 @@ class UnityVRGAILInterface:
                     'value': value_seq[:, :use_T],
                     'idx': 0,
                     'len': use_T,
+                    'cid': cid,
                 }
 
             # Consume one step from cache
@@ -300,15 +309,22 @@ class UnityVRGAILInterface:
             a_bin_t = None if a_bin is None else a_bin.unsqueeze(1)  # [1,1,Cb]
             logp_t = logp.unsqueeze(1)                   # [1,1]
             value_t = value.unsqueeze(1)                 # [1,1]
+            # Per-step chunk indices
+            cid_t = torch.tensor([[self._chunk_cache['cid']]], dtype=torch.long, device=value_t.device)
+            cpos_t = torch.tensor([[t_idx]], dtype=torch.long, device=value_t.device)
+            clen_t = torch.tensor([[self._chunk_cache['len']]], dtype=torch.long, device=value_t.device)
 
             self.buffer.add(
-                obs={'qpos': qpos, 'image': image},
+                # Do not store per-step obs; we stored per-chunk start obs above
                 a_cont=a_cont_t,
                 a_bin=a_bin_t,
                 logp=logp_t,
                 value=value_t,
                 dones=dones,
                 mask=mask,
+                chunk_id=cid_t,
+                chunk_pos=cpos_t,
+                chunk_len=clen_t,
             )
 
             # Send action back to Unity (denormalized + sigmoid booleans)
@@ -390,4 +406,6 @@ class UnityVRGAILInterface:
         self.buffer.finalize()
         batch = self.buffer.tensors
         self.buffer = RolloutBuffer()
+        # Reset per-buffer chunk id counter so chunk_id matches indices within this batch
+        self._next_chunk_id = 0
         return batch

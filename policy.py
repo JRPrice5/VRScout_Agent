@@ -79,10 +79,18 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
           h: [B, T, H], cont_mean/log_std: [B, T, Cc], bin_logits: [B, T, Cb], value: [B, T]
         """
         env_state = None
-        # Normalize image like __call__
+        # Normalize image; support 4D/5D
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
-        image = normalize(image)
+        if image.dim() == 5:
+            B, K, C, H, W = image.shape
+            image_flat = image.view(B * K, C, H, W).contiguous()
+            image_flat = normalize(image_flat)
+            image = image_flat.view(B, K, C, H, W)
+        elif image.dim() == 4:
+            image = normalize(image)
+        else:
+            raise ValueError(f"Unsupported image dims {image.dim()}, expected 4D or 5D tensor")
         qpos = qpos.float()
 
         # Compute hidden states h using the backbone/transformer as-is

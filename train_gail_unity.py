@@ -308,8 +308,10 @@ def main():
                 elif torch.is_tensor(v):
                     batch[k] = v.to(device)
 
-            qpos_pol = batch['obs']['qpos']
-            image_pol = batch['obs']['image']
+            # Gather start obs by chunk_id (rolled out from same start context)
+            chunk_id = batch['chunk_id'].view(-1)
+            qpos_pol = batch['chunk_obs']['qpos'][chunk_id]
+            image_pol = batch['chunk_obs']['image'][chunk_id]
             a_cont_pol = batch['a_cont']
             a_bin_pol = batch.get('a_bin', None)
             mask_pol = batch['mask']
@@ -383,7 +385,7 @@ def main():
             except Exception as e:
                 print(f"[CHK][POL] sampling diagnostics failed: {e}")
 
-            # Ensure policy data has a temporal dimension of 1 (already present from buffer)
+            # Ensure policy data has a temporal dimension of 1 (query 0)
             B_pol = h_pol.shape[0]
             # Use current timestep (query 0) for hidden; actions/mask already [B,1,...]
             h_pol = h_pol[:, 0:1, :]  # [B,1,H]

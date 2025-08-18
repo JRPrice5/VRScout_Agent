@@ -6,11 +6,16 @@ import torch
 class RolloutBuffer:
     """
     Stores variable-length sequence rollouts with masks and attention masks.
-    Fields per add(): obs, prev_actions, z, a_cont, a_bin, logp, value, dones, mask, attn_mask
+    Fields per add():
+      - Per-step: prev_actions, z, a_cont, a_bin, logp, value, dones, mask, attn_mask
+      - Chunk indexing: chunk_id, chunk_pos, chunk_len
+      - Per-chunk: chunk_obs (list of dicts {'qpos': Tensor, 'image': Tensor})
+    Backward compatibility: if per-step obs are pushed (legacy), we will still collate them.
     Exposes finalize() to stack into tensors and iter_minibatches(batch_size)
     """
     def __init__(self):
         self.storage: Dict[str, List] = {
+            # Legacy per-step obs (optional)
             'obs': [],  # list of dicts {'qpos': Tensor, 'image': Tensor}
             'prev_actions': [],
             'z': [],
@@ -21,6 +26,12 @@ class RolloutBuffer:
             'dones': [],
             'mask': [],
             'attn_mask': [],
+            # New: per-step chunk indices
+            'chunk_id': [],   # Tensor [B,1] int64
+            'chunk_pos': [],  # Tensor [B,1] int64
+            'chunk_len': [],  # Tensor [B,1] int64
+            # New: per-chunk obs stored once per chunk (list aligned by chunk_id)
+            'chunk_obs': [],  # list of dicts {'qpos': Tensor[1,...], 'image': Tensor[1,...]}
         }
         self.finalized = False
         self.tensors: Dict[str, torch.Tensor] = {}
@@ -40,6 +51,14 @@ class RolloutBuffer:
                 qpos_list = [d['qpos'] for d in lst]
                 image_list = [d['image'] for d in lst]
                 self.tensors['obs'] = {
+                    'qpos': torch.cat(qpos_list, dim=0),
+                    'image': torch.cat(image_list, dim=0),
+                }
+            elif k == 'chunk_obs':
+                # Per-chunk observations stored once per chunk
+                qpos_list = [d['qpos'] for d in lst]
+                image_list = [d['image'] for d in lst]
+                self.tensors['chunk_obs'] = {
                     'qpos': torch.cat(qpos_list, dim=0),
                     'image': torch.cat(image_list, dim=0),
                 }
@@ -64,6 +83,11 @@ class RolloutBuffer:
                     batch['obs'] = {
                         'qpos': v['qpos'][idx],
                         'image': v['image'][idx],
+                    }
+                elif k == 'chunk_obs':
+                    batch['chunk_obs'] = {
+                        'qpos': v['qpos'],  # per-chunk tensors; not indexed by per-step idx
+                        'image': v['image'],
                     }
                 else:
                     batch[k] = v[idx]
