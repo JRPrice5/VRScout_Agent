@@ -10,12 +10,13 @@ e = IPython.embed
 
 
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.norm_stats = norm_stats
+        self.num_queries = int(num_queries)
         self.is_sim = None
         self.__getitem__(0)  # initialize self.is_sim
 
@@ -41,19 +42,27 @@ class EpisodicDataset(torch.utils.data.Dataset):
             image_dict = dict()
             for cam_name in self.camera_names:
                 image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
-            # get all actions after and including start_ts
+            # compute minimal action slice bounds and read only needed rows
+            window_len = self.num_queries
             if is_sim:
-                action = root['/action'][start_ts:]
-                action_len = episode_len - start_ts
+                start = start_ts
             else:
-                action = root['/action'][max(0, start_ts - 1):]  # hack, to make timesteps more aligned
-                action_len = episode_len - max(0, start_ts - 1)  # hack, to make timesteps more aligned
+                start = max(0, start_ts - 1)  # hack, to make timesteps more aligned
+            end = min(start + window_len, episode_len)
+            action = root['/action'][start:end]
+            available_len = end - start
 
         self.is_sim = is_sim
-        padded_action = np.zeros(original_action_shape, dtype=np.float32)
-        padded_action[:action_len] = action
-        is_pad = np.zeros(episode_len)
-        is_pad[action_len:] = 1
+        # Restrict to fixed window length = num_queries to match policy needs
+        action_dim = original_action_shape[1]
+        # Slice available part and pad to window_len if needed
+        slice_len = min(available_len, window_len)
+        action_window = np.zeros((window_len, action_dim), dtype=np.float32)
+        if slice_len > 0:
+            action_window[:slice_len] = action[:slice_len]
+        # is_pad marks padded timesteps within this fixed window
+        is_pad = np.ones((window_len,), dtype=np.bool_)
+        is_pad[:slice_len] = 0
 
         # new axis for different cameras
         all_cam_images = []
@@ -64,7 +73,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # construct observations
         image_data = torch.from_numpy(all_cam_images)
         qpos_data = torch.from_numpy(qpos).float()
-        action_data = torch.from_numpy(padded_action).float()
+        action_data = torch.from_numpy(action_window).float()
         is_pad = torch.from_numpy(is_pad).bool()
 
         # channel last
@@ -134,7 +143,7 @@ def get_norm_stats(dataset_dir, num_episodes):
     return stats
 
 
-def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val):
+def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, num_queries):
     print(f'\nData from: {dataset_dir}\n')
     # obtain train test split
     train_ratio = 0.8
@@ -148,9 +157,9 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     # import custom collate function
     from custom_collate import custom_collate_fn
 
-    # construct dataset and dataloader
-    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats)
-    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
+    # construct dataset and dataloader (fixed window length = num_queries)
+    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries)
+    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries)
     
     # Optimized DataLoader configuration for better performance
     # Increase num_workers and prefetch_factor to eliminate batch iteration bottleneck
