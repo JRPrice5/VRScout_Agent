@@ -3,6 +3,7 @@ import numpy as np
 import os
 import pickle
 import argparse
+import re
 import matplotlib.pyplot as plt
 from copy import deepcopy
 from tqdm import tqdm
@@ -90,7 +91,8 @@ def main(args):
         'seed': args['seed'],
         'temporal_agg': args['temporal_agg'],
         'camera_names': camera_names,
-        'real_robot': not is_sim
+        'real_robot': not is_sim,
+        'resume': args.get('resume', None),
     }
 
     if is_eval:
@@ -339,6 +341,7 @@ def train_bc(train_dataloader, val_dataloader, config):
     seed = config['seed']
     policy_class = config['policy_class']
     policy_config = config['policy_config']
+    resume_path = config.get('resume', None)
 
     set_seed(seed)
 
@@ -346,11 +349,67 @@ def train_bc(train_dataloader, val_dataloader, config):
     policy.cuda()
     optimizer = make_optimizer(policy_class, policy)
 
+    # Initialize tracking and best state
     train_history = []
     validation_history = []
     min_val_loss = np.inf
     best_ckpt_info = None
-    for epoch in tqdm(range(num_epochs)):
+
+    # Resume support
+    start_epoch = 0
+    # If a directory is provided, try common filenames
+    if resume_path is not None and os.path.isdir(resume_path):
+        dir_path = resume_path
+        candidate_files = [
+            os.path.join(dir_path, 'training_state.ckpt'),
+            os.path.join(dir_path, 'training_state.pt'),
+            os.path.join(dir_path, 'policy_last.ckpt'),
+            os.path.join(dir_path, 'policy_best.ckpt'),
+        ]
+        resume_path = next((p for p in candidate_files if os.path.isfile(p)), None)
+
+    if resume_path is not None and os.path.isfile(resume_path):
+        try:
+            ckpt = torch.load(resume_path, map_location='cpu')
+            # Determine format
+            if isinstance(ckpt, dict) and any(k in ckpt for k in ['model_state_dict', 'state_dict', 'model']):
+                state_dict = ckpt.get('model_state_dict', ckpt.get('state_dict', ckpt.get('model', None)))
+                if state_dict is not None:
+                    missing, unexpected = policy.load_state_dict(state_dict, strict=False)
+                else:
+                    missing = unexpected = []
+                if 'optimizer_state_dict' in ckpt:
+                    try:
+                        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                    except Exception:
+                        pass
+                # Epoch info
+                if 'epoch' in ckpt:
+                    start_epoch = int(ckpt['epoch']) + 1
+                # Restore min_val_loss and initialize best_ckpt_info from resume if available
+                if 'min_val_loss' in ckpt:
+                    try:
+                        min_val_loss = float(ckpt['min_val_loss'])
+                    except Exception:
+                        pass
+                # Initialize best_ckpt_info to current policy state so end-of-training doesn't fail
+                best_ckpt_info = (start_epoch - 1, min_val_loss if 'min_val_loss' in locals() else np.inf, deepcopy(policy.state_dict()))
+            else:
+                # Assume it's a raw state_dict
+                loading_status = policy.load_state_dict(ckpt, strict=False)
+                # Try to parse epoch from filename like policy_epoch_{E}_seed_*.ckpt
+                try:
+                    fname = os.path.basename(resume_path)
+                    m = re.search(r"policy_epoch_(\d+)_seed_", fname)
+                    if m:
+                        start_epoch = int(m.group(1)) + 1
+                except Exception:
+                    pass
+            print(f"Resumed model from {resume_path}; starting at epoch {start_epoch}")
+        except Exception as e:
+            print(f"Warning: failed to resume from {resume_path}: {e}")
+
+    for epoch in tqdm(range(start_epoch, num_epochs)):
         print(f'\nEpoch {epoch}')
         # validation
         with torch.inference_mode():
@@ -375,6 +434,7 @@ def train_bc(train_dataloader, val_dataloader, config):
         # training
         policy.train()
         optimizer.zero_grad()
+        current_epoch_train = []
         for batch_idx, data in enumerate(train_dataloader):
             forward_dict = forward_pass(data, policy)
             # backward
@@ -382,8 +442,10 @@ def train_bc(train_dataloader, val_dataloader, config):
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            train_history.append(detach_dict(forward_dict))
-        epoch_summary = compute_dict_mean(train_history[(batch_idx + 1) * epoch:(batch_idx + 1) * (epoch + 1)])
+            det = detach_dict(forward_dict)
+            train_history.append(det)
+            current_epoch_train.append(det)
+        epoch_summary = compute_dict_mean(current_epoch_train)
         epoch_train_loss = epoch_summary['loss']
         print(f'Train loss: {epoch_train_loss:.5f}')
         summary_string = ''
@@ -391,10 +453,22 @@ def train_bc(train_dataloader, val_dataloader, config):
             summary_string += f'{k}: {v.item():.3f} '
         print(summary_string)
 
+        # Save checkpoint and plots occasionally
         if epoch % 500 == 0:
             ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
             torch.save(policy.state_dict(), ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
+            # Save a full training state for resume on the same cadence
+            full_state = {
+                'epoch': epoch,
+                'model_state_dict': policy.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'seed': seed,
+                'min_val_loss': float(min_val_loss),
+                'policy_class': policy_class,
+                'policy_config': policy_config,
+            }
+            torch.save(full_state, os.path.join(ckpt_dir, 'training_state.ckpt'))
 
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
     torch.save(policy.state_dict(), ckpt_path)
@@ -443,6 +517,7 @@ if __name__ == '__main__':
                         help='Backbone model (resnet18, resnet34, resnet50, dino_vits16, dino_vitb16)',
                         default='resnet18')
     parser.add_argument('--lr_backbone', action='store', type=float, help='lr_backbone', required=False)
+    parser.add_argument('--resume', action='store', type=str, help='path to checkpoint file or directory to resume from', required=False, default=None)
 
     # for ACT
     parser.add_argument('--kl_weight', action='store', type=int, help='KL Weight', required=False)
