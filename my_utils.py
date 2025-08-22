@@ -3,6 +3,7 @@ import torch
 import os
 import h5py
 from torch.utils.data import TensorDataset, DataLoader
+from typing import Optional
 
 import IPython
 
@@ -10,13 +11,15 @@ e = IPython.embed
 
 
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries, tail_clip: Optional[int] = None):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.num_queries = int(num_queries)
+        # Optional: exclude last `tail_clip` timesteps of each episode from sampling
+        self.tail_clip = int(tail_clip) if tail_clip is not None else 0
         self.is_sim = None
         self.__getitem__(0)  # initialize self.is_sim
 
@@ -32,10 +35,16 @@ class EpisodicDataset(torch.utils.data.Dataset):
             is_sim = root.attrs['sim']
             original_action_shape = root['/action'].shape
             episode_len = original_action_shape[0]
+            # Effective episode length after tail clipping for action/valid start indices
+            effective_len = max(0, episode_len - self.tail_clip)
             if sample_full_episode:
+                # When sampling the whole episode, align start to 0 but ensure it is within the
+                # non-clipped portion when possible
                 start_ts = 0
             else:
-                start_ts = np.random.choice(episode_len)
+                # Choose a start within the non-clipped region. If effective_len == 0, fallback to 0
+                start_pool = max(1, effective_len)
+                start_ts = int(np.random.choice(start_pool))
             # get observation at start_ts only
             qpos = root['/observations/qpos'][start_ts]
             qvel = root['/observations/qvel'][start_ts]
@@ -48,7 +57,8 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 start = start_ts
             else:
                 start = max(0, start_ts - 1)  # hack, to make timesteps more aligned
-            end = min(start + window_len, episode_len)
+            # Do not cross into the clipped tail
+            end = min(start + window_len, effective_len)
             action = root['/action'][start:end]
             available_len = end - start
 
@@ -220,13 +230,15 @@ class StepDataset(torch.utils.data.Dataset):
     This is designed for large-batch expert sampling in GAIL where batch size should depend on
     total timesteps, not number of episodes.
     """
-    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None):
+    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None, tail_clip: Optional[int] = None):
         super(StepDataset, self).__init__()
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.num_episodes = num_episodes
         self.num_queries = int(num_queries) if num_queries is not None else 1
+        # Optional: exclude last `tail_clip` timesteps of each episode from sampling
+        self.tail_clip = int(tail_clip) if tail_clip is not None else 0
         self.is_sim = None
 
         # Precompute episode lengths and cumulative index for O(log E) lookup
@@ -238,7 +250,8 @@ class StepDataset(torch.utils.data.Dataset):
                 if self.is_sim is None:
                     self.is_sim = bool(root.attrs['sim'])
                 ep_len = int(root['/action'].shape[0])
-                self.episode_lengths.append(ep_len)
+                ep_eff = max(0, ep_len - self.tail_clip)
+                self.episode_lengths.append(ep_eff)
         self.cum_lengths = np.cumsum([0] + self.episode_lengths)  # length num_episodes+1
 
         # Precompute normalization tensors
@@ -280,6 +293,7 @@ class StepDataset(torch.utils.data.Dataset):
             else:
                 # hack to better align for real data
                 start = max(0, t - 1)
+            # Do not cross into the clipped tail
             end = min(start + window_len, episode_len)
             action_slice = root['/action'][start:end]
             available_len = end - start
