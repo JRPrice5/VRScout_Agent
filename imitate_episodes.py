@@ -12,6 +12,7 @@ from einops import rearrange
 from constants import DT
 from constants import PUPPET_GRIPPER_JOINT_OPEN
 from my_utils import load_data  # data functions
+from my_utils import StepDataset  # to detect step-based training
 from my_utils import sample_box_pose, sample_insertion_pose  # robot functions
 from my_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
 from policy import ACTPolicy, CNNMLPPolicy
@@ -113,7 +114,9 @@ def main(args):
         camera_names,
         batch_size_train,
         batch_size_val,
-        policy_config['num_queries']
+        policy_config['num_queries'],
+        dataset_type='step', # use StepDataset for training
+        val_dataset_type='episodic', # use EpisodicDataset for validation
     )
 
     # save dataset stats
@@ -435,6 +438,16 @@ def train_bc(train_dataloader, val_dataloader, config):
         policy.train()
         optimizer.zero_grad()
         current_epoch_train = []
+        # Track sample visitation order using the DataLoader's sampler permutation
+        try:
+            train_perm = list(iter(train_dataloader.sampler))
+        except Exception:
+            train_perm = None
+        if train_perm is not None:
+            # Basic sanity: expect permutation covering full dataset once
+            unique_count = len(set(train_perm))
+            expected = len(train_dataloader.dataset)
+            print(f"Train sampler order: {unique_count}/{expected} unique indices this epoch")
         for batch_idx, data in enumerate(train_dataloader):
             forward_dict = forward_pass(data, policy)
             # backward
@@ -452,9 +465,14 @@ def train_bc(train_dataloader, val_dataloader, config):
         for k, v in epoch_summary.items():
             summary_string += f'{k}: {v.item():.3f} '
         print(summary_string)
+        if train_perm is not None and unique_count == expected:
+            # Keep minimal log of visitation (first and last 5 indices)
+            head = train_perm[:5]
+            tail = train_perm[-5:]
+            print(f"Visited sample indices (head): {head} ... (tail): {tail}")
 
-        # Save checkpoint and plots occasionally
-        if epoch % 500 == 0:
+        # Save checkpoint: every epoch when training with StepDataset; otherwise every 500 epochs
+        if isinstance(train_dataloader.dataset, StepDataset) or (epoch % 500 == 0):
             ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
             torch.save(policy.state_dict(), ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)

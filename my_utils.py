@@ -106,10 +106,20 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return image_data, qpos_data, action_data, is_pad
 
 
-def get_norm_stats(dataset_dir, num_episodes):
+def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
+    """Compute normalization stats over specified episodes.
+
+    Backward compatible: if episode_ids is None, falls back to range(num_episodes).
+    """
+    if episode_ids is None:
+        assert num_episodes is not None, "Either num_episodes or episode_ids must be provided"
+        ids = list(range(num_episodes))
+    else:
+        ids = list(episode_ids)
+
     all_qpos_data = []
     all_action_data = []
-    for episode_idx in range(num_episodes):
+    for episode_idx in ids:
         dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
             qpos = root['/observations/qpos'][()]
@@ -132,8 +142,9 @@ def get_norm_stats(dataset_dir, num_episodes):
     qpos_std = all_qpos_data.std(dim=0, keepdim=True)
     qpos_std = torch.clip(qpos_std, 1e-2, np.inf)  # clipping
 
-    # Get example qpos from first episode
-    with h5py.File(os.path.join(dataset_dir, 'episode_0.hdf5'), 'r') as root:
+    # Get example qpos from the first selected episode
+    example_ep = ids[0]
+    with h5py.File(os.path.join(dataset_dir, f'episode_{example_ep}.hdf5'), 'r') as root:
         example_qpos = root['/observations/qpos'][()]
 
     stats = {"action_mean": action_mean.numpy().squeeze(), "action_std": action_std.numpy().squeeze(),
@@ -143,37 +154,59 @@ def get_norm_stats(dataset_dir, num_episodes):
     return stats
 
 
-def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, num_queries):
+def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, num_queries,
+              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic'):
+    """Create train/val DataLoaders.
+
+    - Default: EpisodicDataset for both splits (backward compatible).
+    - Optionally: use StepDataset for training and/or validation via dataset_type args.
+    - Normalization stats are computed on train episodes only and reused for val.
+    """
     print(f'\nData from: {dataset_dir}\n')
-    # obtain train test split
+    # obtain train/val split at episode level
     train_ratio = 0.8
     shuffled_indices = np.random.permutation(num_episodes)
     train_indices = shuffled_indices[:int(train_ratio * num_episodes)]
     val_indices = shuffled_indices[int(train_ratio * num_episodes):]
 
-    # obtain normalization stats for qpos and action
-    norm_stats = get_norm_stats(dataset_dir, num_episodes)
+    # obtain normalization stats from TRAIN EPISODES ONLY
+    norm_stats = get_norm_stats(dataset_dir, episode_ids=train_indices.tolist())
 
     # import custom collate function
     from custom_collate import custom_collate_fn
 
-    # construct dataset and dataloader (fixed window length = num_queries)
-    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries)
-    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries)
-    
-    # Optimized DataLoader configuration for better performance
-    # Increase num_workers and prefetch_factor to eliminate batch iteration bottleneck
+    # construct datasets (fixed window length = num_queries)
+    if dataset_type == 'step':
+        train_dataset = StepDataset(dataset_dir=dataset_dir,
+                                    camera_names=camera_names,
+                                    norm_stats=norm_stats,
+                                    num_episodes=len(train_indices),
+                                    num_queries=num_queries,
+                                    episode_ids=train_indices.tolist())
+    else:
+        train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries)
+
+    if val_dataset_type == 'step':
+        val_dataset = StepDataset(dataset_dir=dataset_dir,
+                                  camera_names=camera_names,
+                                  norm_stats=norm_stats,
+                                  num_episodes=len(val_indices),
+                                  num_queries=num_queries,
+                                  episode_ids=val_indices.tolist())
+    else:
+        val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries)
+
+    # DataLoader configuration
     num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many
     prefetch_factor = 4  # Prefetch more batches to keep GPU busy
-    
     print(f"DataLoader config: num_workers={num_workers}, prefetch_factor={prefetch_factor}")
-    
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, 
-                                 num_workers=num_workers, prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn,
-                                 persistent_workers=True)  # Keep workers alive between epochs
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, 
-                               num_workers=num_workers, prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn,
-                               persistent_workers=True)  # Keep workers alive between epochs
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True,
+                                  num_workers=num_workers, prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn,
+                                  persistent_workers=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True,
+                                num_workers=num_workers, prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn,
+                                persistent_workers=True)
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
 
@@ -181,21 +214,25 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
 class StepDataset(torch.utils.data.Dataset):
     """Per-step dataset over all timesteps across episodes.
 
-    Yields individual (image_t, qpos_t, action_t, is_pad_t) at a single timestep t from an episode.
-    This is designed for large-batch expert sampling in GAIL where batch size should
-    depend on total timesteps, not number of episodes.
+    Yields (image_t, qpos_t, action_window, is_pad_window) at a timestep t from an episode.
+    action_window is a chunk of length T=num_queries (default 1), starting at t (or t-1 on real
+    data to align), padded as needed at the end if the episode runs out.
+    This is designed for large-batch expert sampling in GAIL where batch size should depend on
+    total timesteps, not number of episodes.
     """
-    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes):
+    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None):
         super(StepDataset, self).__init__()
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.num_episodes = num_episodes
+        self.num_queries = int(num_queries) if num_queries is not None else 1
         self.is_sim = None
 
         # Precompute episode lengths and cumulative index for O(log E) lookup
+        self.episode_ids = list(range(num_episodes)) if episode_ids is None else list(episode_ids)
         self.episode_lengths = []
-        for eid in range(num_episodes):
+        for eid in self.episode_ids:
             ep_path = os.path.join(dataset_dir, f'episode_{eid}.hdf5')
             with h5py.File(ep_path, 'r') as root:
                 if self.is_sim is None:
@@ -222,7 +259,8 @@ class StepDataset(torch.utils.data.Dataset):
         return e, t
 
     def __getitem__(self, index):
-        episode_id, t = self._index_to_episode(index)
+        episode_pos, t = self._index_to_episode(index)
+        episode_id = self.episode_ids[episode_pos]
         dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
             is_sim = bool(root.attrs['sim'])
@@ -234,17 +272,27 @@ class StepDataset(torch.utils.data.Dataset):
                 all_cam_images.append(root[f'/observations/images/{cam_name}'][t])
             all_cam_images = np.stack(all_cam_images, axis=0)  # [K, H, W, C]
 
-            # Action alignment: mimic EpisodicDataset alignment policy
+            # Action alignment and chunking to mimic EpisodicDataset policy
+            episode_len = self.episode_lengths[episode_pos]
+            window_len = self.num_queries
             if is_sim:
-                action = root['/action'][t]
+                start = t
             else:
                 # hack to better align for real data
-                action = root['/action'][max(0, t - 1)]
+                start = max(0, t - 1)
+            end = min(start + window_len, episode_len)
+            action_slice = root['/action'][start:end]
+            available_len = end - start
 
         # torch tensors
         image_data = torch.from_numpy(all_cam_images)
         qpos_data = torch.from_numpy(qpos).float()
-        action_data = torch.from_numpy(action).float()
+        # Build fixed-size window [T, A] with padding if needed
+        action_dim = int(self.action_mean.numel())
+        action_window = np.zeros((self.num_queries, action_dim), dtype=np.float32)
+        if available_len > 0:
+            action_window[:available_len] = action_slice[:available_len]
+        action_data = torch.from_numpy(action_window).float()
 
         # Channel-last -> channel-first: [K, C, H, W]
         image_data = torch.einsum('k h w c -> k c h w', image_data)
@@ -252,15 +300,16 @@ class StepDataset(torch.utils.data.Dataset):
 
         # Normalize
         action_data = (action_data - self.action_mean.squeeze(0)) / self.action_std.squeeze(0)
-        # Clamp boolean action dims post-normalization
-        action_data[self.boolean_indices] = torch.clamp(action_data[self.boolean_indices], 0.0, 1.0)
+        # Clamp boolean action dims post-normalization over time dimension
+        action_data[:, self.boolean_indices] = torch.clamp(action_data[:, self.boolean_indices], 0.0, 1.0)
 
         qpos_data = (qpos_data - self.qpos_mean.squeeze(0)) / self.qpos_std.squeeze(0)
 
         # Match EpisodicDataset API shape expectations used downstream in GAIL code:
-        # action -> [T=1, A]; is_pad -> [T=1] all zeros (no padding for a single step)
-        action_data = action_data.unsqueeze(0)
-        is_pad = torch.zeros((1,), dtype=torch.bool)
+        # action -> [T, A]; is_pad -> [T]
+        is_pad = torch.zeros((self.num_queries,), dtype=torch.bool)
+        if available_len < self.num_queries:
+            is_pad[available_len:] = True
 
         return image_data, qpos_data, action_data, is_pad
 
@@ -274,8 +323,8 @@ def load_expert_step_loader(dataset_dir, num_episodes, camera_names, batch_size,
     - Returns batches of:
         image:  [B, K, C, H, W]
         qpos:   [B, Dq]
-        action: [B, 1, A]
-        is_pad: [B, 1]
+        action: [B, T, A]
+        is_pad: [B, T]
     """
     # Reuse normalization computation over the specified episodes
     norm_stats = get_norm_stats(dataset_dir, num_episodes)
