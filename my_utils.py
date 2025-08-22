@@ -165,12 +165,13 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 
 
 def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, num_queries,
-              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic'):
+              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic', tail_clip: Optional[int] = None):
     """Create train/val DataLoaders.
 
     - Default: EpisodicDataset for both splits (backward compatible).
     - Optionally: use StepDataset for training and/or validation via dataset_type args.
     - Normalization stats are computed on train episodes only and reused for val.
+    - tail_clip: if provided, excludes the last N timesteps of each episode in both datasets.
     """
     print(f'\nData from: {dataset_dir}\n')
     # obtain train/val split at episode level
@@ -192,9 +193,11 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
                                     norm_stats=norm_stats,
                                     num_episodes=len(train_indices),
                                     num_queries=num_queries,
-                                    episode_ids=train_indices.tolist())
+                                    episode_ids=train_indices.tolist(),
+                                    tail_clip=tail_clip)
     else:
-        train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries)
+        train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries,
+                                        tail_clip=tail_clip)
 
     if val_dataset_type == 'step':
         val_dataset = StepDataset(dataset_dir=dataset_dir,
@@ -202,9 +205,11 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
                                   norm_stats=norm_stats,
                                   num_episodes=len(val_indices),
                                   num_queries=num_queries,
-                                  episode_ids=val_indices.tolist())
+                                  episode_ids=val_indices.tolist(),
+                                  tail_clip=tail_clip)
     else:
-        val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries)
+        val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries,
+                                      tail_clip=tail_clip)
 
     # DataLoader configuration
     num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many

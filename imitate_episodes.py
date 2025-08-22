@@ -117,6 +117,7 @@ def main(args):
         policy_config['num_queries'],
         dataset_type='step', # use StepDataset for training
         val_dataset_type='episodic', # use EpisodicDataset for validation
+        tail_clip=150, # HARD CODED: exclude the last 150 timesteps of each episode in both datasets
     )
 
     # save dataset stats
