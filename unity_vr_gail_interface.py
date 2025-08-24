@@ -268,11 +268,16 @@ class UnityVRGAILInterface:
                 if use_T <= 0:
                     use_T = 1
 
-                # Register chunk-level observation once and assign a new chunk id
+                # Register chunk-level feature once and assign a new chunk id
                 cid = int(self._next_chunk_id)
                 self._next_chunk_id += 1
-                # Store start obs once per chunk
-                self.buffer.add(chunk_obs={'qpos': qpos, 'image': image})
+                # Store start feature once per chunk: encoder hidden sequence h (fp16 on CPU)
+                try:
+                    h_seq = out['h']  # [1, Tq, H]
+                except Exception as e:
+                    raise RuntimeError(f"Policy output missing 'h': {e}")
+                h_store = h_seq.detach().to(torch.float16).cpu()
+                self.buffer.add(chunk_feat={'h': h_store})
 
                 self._chunk_cache = {
                     # Store pre-tanh actions z for training

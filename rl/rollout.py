@@ -32,6 +32,8 @@ class RolloutBuffer:
             'chunk_len': [],  # Tensor [B,1] int64
             # New: per-chunk obs stored once per chunk (list aligned by chunk_id)
             'chunk_obs': [],  # list of dicts {'qpos': Tensor[1,...], 'image': Tensor[1,...]}
+            # New: per-chunk compact features (alternative to chunk_obs images)
+            'chunk_feat': [], # list of dicts {'h': Tensor[1, Tq, H] (often fp16)}
         }
         self.finalized = False
         self.tensors: Dict[str, torch.Tensor] = {}
@@ -62,6 +64,13 @@ class RolloutBuffer:
                     'qpos': torch.cat(qpos_list, dim=0),
                     'image': torch.cat(image_list, dim=0),
                 }
+            elif k == 'chunk_feat':
+                # Per-chunk features stored once per chunk
+                # Expect dicts with at least 'h'
+                h_list = [d['h'] for d in lst]
+                self.tensors['chunk_feat'] = {
+                    'h': torch.cat(h_list, dim=0),
+                }
             else:
                 self.tensors[k] = torch.cat(lst, dim=0)
         self.finalized = True
@@ -88,6 +97,10 @@ class RolloutBuffer:
                     batch['chunk_obs'] = {
                         'qpos': v['qpos'],  # per-chunk tensors; not indexed by per-step idx
                         'image': v['image'],
+                    }
+                elif k == 'chunk_feat':
+                    batch['chunk_feat'] = {
+                        'h': v['h'],  # per-chunk tensors; not indexed by per-step idx
                     }
                 else:
                     batch[k] = v[idx]

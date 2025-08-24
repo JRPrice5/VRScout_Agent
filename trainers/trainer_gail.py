@@ -9,7 +9,7 @@ from typing import Optional, Dict
 
 from gail.discriminator import GAILDiscriminator, gail_loss_D, reward_from_prob, masked_mean
 from rl.ppo import compute_gae, ppo_clip_loss, value_loss
-from distributions import BernoulliMulti
+from distributions import DiagNormal, BernoulliMulti
 
 
 class TrainerGAIL:
@@ -38,6 +38,18 @@ class TrainerGAIL:
         self.opt_value = optim.Adam(value_params, lr=self.cfg.get('lr_value', self.cfg.get('lr_policy', 3e-4)))
         self.opt_disc = optim.Adam(self.disc.parameters(), lr=self.cfg.get('lr_disc', 1e-4))
 
+    def _to_pretanh(self, a_cont_squashed: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
+        """Convert normalized squashed actions in [-1,1] to pre-tanh z via atanh.
+        Uses a numerically stable atanh: 0.5*(log1p(x) - log1p(-x)) with clamping.
+
+        Expects input shaped [..., C]. Returns same shape.
+        """
+        # Clamp to open interval (-1, 1) for numerical stability
+        clipped = a_cont_squashed.clamp(min=-1.0 + eps, max=1.0 - eps)
+        # atanh(x) = 0.5 * (log1p(x) - log1p(-x))
+        z = 0.5 * (torch.log1p(clipped) - torch.log1p(-clipped))
+        return z
+
     def compute_logp_and_entropy(self, out_dist, a_cont, a_bin, mask):
         """Compute log-prob and entropy for ALL timesteps.
         - Supports optional query dimension by averaging across queries.
@@ -45,8 +57,6 @@ class TrainerGAIL:
           This expects pre-tanh actions (z). Squashing (tanh) is only used when sending to env.
         Returns: [B, T] tensors (logp, ent), masked by `mask`.
         """
-        from distributions import DiagNormal, BernoulliMulti
-
         # Use the policy's parameter heads (mu/log_std) to form an unsquashed DiagNormal
         cont_dist = out_dist['cont_dist']
         bin_dist = out_dist['bin_dist']
@@ -232,6 +242,7 @@ class TrainerGAIL:
         total_loss = 0.0
         for _ in range(iters):
             out = self.policy.forward(qpos_exp, image_exp, out_mode='dist')
+            # Expert actions are in unsquashed space.
             logp_exp, _ = self.compute_logp_and_entropy(out, a_cont_exp, a_bin_exp, mask_exp)
             # Negative log-likelihood averaged over valid steps
             denom = mask_exp.sum().clamp_min(1.0)
@@ -251,14 +262,21 @@ class TrainerGAIL:
 
         # Inputs should not carry graphs from rollout storage
         # Prefer chunk-level start obs when provided; fallback to per-step obs for backward-compat
-        has_chunk = ('chunk_obs' in batch) and ('chunk_id' in batch) and ('chunk_pos' in batch)
+        has_chunk = (('chunk_obs' in batch) or ('chunk_feat' in batch)) and ('chunk_id' in batch) and ('chunk_pos' in batch)
+        used_compact_feat = False
         if has_chunk:
-            chunk_obs = batch['chunk_obs']
-            qpos_chunks = chunk_obs['qpos'].to(self.device).detach()  # [C, ...]
-            image_chunks = chunk_obs['image'].to(self.device).detach()  # [C, K(or 1), C, H, W]
             chunk_id = batch['chunk_id'].to(self.device).detach().view(-1).long()  # [N]
             chunk_pos = batch['chunk_pos'].to(self.device).detach().view(-1).long()  # [N]
-            num_chunks = qpos_chunks.size(0)
+            if 'chunk_feat' in batch:
+                # Preferred path: use cached hidden features per chunk
+                h_chunks = batch['chunk_feat']['h'].to(self.device).detach().to(torch.float32)  # [C, Tq, H]
+                num_chunks = h_chunks.size(0)
+                used_compact_feat = True
+            else:
+                chunk_obs = batch['chunk_obs']
+                qpos_chunks = chunk_obs['qpos'].to(self.device).detach()  # [C, ...]
+                image_chunks = chunk_obs['image'].to(self.device).detach()  # [C, K(or 1), C, H, W]
+                num_chunks = qpos_chunks.size(0)
             # Validate chunk_id range; if invalid, remap compactly to avoid OOB
             if chunk_id.numel() > 0:
                 cid_min = int(chunk_id.min().item()); cid_max = int(chunk_id.max().item())
@@ -268,21 +286,31 @@ class TrainerGAIL:
                 print(f"[WARN][PPO] chunk_id out of range (min={cid_min}, max={cid_max}, num_chunks={num_chunks}); remapping")
                 cids_unique, inv_idx = torch.unique(chunk_id, sorted=False, return_inverse=True)
                 safe_rows = torch.arange(min(cids_unique.numel(), num_chunks), device=chunk_id.device)
-                qpos_pool = qpos_chunks.index_select(0, safe_rows)
-                image_pool = image_chunks.index_select(0, safe_rows)
+                if used_compact_feat:
+                    h_pool = h_chunks.index_select(0, safe_rows)
+                else:
+                    qpos_pool = qpos_chunks.index_select(0, safe_rows)
+                    image_pool = image_chunks.index_select(0, safe_rows)
                 # Clamp inverse index to pool size to ensure safety
-                if qpos_pool.size(0) > 0:
-                    inv_idx_clamped = inv_idx.clamp(0, qpos_pool.size(0) - 1)
+                pool_size = (h_pool.size(0) if used_compact_feat else qpos_pool.size(0))
+                if pool_size > 0:
+                    inv_idx_clamped = inv_idx.clamp(0, pool_size - 1)
                     if torch.any(inv_idx_clamped != inv_idx):
                         diff = int((inv_idx_clamped != inv_idx).sum().item())
-                        print(f"[WARN][PPO] clamped {diff} inv_idx entries to [0,{qpos_pool.size(0)-1}] in remap")
-                    qpos = qpos_pool[inv_idx_clamped]
-                    image = image_pool[inv_idx_clamped]
+                        print(f"[WARN][PPO] clamped {diff} inv_idx entries to [0,{pool_size-1}] in remap")
+                    if used_compact_feat:
+                        h = h_pool[inv_idx_clamped]
+                    else:
+                        qpos = qpos_pool[inv_idx_clamped]
+                        image = image_pool[inv_idx_clamped]
                 else:
                     # Degenerate: no chunks available; create zero-sized to avoid crash
-                    print("[ERR][PPO] qpos_pool empty after remap; creating empty batch")
-                    qpos = qpos_chunks[:0]
-                    image = image_chunks[:0]
+                    print("[ERR][PPO] pool empty after remap; creating empty batch")
+                    if used_compact_feat:
+                        h = h_chunks[:0]
+                    else:
+                        qpos = qpos_chunks[:0]
+                        image = image_chunks[:0]
             else:
                 # Direct mapping branch: still guard against accidental OOB with clamp
                 if num_chunks > 0:
@@ -290,15 +318,22 @@ class TrainerGAIL:
                     if torch.any(cid_clamped != chunk_id):
                         diff = int((cid_clamped != chunk_id).sum().item())
                         print(f"[WARN][PPO] clamped {diff} chunk_id entries to [0,{num_chunks-1}] in direct mapping")
-                    qpos = qpos_chunks[cid_clamped]
-                    image = image_chunks[cid_clamped]
+                    if used_compact_feat:
+                        h = h_chunks[cid_clamped]
+                    else:
+                        qpos = qpos_chunks[cid_clamped]
+                        image = image_chunks[cid_clamped]
                 else:
-                    print("[ERR][PPO] num_chunks == 0; creating empty batch for qpos/image")
-                    qpos = qpos_chunks[:0]
-                    image = image_chunks[:0]
+                    print("[ERR][PPO] num_chunks == 0; creating empty batch for features/obs")
+                    if used_compact_feat:
+                        h = h_chunks[:0]
+                    else:
+                        qpos = qpos_chunks[:0]
+                        image = image_chunks[:0]
             # Remove singleton time/query dims on qpos; keep camera dim on image even if K==1
-            if qpos.dim() >= 2 and qpos.size(1) == 1:
-                qpos = qpos.squeeze(1)
+            if not used_compact_feat: # TODO: check this line if dim mismatch error
+                if qpos.dim() >= 2 and qpos.size(1) == 1:
+                    qpos = qpos.squeeze(1)
         else:
             qpos = batch['obs']['qpos'].to(self.device).detach()
             image = batch['obs']['image'].to(self.device).detach()
@@ -373,9 +408,39 @@ class TrainerGAIL:
         clip_eps = float(self.cfg.get('clip_eps', clip_eps))
         kl_coef = float(self.cfg.get('kl_coef', 0.0))
         cont_dim = None
+        # Freeze visual encoder/backbones while consuming this rollout to keep h stable
+        frozen_params = []
+        try:
+            if hasattr(self.policy, 'model') and getattr(self.policy.model, 'backbones', None) is not None:
+                for p in self.policy.model.backbones.parameters():
+                    frozen_params.append((p, p.requires_grad))
+                    p.requires_grad = False
+        except Exception:
+            pass
+
         for epoch in range(max(1, ppo_epochs)):
-            # Forward policy from start obs, then select per-sample query index when chunk-aware
-            out = self.policy.forward(qpos, image, out_mode='dist')
+            # Forward heads from cached features when available, else run full forward
+            if has_chunk and used_compact_feat:
+                # Compute heads directly from h
+                h = h  # [N, Tq, H]
+                cont_mu = self.policy.cont_mu_head(h)
+                cont_log_std = self.policy.cont_log_std_head(h).clamp(min=-2.5, max=-0.3)
+                bin_logits = None
+                if getattr(self.policy, 'bin_dim', 0) > 0:
+                    bin_logits = self.policy.bin_logits_head(h)
+                value_full = self.policy.value_head(h).squeeze(-1)  # [N, Tq]
+                # Build lightweight dist-like containers
+                class _Cont:
+                    pass
+                cont_obj = _Cont()
+                cont_obj.mu = cont_mu
+                cont_obj.log_std = cont_log_std
+                bin_obj = None
+                if bin_logits is not None:
+                    bin_obj = BernoulliMulti(logits=bin_logits)
+                out = {'cont_dist': cont_obj, 'bin_dist': bin_obj, 'value': value_full}
+            else:
+                out = self.policy.forward(qpos, image, out_mode='dist')
             if has_chunk:
                 # Extract distributions and select the appropriate query per sample
                 cont_dist = out['cont_dist']
@@ -449,7 +514,6 @@ class TrainerGAIL:
 
                 # Binary params
                 if bin_dist is not None:
-                    from distributions import BernoulliMulti
                     if hasattr(bin_dist, 'logits') and bin_dist.logits is not None and bin_dist.logits.dim() >= 3 and bin_dist.logits.size(1) > 1:
                         logits_sel = select_query(bin_dist.logits, chunk_pos)
                         bin_sel = BernoulliMulti(logits=logits_sel)
@@ -563,6 +627,7 @@ class TrainerGAIL:
                 mask_exp = mask_exp.to(self.device)
 
                 out_exp = self.policy.forward(qpos_exp, image_exp, out_mode='dist')
+                # Expert actions are in unsquashed space.
                 logp_exp, _ = self.compute_logp_and_entropy(out_exp, a_cont_exp, a_bin_exp, mask_exp)
                 # Negative log-likelihood averaged over valid steps
                 L_bc = -(logp_exp.sum() / mask_exp.sum().clamp_min(1.0))
@@ -662,9 +727,19 @@ class TrainerGAIL:
                 trunk_requires.append(p.requires_grad)
                 p.requires_grad = False
             try:
-                # Recompute value to ensure correct graph under current requires_grad settings
-                out_val = self.policy.forward(qpos, image, out_mode='dist')
-                v_val = out_val['value']
+                # Recompute value under current requires_grad settings
+                if has_chunk and used_compact_feat:
+                    # Build value directly from cached h and select by chunk_pos
+                    v_full = self.policy.value_head(h).squeeze(-1)  # [N, Tq] or [N]
+                    if v_full.dim() == 2 and v_full.size(1) > 1:
+                        # Select per-sample query
+                        pos_idx = chunk_pos.clamp(min=0, max=v_full.size(1) - 1)
+                        v_val = v_full.gather(dim=1, index=pos_idx.view(-1, 1)).squeeze(1)  # [N]
+                    else:
+                        v_val = v_full if v_full.dim() == 2 else v_full.view(-1, 1)
+                else:
+                    out_val = self.policy.forward(qpos, image, out_mode='dist')
+                    v_val = out_val['value']
                 # Align to [B,T] similarly as above
                 if v_val.dim() == 2:
                     if v_val.shape == (B, T):
@@ -706,7 +781,18 @@ class TrainerGAIL:
             with torch.no_grad():
                 valid = mask > 0
                 if valid.any():
-                    out_now = self.policy.forward(qpos, image, out_mode='dist')
+                    if has_chunk and used_compact_feat:
+                        # Rebuild heads from cached h to avoid re-encoding images
+                        cont_mu_now = self.policy.cont_mu_head(h)
+                        cont_log_std_now = self.policy.cont_log_std_head(h).clamp(min=-2.5, max=-0.3)
+                        bin_logits_now = self.policy.bin_logits_head(h) if getattr(self.policy, 'bin_dim', 0) > 0 else None
+                        class _ContNow: pass
+                        cont_obj_now = _ContNow(); cont_obj_now.mu = cont_mu_now; cont_obj_now.log_std = cont_log_std_now
+                        bin_obj_now = BernoulliMulti(logits=bin_logits_now) if bin_logits_now is not None else None
+                        value_now = self.policy.value_head(h).squeeze(-1)
+                        out_now = {'cont_dist': cont_obj_now, 'bin_dist': bin_obj_now, 'value': value_now}
+                    else:
+                        out_now = self.policy.forward(qpos, image, out_mode='dist')
                     logp_now, _ = self.compute_logp_and_entropy(out_now, a_cont, a_bin, mask)
                     approx_kl = (logp_old[valid] - logp_now[valid]).mean().item()
                     # Compute total action dimensionality for per-dim thresholding
@@ -741,10 +827,27 @@ class TrainerGAIL:
                             kl_coef = kl_coef * float(self.cfg.get('kl_adapt_down', 0.66))
                         self.cfg['kl_coef'] = float(kl_coef)
         self.policy.eval()
+        # Restore frozen flags on visual encoder/backbones
+        try:
+            for p, was_reqgrad in frozen_params:
+                p.requires_grad = was_reqgrad
+        except Exception:
+            pass
 
         # Debug stats after PPO update: compare new logp vs frozen logp_old
         with torch.no_grad():
-            out_post = self.policy.forward(qpos, image, out_mode='dist')
+            if has_chunk and used_compact_feat:
+                # Build from cached h for post-update diagnostics
+                cont_mu_post = self.policy.cont_mu_head(h)
+                cont_log_std_post = self.policy.cont_log_std_head(h).clamp(min=-2.5, max=-0.3)
+                bin_logits_post = self.policy.bin_logits_head(h) if getattr(self.policy, 'bin_dim', 0) > 0 else None
+                class _ContPost: pass
+                cont_obj_post = _ContPost(); cont_obj_post.mu = cont_mu_post; cont_obj_post.log_std = cont_log_std_post
+                bin_obj_post = BernoulliMulti(logits=bin_logits_post) if bin_logits_post is not None else None
+                value_post = self.policy.value_head(h).squeeze(-1)
+                out_post = {'cont_dist': cont_obj_post, 'bin_dist': bin_obj_post, 'value': value_post}
+            else:
+                out_post = self.policy.forward(qpos, image, out_mode='dist')
             logp_post, _ = self.compute_logp_and_entropy(out_post, a_cont, a_bin, mask)
             valid = mask > 0
             num_valid = valid.sum().item()

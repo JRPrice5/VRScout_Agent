@@ -308,11 +308,18 @@ def main():
                 elif torch.is_tensor(v):
                     batch[k] = v.to(device)
 
-            # Gather start obs per chunk, then map back to per-step order
+            # Gather per-chunk representation, then map back to per-step order
             chunk_id = batch['chunk_id'].view(-1).long()
-            qpos_chunks = batch['chunk_obs']['qpos']  # [N_chunks, Dq]
-            image_chunks = batch['chunk_obs']['image']  # [N_chunks, K, C, H, W]
-            num_chunks = qpos_chunks.size(0)
+            use_feat = ('chunk_feat' in batch)
+            if use_feat:
+                h_chunks = batch['chunk_feat']['h']  # [N_chunks, Tq, H] (likely fp16 CPU moved above)
+                # ensure dtype/device
+                h_chunks = h_chunks.to(device=device, dtype=torch.float32)
+                num_chunks = h_chunks.size(0)
+            else:
+                qpos_chunks = batch['chunk_obs']['qpos']  # [N_chunks, Dq]
+                image_chunks = batch['chunk_obs']['image']  # [N_chunks, K, C, H, W]
+                num_chunks = qpos_chunks.size(0)
             # Prefer using chunk_id directly as the inverse mapping into chunk_obs rows when in-range
             if chunk_id.numel() > 0:
                 cid_min = int(chunk_id.min().item())
@@ -320,9 +327,12 @@ def main():
             else:
                 cid_min = 0; cid_max = -1
             if cid_min >= 0 and cid_max < num_chunks:
-                # Valid direct mapping: rows in chunk_obs are indexed by chunk_id
-                qpos_pol = qpos_chunks
-                image_pol = image_chunks
+                # Valid direct mapping: rows in chunk representation are indexed by chunk_id
+                if use_feat:
+                    h_unique = h_chunks  # [C, Tq, H]
+                else:
+                    qpos_pol = qpos_chunks
+                    image_pol = image_chunks
                 inv_idx = chunk_id
             else:
                 # Fallback: build a compact reindex over appearing IDs to avoid OOB
@@ -330,23 +340,27 @@ def main():
                 cids_unique, inv_idx = torch.unique(chunk_id, sorted=False, return_inverse=True)
                 # Clamp unique ids to available rows as a last resort safety net
                 safe_rows = torch.arange(min(cids_unique.numel(), num_chunks), device=chunk_id.device)
-                qpos_pol = qpos_chunks.index_select(0, safe_rows)
-                image_pol = image_chunks.index_select(0, safe_rows)
+                if use_feat:
+                    h_unique = h_chunks.index_select(0, safe_rows)
+                else:
+                    qpos_pol = qpos_chunks.index_select(0, safe_rows)
+                    image_pol = image_chunks.index_select(0, safe_rows)
             a_cont_pol = batch['a_cont']
             a_bin_pol = batch.get('a_bin', None)
             mask_pol = batch['mask']
-            # Policy forward to get h and value consistency (no grad during rollout)
-            # Debug shapes for policy batch
-            print('[DBG][POL] qpos_pol', tuple(qpos_pol.shape))
-            print('[DBG][POL] image_pol', tuple(image_pol.shape))
-            try:
-                print('[DBG][POL] cams', len(getattr(policy.model, 'camera_names', [])))
-            except Exception:
-                pass
-            with torch.no_grad():
-                out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
-                h_unique = out_pol['h']  # [B_unique, Q, H]
-                value_pol = out_pol['value']  # can be used to compare with stored
+            # Obtain hidden features for policy/discriminator path
+            if not use_feat:
+                # Debug shapes for policy batch
+                print('[DBG][POL] qpos_pol', tuple(qpos_pol.shape))
+                print('[DBG][POL] image_pol', tuple(image_pol.shape))
+                try:
+                    print('[DBG][POL] cams', len(getattr(policy.model, 'camera_names', [])))
+                except Exception:
+                    pass
+                with torch.no_grad():
+                    out_pol = policy.forward(qpos_pol, image_pol, out_mode='dist')
+                    h_unique = out_pol['h']  # [B_unique, Q, H]
+                    value_pol = out_pol['value']  # can be used to compare with stored
             # Map hidden back to per-step order with diagnostics
             try:
                 print('[DBG][POL] pre index h_unique[inv_idx]',
