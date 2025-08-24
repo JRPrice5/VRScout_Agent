@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import torchvision.transforms as transforms
+from torch.cuda.amp import autocast
+from typing import Optional
 
 from detr.main import build_ACT_model_and_optimizer, build_CNNMLP_model_and_optimizer
 from action_utils import compute_mixed_loss, split_actions_by_type, ACTION_INDICES
@@ -93,8 +95,9 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             raise ValueError(f"Unsupported image dims {image.dim()}, expected 4D or 5D tensor")
         qpos = qpos.float()
 
-        # Compute hidden states h using the backbone/transformer as-is
-        h = self.encode_to_hidden(qpos, image, env_state)  # [B, T, H]
+        # Compute hidden states h using the backbone/transformer
+        # forward() already normalized image, so skip extra normalization inside encoder
+        h = self.encode_to_hidden(qpos, image, env_state, do_normalize=False)  # [B, T, H]
         try:
             print('[DBG][FWD] h', tuple(h.shape))
         except Exception:
@@ -105,7 +108,9 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             print('[DBG][FWD] pre cont_mu_head')
         except Exception:
             pass
-        cont_mu = self.cont_mu_head(h)
+        # Run heads in FP32 for numerical stability
+        h_f32 = h.float()
+        cont_mu = self.cont_mu_head(h_f32)
         try:
             print('[DBG][FWD] post cont_mu_head')
         except Exception:
@@ -115,7 +120,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             print('[DBG][FWD] pre cont_log_std_head')
         except Exception:
             pass
-        cont_log_std = self.cont_log_std_head(h).clamp(min=-2.5, max=-0.3)
+        cont_log_std = self.cont_log_std_head(h_f32).clamp(min=-2.5, max=-0.3)
         try:
             print('[DBG][FWD] post cont_log_std_head')
         except Exception:
@@ -126,7 +131,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                 print('[DBG][FWD] pre bin_logits_head')
             except Exception:
                 pass
-            bin_logits = self.bin_logits_head(h)
+            bin_logits = self.bin_logits_head(h_f32)
             try:
                 print('[DBG][FWD] post bin_logits_head')
             except Exception:
@@ -135,7 +140,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             print('[DBG][FWD] pre value_head')
         except Exception:
             pass
-        value = self.value_head(h).squeeze(-1)
+        value = self.value_head(h_f32).squeeze(-1)
         try:
             print('[DBG][FWD] post value_head')
         except Exception:
@@ -144,7 +149,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             print('[DBG][FWD] pre action_head')
         except Exception:
             pass
-        a_hat = self.model.action_head(h)  # [B, Tq, A]
+        a_hat = self.model.action_head(h)  # [B, Tq, A]  (keep model's native dtype for decoder head)
         try:
             print('[DBG][FWD] post action_head')
         except Exception:
@@ -178,66 +183,131 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                 'value': value,
             }
 
-    def encode_to_hidden(self, qpos, image, env_state=None):
+    def encode_to_hidden(self, qpos, image, env_state=None, do_normalize: bool = True, microbatch: Optional[int] = None):
         """
         Expose per-step hidden features h_t without refactoring the backbone.
+        - Optionally normalize images (ImageNet stats) if do_normalize=True.
+        - Optionally process in microbatches over the batch dimension to reduce peak VRAM.
         Returns h of shape [B, T, H].
         """
         self.model.eval()  # feature extraction is inference-like
+        device = next(self.parameters()).device
+        B = qpos.shape[0]
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+        mb = int(microbatch) if (microbatch is not None and microbatch > 0) else B
+        outs = []
         with torch.no_grad():
-            bs, _ = qpos.shape
-            if getattr(self.model, 'backbones', None) is not None:
-                all_cam_features, all_cam_pos = [], []
-                # Strict check: batch camera count must match model expectation
-                K = image.shape[1]
-                N = len(self.model.camera_names)
-                assert K == N, f"Camera count mismatch: batch has K={K} images, model expects N={N} (camera_names). Align data or config."
-                for cam_id, _ in enumerate(self.model.camera_names):
-                    x = image[:, cam_id].contiguous().float()
-                    try:
-                        print(f"[DBG][ENC] cam {cam_id} x {tuple(x.shape)} dtype={x.dtype} contiguous={x.is_contiguous()}")
-                    except Exception:
-                        pass
-                    features, pos = self.model.backbones[0](x)  # HARDCODED like model.forward
-                    features = features[-1]
-                    pos = pos[-1]
-                    all_cam_features.append(self.model.input_proj(features))
-                    all_cam_pos.append(pos)
-                proprio_input = self.model.input_proj_robot_state(qpos)
-                src = torch.cat(all_cam_features, axis=3)
-                pos = torch.cat(all_cam_pos, axis=3)
-                # Create zero latent and project to match model.forward
-                latent = torch.zeros((bs, getattr(self.model, 'latent_dim', 32)), device=qpos.device, dtype=qpos.dtype)
-                latent_input = self.model.latent_out_proj(latent) if hasattr(self.model, 'latent_out_proj') else None
-                try:
-                    print("[DBG][ENC] src", tuple(src.shape), "pos", tuple(pos.shape),
-                          "qe", tuple(self.model.query_embed.weight.shape),
-                          "add_pos", tuple(self.model.additional_pos_embed.weight.shape),
-                          "lat", tuple(latent_input.shape), "prop", tuple(proprio_input.shape))
-                except Exception:
-                    pass
-                try:
-                    print("[DBG][ENC] pre-transformer")
-                except Exception:
-                    pass
-                hs = self.model.transformer(
-                    src, None, self.model.query_embed.weight, pos,
-                    latent_input,
-                    proprio_input,
-                    self.model.additional_pos_embed.weight
-                )[0]
-                try:
-                    print("[DBG][ENC] post-transformer")
-                except Exception:
-                    pass
-            else:
-                # Fallback to state-only path
-                qpos_proj = self.model.input_proj_robot_state(qpos)
-                env_proj = self.model.input_proj_env_state(env_state)
-                transformer_input = torch.cat([qpos_proj, env_proj], axis=1)
-                hs = self.model.transformer(transformer_input, None, self.model.query_embed.weight, self.model.pos.weight)[0]
-        # hs is already [B, T, H] because transformer(...)[0] selects first decoder layer output with shape [B,T,H]
-        return hs  # [B, T, H]
+            for s in range(0, B, mb):
+                e = min(B, s + mb)
+                q_mb = qpos[s:e]
+                img_mb = image[s:e]
+                # Move to device lazily per chunk
+                q_mb = q_mb.to(device, non_blocking=True).float()
+                # Support 5D [B,K,C,H,W] and 4D [B,C,H,W]
+                if img_mb.dim() == 5:
+                    Bm, K, C, H, W = img_mb.shape
+                    img_flat = img_mb.view(Bm * K, C, H, W).contiguous().to(device, non_blocking=True).float()
+                    if do_normalize:
+                        img_flat = normalize(img_flat)
+                    img_mb = img_flat.view(Bm, K, C, H, W)
+                elif img_mb.dim() == 4:
+                    img_mb = img_mb.contiguous().to(device, non_blocking=True).float()
+                    if do_normalize:
+                        img_mb = normalize(img_mb)
+                else:
+                    raise ValueError(f"Unsupported image dims {img_mb.dim()}, expected 4D or 5D tensor")
+
+                if getattr(self.model, 'backbones', None) is not None:
+                    all_cam_features, all_cam_pos = [], []
+                    # Strict check: batch camera count must match model expectation
+                    K = img_mb.shape[1]
+                    N = len(self.model.camera_names)
+                    assert K == N, f"Camera count mismatch: batch has K={K} images, model expects N={N} (camera_names). Align data or config."
+                    with autocast(enabled=True):
+                        for cam_id, _ in enumerate(self.model.camera_names):
+                            x = img_mb[:, cam_id].contiguous()
+                            try:
+                                print(f"[DBG][ENC] cam {cam_id} x {tuple(x.shape)} dtype={x.dtype} contiguous={x.is_contiguous()}")
+                            except Exception:
+                                pass
+                            features, pos = self.model.backbones[0](x)  # HARDCODED like model.forward
+                            features = features[-1]
+                            pos = pos[-1]
+                            all_cam_features.append(self.model.input_proj(features))
+                            all_cam_pos.append(pos)
+                        proprio_input = self.model.input_proj_robot_state(q_mb)
+                        src = torch.cat(all_cam_features, axis=3)
+                        pos = torch.cat(all_cam_pos, axis=3)
+                        # Create zero latent and project to match model.forward
+                        latent = torch.zeros((q_mb.size(0), getattr(self.model, 'latent_dim', 32)), device=q_mb.device, dtype=q_mb.dtype)
+                        latent_input = self.model.latent_out_proj(latent) if hasattr(self.model, 'latent_out_proj') else None
+                        try:
+                            print("[DBG][ENC] src", tuple(src.shape), "pos", tuple(pos.shape),
+                                  "qe", tuple(self.model.query_embed.weight.shape),
+                                  "add_pos", tuple(self.model.additional_pos_embed.weight.shape),
+                                  "lat", tuple(latent_input.shape), "prop", tuple(proprio_input.shape))
+                        except Exception:
+                            pass
+                        try:
+                            print("[DBG][ENC] pre-transformer")
+                        except Exception:
+                            pass
+                        hs_mb = self.model.transformer(
+                            src, None, self.model.query_embed.weight, pos,
+                            latent_input,
+                            proprio_input,
+                            self.model.additional_pos_embed.weight
+                        )[0]
+                        try:
+                            print("[DBG][ENC] post-transformer")
+                        except Exception:
+                            pass
+                else:
+                    # Fallback to state-only path
+                    with autocast(enabled=True):
+                        qpos_proj = self.model.input_proj_robot_state(q_mb)
+                        env_proj = self.model.input_proj_env_state(env_state)
+                        transformer_input = torch.cat([qpos_proj, env_proj], axis=1)
+                        hs_mb = self.model.transformer(transformer_input, None, self.model.query_embed.weight, self.model.pos.weight)[0]
+
+                outs.append(hs_mb)
+        hs = torch.cat(outs, dim=0) if len(outs) > 1 else outs[0]
+        # hs is [B, T, H]
+        return hs
+
+    def heads_from_h(self, h, out_mode: str = "dist"):
+        """
+        Run only stochastic/action/value heads from precomputed hidden h.
+        h: [B, T, H]
+        """
+        h_f32 = h.float()
+        cont_mu = self.cont_mu_head(h_f32)
+        cont_log_std = self.cont_log_std_head(h_f32).clamp(min=-2.5, max=-0.3)
+        bin_logits = self.bin_logits_head(h_f32) if self.bin_dim > 0 else None
+        value = self.value_head(h_f32).squeeze(-1)
+        a_hat = self.model.action_head(h)  # keep model native dtype
+
+        if out_mode in ("dist", "distribution"):
+            cont_dist = TanhDiagNormal(cont_mu, cont_log_std, min_log_std=-2.5, max_log_std=-0.3)
+            bin_dist = BernoulliMulti(bin_logits) if bin_logits is not None else None
+            return {
+                'a_hat': a_hat,
+                'h': h,
+                'cont_dist': cont_dist,
+                'bin_dist': bin_dist,
+                'value': value,
+            }
+        else:
+            cont_mean = cont_mu
+            bin_prob = torch.sigmoid(bin_logits) if bin_logits is not None else None
+            return {
+                'a_hat': a_hat,
+                'h': h,
+                'cont_mean': cont_mean,
+                'bin_prob': bin_prob,
+                'value': value,
+            }
 
     def configure_optimizers(self):
         return self.optimizer

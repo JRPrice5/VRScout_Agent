@@ -225,6 +225,7 @@ def main():
                                   'grad_clip': 1.0,
                                   'ppo_epochs': args.ppo_epochs,
                                   'align_mu_weight': args.align_mu_weight,
+                                  'expert_microbatch': 64,
                               })
 
         # Optionally resume discriminator/optimizers from the latest GAIL ckpt
@@ -395,7 +396,8 @@ def main():
 
             # Fetch an expert batch
             image_exp, qpos_exp, action_exp, is_pad_exp = next(expert_iter)
-            image_exp = image_exp.to(device).float()
+            # Keep images on CPU; encode_to_hidden() will handle device/microbatch and normalization
+            # image_exp = image_exp.to(device).float()
             qpos_exp = qpos_exp.to(device).float()
             action_exp = action_exp.to(device).float()
             is_pad_exp = is_pad_exp.to(device)

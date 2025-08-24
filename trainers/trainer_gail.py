@@ -240,8 +240,18 @@ class TrainerGAIL:
         value_params = list(self.policy.value_head.parameters())
         policy_params = [p for p in self.policy.parameters() if all(p is not vp for vp in value_params)]
         total_loss = 0.0
+        # Precompute hidden features once without grad (and with internal AMP/microbatching)
+        with torch.no_grad():
+            h_exp = self.policy.encode_to_hidden(
+                qpos_exp, image_exp, do_normalize=True,
+                microbatch=int(self.cfg.get('expert_microbatch', 0)) or None
+            )  # [B, Tq, H]
+            # Use first query dim if present for BC over a single-step mask
+            if h_exp.dim() == 3 and h_exp.size(1) > 1 and mask_exp.shape[1] == 1:
+                h_exp = h_exp[:, :1, :]
         for _ in range(iters):
-            out = self.policy.forward(qpos_exp, image_exp, out_mode='dist')
+            # Run only heads with grad
+            out = self.policy.heads_from_h(h_exp, out_mode='dist')
             # Expert actions are in unsquashed space.
             logp_exp, _ = self.compute_logp_and_entropy(out, a_cont_exp, a_bin_exp, mask_exp)
             # Negative log-likelihood averaged over valid steps
@@ -621,12 +631,20 @@ class TrainerGAIL:
             if bc_data is not None and bc_weight > 0.0:
                 qpos_exp, image_exp, a_cont_exp, a_bin_exp, mask_exp = bc_data
                 qpos_exp = qpos_exp.to(self.device)
-                image_exp = image_exp.to(self.device)
+                # Keep expert images on CPU; encode_to_hidden will handle device/microbatch
                 a_cont_exp = a_cont_exp.to(self.device)
                 a_bin_exp = a_bin_exp.to(self.device) if a_bin_exp is not None else None
                 mask_exp = mask_exp.to(self.device)
-
-                out_exp = self.policy.forward(qpos_exp, image_exp, out_mode='dist')
+                # Precompute hidden with no grad (internal AMP/microbatch)
+                with torch.no_grad():
+                    h_exp = self.policy.encode_to_hidden(
+                        qpos_exp, image_exp, do_normalize=True,
+                        microbatch=int(self.cfg.get('expert_microbatch', 0)) or None
+                    )
+                    if h_exp.dim() == 3 and h_exp.size(1) > 1 and mask_exp.shape[1] == 1:
+                        h_exp = h_exp[:, :1, :]
+                # Run heads with grad for BC anchor
+                out_exp = self.policy.heads_from_h(h_exp, out_mode='dist')
                 # Expert actions are in unsquashed space.
                 logp_exp, _ = self.compute_logp_and_entropy(out_exp, a_cont_exp, a_bin_exp, mask_exp)
                 # Negative log-likelihood averaged over valid steps
