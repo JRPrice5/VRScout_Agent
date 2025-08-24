@@ -381,8 +381,17 @@ def main():
                 except Exception:
                     diff = -1
                 print(f"[WARN][POL] clamped {diff} indices for h_unique gather (max allowed {h_unique.shape[0]-1})")
-            h_pol = h_unique[inv_idx_clamped]
-            print('[DBG][POL] h_unique', tuple(h_unique.shape), '-> h_pol', tuple(h_pol.shape))
+            # Advanced indexing to avoid materializing [B, Tq, H]
+            pos = batch['chunk_pos'].view(-1).long()  # per-step query indices
+            Tq = h_unique.size(1)
+            if Tq <= 0:
+                raise RuntimeError(f"Invalid Tq={Tq} for h_unique with shape {tuple(h_unique.shape)}")
+            pos_clamped = pos.clamp(min=0, max=Tq - 1)
+            if torch.any(pos != pos_clamped):
+                print(f"[WARN] clamped chunk_pos: max(pos)={int(pos.max().item())} Tq={Tq}")
+            h_step = h_unique[inv_idx_clamped, pos_clamped]  # [B, H]
+            h_pol = h_step.unsqueeze(1)  # [B,1,H]
+            print('[DBG][POL] h_unique', tuple(h_unique.shape), '-> h_pol (indexed)', tuple(h_pol.shape), 'Tq', Tq)
 
             # Fetch an expert batch
             image_exp, qpos_exp, action_exp, is_pad_exp = next(expert_iter)
@@ -443,18 +452,9 @@ def main():
             except Exception as e:
                 print(f"[CHK][POL] sampling diagnostics failed: {e}")
 
-            # Ensure policy data has a temporal dimension of 1 aligned to this step's query via chunk_pos
+            # Ensure policy data is ready: h_pol is already [B,1,H] via advanced indexing above
             B_pol = h_pol.shape[0]
-            pos = batch['chunk_pos'].view(-1).long()  # per-step query indices
-            # Clamp to valid range to avoid any OOB when Tq varies across configs
-            Tq = h_pol.size(1)
-            if Tq <= 0:
-                raise RuntimeError(f"Invalid Tq={Tq} for h_pol with shape {tuple(h_pol.shape)}")
-            pos_clamped = pos.clamp(min=0, max=Tq - 1)
-            if torch.any(pos != pos_clamped):
-                print(f"[WARN] clamped chunk_pos: max(pos)={int(pos.max().item())} Tq={Tq}")
-            h_pol = h_pol.gather(dim=1, index=pos_clamped.view(-1, 1, 1).expand(-1, 1, h_pol.size(2)))  # [B,1,H]
-            print('[DBG][POL] h_pol (gathered by chunk_pos)', tuple(h_pol.shape), 'max_pos', int(pos_clamped.max().item()), 'Tq', Tq)
+            print('[DBG][POL] h_pol (pre-D, already indexed)', tuple(h_pol.shape))
 
             # To match batch sizes, sample from the larger policy batch
             if B_pol > B_exp:
