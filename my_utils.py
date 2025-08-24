@@ -334,7 +334,7 @@ class StepDataset(torch.utils.data.Dataset):
 
 
 def load_expert_step_loader(dataset_dir, num_episodes, camera_names, batch_size,
-                            num_workers=None, prefetch_factor=4, shuffle=True):
+                            num_workers=None, prefetch_factor=2, shuffle=True):
     """Create a DataLoader over per-step expert samples for GAIL.
 
     - Allows large batch sizes (e.g., 256/512/1024) since sampling is over all timesteps.
@@ -350,7 +350,7 @@ def load_expert_step_loader(dataset_dir, num_episodes, camera_names, batch_size,
 
     # Sensible defaults for workers
     if num_workers is None:
-        num_workers = min(4, os.cpu_count()) if os.cpu_count() is not None else 2
+        num_workers = min(1, os.cpu_count()) if os.cpu_count() is not None else 1
 
     print(f"Expert Step DataLoader config: batch_size={batch_size}, num_workers={num_workers}, prefetch_factor={prefetch_factor}, shuffle={shuffle}")
 
