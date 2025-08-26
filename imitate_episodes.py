@@ -115,7 +115,7 @@ def main(args):
         batch_size_train,
         batch_size_val,
         policy_config['num_queries'],
-        dataset_type='step', # use StepDataset for training
+        dataset_type='episodic', # use StepDataset for training
         val_dataset_type='episodic', # use EpisodicDataset for validation
         tail_clip=150, # HARD CODED: exclude the last 150 timesteps of each episode in both datasets
     )
@@ -440,15 +440,15 @@ def train_bc(train_dataloader, val_dataloader, config):
         optimizer.zero_grad()
         current_epoch_train = []
         # Track sample visitation order using the DataLoader's sampler permutation
-        try:
-            train_perm = list(iter(train_dataloader.sampler))
-        except Exception:
-            train_perm = None
-        if train_perm is not None:
-            # Basic sanity: expect permutation covering full dataset once
-            unique_count = len(set(train_perm))
-            expected = len(train_dataloader.dataset)
-            print(f"Train sampler order: {unique_count}/{expected} unique indices this epoch")
+        # try:
+        #     train_perm = list(iter(train_dataloader.sampler))
+        # except Exception:
+        #     train_perm = None
+        # if train_perm is not None:
+        #     # Basic sanity: expect permutation covering full dataset once
+        #     unique_count = len(set(train_perm))
+        #     expected = len(train_dataloader.dataset)
+        #     print(f"Train sampler order: {unique_count}/{expected} unique indices this epoch")
         for batch_idx, data in enumerate(train_dataloader):
             forward_dict = forward_pass(data, policy)
             # backward
@@ -466,11 +466,11 @@ def train_bc(train_dataloader, val_dataloader, config):
         for k, v in epoch_summary.items():
             summary_string += f'{k}: {v.item():.3f} '
         print(summary_string)
-        if train_perm is not None and unique_count == expected:
-            # Keep minimal log of visitation (first and last 5 indices)
-            head = train_perm[:5]
-            tail = train_perm[-5:]
-            print(f"Visited sample indices (head): {head} ... (tail): {tail}")
+        # if train_perm is not None and unique_count == expected:
+        #     # Keep minimal log of visitation (first and last 5 indices)
+        #     head = train_perm[:5]
+        #     tail = train_perm[-5:]
+        #     print(f"Visited sample indices (head): {head} ... (tail): {tail}")
 
         # Save checkpoint: every epoch when training with StepDataset; otherwise every 500 epochs
         if isinstance(train_dataloader.dataset, StepDataset) or (epoch % 500 == 0):
