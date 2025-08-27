@@ -23,6 +23,8 @@ import pickle
 from PIL import Image
 import io
 import base64
+from torch import amp
+from contextlib import nullcontext
 
 # Add the current directory to path to import ACT modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -143,6 +145,18 @@ class UnityVRInterface:
         self.socket = None
         self.client_socket = None
         self.running = False
+        
+        # Enable fast math/backends for better inference throughput
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        try:
+            torch.set_float32_matmul_precision('high')
+        except Exception:
+            pass
+        
+        # Flag to use AMP autocast on CUDA
+        self.use_amp = torch.cuda.is_available()
     
     def _load_policy(self):
         """Load the trained policy from checkpoint"""
@@ -198,6 +212,8 @@ class UnityVRInterface:
         policy.load_state_dict(torch.load(ckpt_path), strict=False) # CAUTION : test only
         policy.cuda()
         policy.eval()
+        # Set memory format to channels_last for potential conv speedups
+        policy.to(memory_format=torch.channels_last)
         
         return policy
     
@@ -367,23 +383,28 @@ class UnityVRInterface:
         with torch.inference_mode():
             # Extract and preprocess qpos using shared utility
             qpos_numpy = np.array(state_data['qpos'], dtype=np.float32)
-            qpos = preprocess_qpos(qpos_numpy, self.stats).cuda().unsqueeze(0)
+            qpos = preprocess_qpos(qpos_numpy, self.stats).to(device='cuda', non_blocking=True).unsqueeze(0)
             
             # Process image data
             curr_image = self._process_image_data(state_data)
+            
+            # Define a single AMP context for all policy calls in this function
+            amp_ctx = amp.autocast(device_type='cuda', dtype=torch.float16) if self.use_amp else nullcontext()
             
             # Get action from policy
             if self.policy_class == 'ACT':
                 # Only query the policy when needed based on query_frequency
                 time_index = self.timestep % self.query_frequency
                 if time_index == 0:
-                    all_actions = self.policy(qpos, curr_image)
+                    with amp_ctx:
+                        all_actions = self.policy(qpos, curr_image)
                     self.last_actions = all_actions  # Store for future timesteps
                 else:
                     # Use previously computed actions if not querying on this timestep
                     if self.last_actions is None:
                         # First timestep or in case there's no previous action
-                        all_actions = self.policy(qpos, curr_image)
+                        with amp_ctx:
+                            all_actions = self.policy(qpos, curr_image)
                         self.last_actions = all_actions
                         time_index = 0
                     else:
@@ -457,10 +478,8 @@ class UnityVRInterface:
                                 
                             weights = weights / weights.sum()
                             
-                            # Compute weighted average of past predictions
-                            history_action = torch.zeros_like(current_action)
-                            for action, weight in zip(actions_for_current, weights):
-                                history_action += action * weight
+                            # Compute weighted average of past predictions (vectorized)
+                            history_action = (actions_for_current * weights.unsqueeze(-1)).sum(dim=0)
                             
                             # Blend current action with history using the current_weight parameter
                             raw_action = (self.current_weight * current_action + 
@@ -474,7 +493,8 @@ class UnityVRInterface:
                 else:
                     raw_action = all_actions[:, time_index]
             elif self.policy_class == 'CNNMLP':
-                raw_action = self.policy(qpos, curr_image)
+                with amp_ctx:
+                    raw_action = self.policy(qpos, curr_image)
             
             # Post-process action using shared utility
             raw_action = raw_action.squeeze(0)
@@ -589,6 +609,9 @@ class UnityVRInterface:
         image_data = image_data.to(device='cuda', non_blocking=True)
         image_data = image_data.float()
         image_data.div_(255.0)
+        # Use FP16 for images only when AMP is enabled to reduce bandwidth/compute
+        if getattr(self, 'use_amp', False):
+            image_data = image_data.half()
         
         return image_data
 
