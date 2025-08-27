@@ -553,7 +553,6 @@ class UnityVRInterface:
         # Ensure all images are 3 channel RGB before converting to tensor
         # Check if images are grayscale (1 channel)
         if all_cam_images.ndim == 3 or (all_cam_images.ndim == 4 and all_cam_images.shape[-1] == 1):
-            print("Input is grayscale, converting to RGB")
             # If grayscale, duplicate to 3 channels
             if all_cam_images.ndim == 3:  # No channel dimension
                 all_cam_images = np.repeat(all_cam_images[:, :, :, np.newaxis], 3, axis=-1)
@@ -563,11 +562,11 @@ class UnityVRInterface:
         # Make sure the shape is [batch, height, width, 3]
         # print(f"NumPy image shape: {all_cam_images.shape}")
         
-        # Convert to tensor
-        image_data = torch.from_numpy(all_cam_images).float()
+        # Convert to tensor (uint8) to minimize CPU-side work and copies
+        image_data = torch.from_numpy(all_cam_images)  # uint8 CPU tensor
         
         # Permute to channel-first format expected by PyTorch: [batch, channels, height, width]
-        image_data = image_data.permute(0, 3, 1, 2).contiguous()
+        image_data = image_data.permute(0, 3, 1, 2)  # avoid .contiguous() unless required
         
         # print(f"Final tensor shape (before adding camera dim): {image_data.shape}")
         
@@ -586,10 +585,12 @@ class UnityVRInterface:
         
         # print(f"Final tensor shape (with camera dim): {image_data.shape}")
         
-        # Normalize pixel values to [0,1]
-        image_data = image_data / 255.0
+        # Move to GPU as uint8 (smaller transfer), then convert to float and normalize IN-PLACE on GPU
+        image_data = image_data.to(device='cuda', non_blocking=True)
+        image_data = image_data.float()
+        image_data.div_(255.0)
         
-        return image_data.cuda()
+        return image_data
 
 
 def main():
