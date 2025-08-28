@@ -198,7 +198,15 @@ class UnityVRInterface:
         policy.load_state_dict(torch.load(ckpt_path), strict=False) # CAUTION : test only
         policy.cuda()
         policy.eval()
-        
+
+        # Optionally compile the model for faster inference (PyTorch 2.0+)
+        if hasattr(torch, "compile"):
+            try:
+                policy = torch.compile(policy)
+            except Exception as e:
+                # Fall back gracefully if compile is unsupported on this system
+                print(f"torch.compile failed, continuing without compile: {e}")
+
         return policy
     
     def start_server(self):
