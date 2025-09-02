@@ -70,7 +70,10 @@ class UnityVRInterface:
                  state_change_weight=0.1,
                  base_decay_factor=0.02,
                  min_decay_factor=0.01,
-                 max_decay_factor=0.1):
+                 max_decay_factor=0.1,
+                 window_adjustment_rate=0.1,
+                 weight_smoothing_factor=0.3,
+                 target_window_history_size=5):
         """
         Initialize the interface.
         
@@ -110,6 +113,9 @@ class UnityVRInterface:
             base_decay_factor: Base decay factor for exponential weighting
             min_decay_factor: Minimum decay factor (for large windows)
             max_decay_factor: Maximum decay factor (for small windows)
+            window_adjustment_rate: Rate of gradual window size adjustment (0-1)
+            weight_smoothing_factor: Smoothing factor for historical weighting updates (0-1)
+            target_window_history_size: Number of recent target window sizes to track
             """
         self.host = host
         self.port = port
@@ -148,6 +154,11 @@ class UnityVRInterface:
         self.max_decay_factor = max_decay_factor
         self.action_history_size = action_history_size
         
+        # Gradual adjustment parameters
+        self.window_adjustment_rate = window_adjustment_rate
+        self.weight_smoothing_factor = weight_smoothing_factor
+        self.target_window_history_size = target_window_history_size
+        
         # Load dataset statistics
         stats_path = os.path.join(self.ckpt_dir, f'dataset_stats.pkl')
         with open(stats_path, 'rb') as f:
@@ -182,6 +193,12 @@ class UnityVRInterface:
                 self.recent_actions = torch.zeros([self.action_history_size, self.state_dim]).cuda()
                 self.action_history_index = 0
                 self.previous_qpos = None
+                
+                # Gradual adjustment state tracking
+                self.target_window_size = self.base_window_size  # Target window size from calculations
+                self.target_window_history = [self.base_window_size] * self.target_window_history_size
+                self.smoothed_decay_factor = self.base_decay_factor  # Smoothed decay factor
+                self.decay_factor_history = [self.base_decay_factor] * self.target_window_history_size
         
         # Initialize socket
         self.socket = None
@@ -253,9 +270,9 @@ class UnityVRInterface:
 
         return policy
     
-    def _calculate_dynamic_window_size(self, raw_action, qpos, actions_for_current=None):
+    def _calculate_target_window_size(self, raw_action, qpos, actions_for_current=None):
         """
-        Calculate dynamic window size based on action characteristics with individual factor controls
+        Calculate target window size based on action characteristics with individual factor controls
         
         Args:
             raw_action: Current raw action tensor
@@ -263,7 +280,7 @@ class UnityVRInterface:
             actions_for_current: Past predictions for current timestep (optional)
             
         Returns:
-            int: New window size between min_window_size and max_window_size
+            int: Target window size between min_window_size and max_window_size
         """
         if not self.use_dynamic_window:
             return self.base_window_size
@@ -313,14 +330,41 @@ class UnityVRInterface:
             combined_factor = 0.5  # Default to middle ground
         
         # Map combined factor to window size range
-        window_size = int(self.min_window_size + 
-                         combined_factor * (self.max_window_size - self.min_window_size))
+        target_window_size = int(self.min_window_size + 
+                                combined_factor * (self.max_window_size - self.min_window_size))
         
-        return max(self.min_window_size, min(window_size, self.max_window_size))
+        return max(self.min_window_size, min(target_window_size, self.max_window_size))
     
-    def _calculate_dynamic_decay_factor(self, window_size):
+    def _update_gradual_window_size(self, target_window_size):
         """
-        Calculate dynamic decay factor based on window size
+        Apply gradual adjustment to window size with smoothing
+        
+        Args:
+            target_window_size: The target window size calculated from factors
+            
+        Returns:
+            int: Gradually adjusted window size
+        """
+        if not self.use_dynamic_window:
+            return self.base_window_size
+        
+        # Update target window history for smoothing
+        self.target_window_history.pop(0)
+        self.target_window_history.append(target_window_size)
+        
+        # Calculate smoothed target (moving average)
+        smoothed_target = sum(self.target_window_history) / len(self.target_window_history)
+        
+        # Apply gradual adjustment toward smoothed target
+        current_window = float(self.window_size)
+        adjustment = (smoothed_target - current_window) * self.window_adjustment_rate
+        new_window_size = int(round(current_window + adjustment))
+        
+        return max(self.min_window_size, min(new_window_size, self.max_window_size))
+    
+    def _calculate_target_decay_factor(self, window_size):
+        """
+        Calculate target decay factor based on window size
         Smaller windows -> higher decay factor (more focus on recent)
         Larger windows -> lower decay factor (more smoothing)
         """
@@ -331,9 +375,36 @@ class UnityVRInterface:
         window_ratio = (window_size - self.min_window_size) / (self.max_window_size - self.min_window_size)
         
         # Invert the ratio so smaller windows get higher decay factors
-        decay_factor = self.max_decay_factor - (window_ratio * (self.max_decay_factor - self.min_decay_factor))
+        target_decay_factor = self.max_decay_factor - (window_ratio * (self.max_decay_factor - self.min_decay_factor))
         
-        return decay_factor
+        return target_decay_factor
+    
+    def _update_smoothed_decay_factor(self, target_decay_factor):
+        """
+        Apply smoothed historical weighting update to decay factor
+        
+        Args:
+            target_decay_factor: The target decay factor calculated from window size
+            
+        Returns:
+            float: Smoothed decay factor
+        """
+        if not self.use_dynamic_window:
+            return self.base_decay_factor
+        
+        # Update decay factor history for smoothing
+        self.decay_factor_history.pop(0)
+        self.decay_factor_history.append(target_decay_factor)
+        
+        # Calculate smoothed decay factor using exponential moving average
+        # This provides more responsive smoothing than simple moving average
+        smoothed_target = sum(self.decay_factor_history) / len(self.decay_factor_history)
+        
+        # Apply exponential smoothing
+        self.smoothed_decay_factor = (self.weight_smoothing_factor * smoothed_target + 
+                                     (1 - self.weight_smoothing_factor) * self.smoothed_decay_factor)
+        
+        return self.smoothed_decay_factor
     
     def _update_action_history(self, raw_action, qpos):
         """Update the action and state history for dynamic window sizing"""
@@ -600,15 +671,18 @@ class UnityVRInterface:
                             # Apply exponential weighting based on how old the prediction is
                             time_deltas = self.timestep - sorted_timesteps
                             
+                            # Use smoothed decay factor for more stable weighting
+                            current_decay = self.smoothed_decay_factor if self.use_dynamic_window else self.decay_factor
+                            
                             if self.reverse_weighting:
                                 # Put more weight on older actions (reverse the weighting)
                                 # Invert time_deltas so older predictions get higher weights
                                 max_delta = time_deltas.max()
                                 inverted_deltas = max_delta - time_deltas
-                                weights = torch.exp(-self.decay_factor * inverted_deltas.float())
+                                weights = torch.exp(-current_decay * inverted_deltas.float())
                             else:
                                 # Default: put more weight on recent actions
-                                weights = torch.exp(-self.decay_factor * time_deltas.float())
+                                weights = torch.exp(-current_decay * time_deltas.float())
                                 
                             weights = weights / weights.sum()
                             
@@ -636,12 +710,19 @@ class UnityVRInterface:
             # Update action history for dynamic window sizing
             self._update_action_history(raw_action, qpos)
             
-            # Calculate dynamic window size if needed
+            # Calculate dynamic window size and decay factor with gradual adjustment if needed
             if self.temporal_agg and self.use_dynamic_window:
-                self.window_size = self._calculate_dynamic_window_size(raw_action, qpos, actions_for_current)
-                # Update decay factor based on window size
-                self.decay_factor = self._calculate_dynamic_decay_factor(self.window_size)
-                # print(f"Dynamic window size: {self.window_size}, decay factor: {self.decay_factor:.4f}")
+                # Calculate target values based on current conditions
+                target_window_size = self._calculate_target_window_size(raw_action, qpos, actions_for_current)
+                target_decay_factor = self._calculate_target_decay_factor(target_window_size)
+                
+                # Apply gradual adjustments with smoothing
+                self.window_size = self._update_gradual_window_size(target_window_size)
+                self.decay_factor = self._update_smoothed_decay_factor(target_decay_factor)
+                
+                # Optional debug output
+                # print(f"Target window: {target_window_size}, Actual window: {self.window_size}, "
+                #       f"Target decay: {target_decay_factor:.4f}, Smoothed decay: {self.decay_factor:.4f}")
             
             # Post-process action using shared utility
             raw_action = raw_action.squeeze(0)
@@ -801,6 +882,11 @@ def main():
     parser.add_argument('--min_decay_factor', type=float, default=-0.01, help='Minimum decay factor (for large windows)')
     parser.add_argument('--max_decay_factor', type=float, default=0.03, help='Maximum decay factor (for small windows)')
     
+    # Gradual adjustment arguments
+    parser.add_argument('--window_adjustment_rate', type=float, default=0.15, help='Rate of gradual window size adjustment (0-1)')
+    parser.add_argument('--weight_smoothing_factor', type=float, default=0.3, help='Smoothing factor for historical weighting updates (0-1)')
+    parser.add_argument('--target_window_history_size', type=int, default=5, help='Number of recent target window sizes to track')
+    
     args = parser.parse_args()
     
     # If ckpt_dir is not provided, use the directory of ckpt_path
@@ -841,7 +927,10 @@ def main():
         state_change_weight=args.state_change_weight,
         base_decay_factor=args.base_decay_factor,
         min_decay_factor=args.min_decay_factor,
-        max_decay_factor=args.max_decay_factor
+        max_decay_factor=args.max_decay_factor,
+        window_adjustment_rate=args.window_adjustment_rate,
+        weight_smoothing_factor=args.weight_smoothing_factor,
+        target_window_history_size=args.target_window_history_size
     )
     
     interface.start_server()
