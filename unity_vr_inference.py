@@ -641,7 +641,7 @@ class UnityVRInterface:
                 self.window_size = self._calculate_dynamic_window_size(raw_action, qpos, actions_for_current)
                 # Update decay factor based on window size
                 self.decay_factor = self._calculate_dynamic_decay_factor(self.window_size)
-                # print(f"Dynamic window size: {self.window_size}, decay factor: {self.decay_factor:.4f}")
+                print(f"Dynamic window size: {self.window_size}, decay factor: {self.decay_factor:.4f}")
             
             # Post-process action using shared utility
             raw_action = raw_action.squeeze(0)
@@ -790,15 +790,15 @@ def main():
     # Dynamic window sizing arguments
     parser.add_argument('--use_dynamic_window', action='store_true', help='Use dynamic window sizing')
     parser.add_argument('--min_window_size', type=int, default=4, help='Minimum window size for dynamic sizing')
-    parser.add_argument('--max_window_size', type=int, default=16, help='Maximum window size for dynamic sizing')
+    parser.add_argument('--max_window_size', type=int, default=24, help='Maximum window size for dynamic sizing')
     parser.add_argument('--base_window_size', type=int, default=16, help='Base window size when not using dynamic sizing')
-    parser.add_argument('--action_variance_weight', type=float, default=0.3, help='Weight for action variance factor (0 to disable)')
+    parser.add_argument('--action_variance_weight', type=float, default=0.2, help='Weight for action variance factor (0 to disable)')
     parser.add_argument('--action_magnitude_weight', type=float, default=0.0, help='Weight for action magnitude factor (0 to disable)')
-    parser.add_argument('--prediction_consistency_weight', type=float, default=0.7, help='Weight for prediction consistency factor (0 to disable)')
+    parser.add_argument('--prediction_consistency_weight', type=float, default=0.8, help='Weight for prediction consistency factor (0 to disable)')
     parser.add_argument('--state_change_weight', type=float, default=0.0, help='Weight for state change rate factor (0 to disable)')
     parser.add_argument('--base_decay_factor', type=float, default=0.02, help='Base decay factor for exponential weighting')
     parser.add_argument('--min_decay_factor', type=float, default=-0.01, help='Minimum decay factor (for large windows)')
-    parser.add_argument('--max_decay_factor', type=float, default=0.04, help='Maximum decay factor (for small windows)')
+    parser.add_argument('--max_decay_factor', type=float, default=0.03, help='Maximum decay factor (for small windows)')
     
     args = parser.parse_args()
     
