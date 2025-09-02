@@ -63,6 +63,7 @@ class UnityVRInterface:
                  min_window_size=4,
                  max_window_size=32,
                  base_window_size=16,
+                 action_history_size=10,
                  action_variance_weight=0.3,
                  action_magnitude_weight=0.2,
                  prediction_consistency_weight=0.4,
@@ -101,6 +102,7 @@ class UnityVRInterface:
             min_window_size: Minimum window size for dynamic sizing
             max_window_size: Maximum window size for dynamic sizing
             base_window_size: Base window size when not using dynamic sizing
+            action_history_size: Length of recent action buffer for dynamic window computation
             action_variance_weight: Weight for action variance factor (0 to disable)
             action_magnitude_weight: Weight for action magnitude factor (0 to disable)
             prediction_consistency_weight: Weight for prediction consistency factor (0 to disable)
@@ -144,6 +146,7 @@ class UnityVRInterface:
         self.base_decay_factor = base_decay_factor
         self.min_decay_factor = min_decay_factor
         self.max_decay_factor = max_decay_factor
+        self.action_history_size = action_history_size
         
         # Load dataset statistics
         stats_path = os.path.join(self.ckpt_dir, f'dataset_stats.pkl')
@@ -176,8 +179,7 @@ class UnityVRInterface:
             
             # Initialize action history for dynamic window sizing
             if self.use_dynamic_window:
-                self.recent_actions = torch.zeros([10, self.state_dim]).cuda()
-                self.recent_qpos = torch.zeros([10, self.state_dim]).cuda()
+                self.recent_actions = torch.zeros([self.action_history_size, self.state_dim]).cuda()
                 self.action_history_index = 0
                 self.previous_qpos = None
         
@@ -272,7 +274,7 @@ class UnityVRInterface:
         # Factor 1: Action Variance (higher variance -> smaller window for responsiveness)
         if self.action_variance_weight > 0 and self.timestep >= 5:  # Need some history
             # Get valid recent actions
-            valid_actions = self.recent_actions[:min(self.timestep, 10)]
+            valid_actions = self.recent_actions[:min(self.timestep, self.action_history_size)]
             if len(valid_actions) > 1:
                 action_variance = torch.var(valid_actions, dim=0).mean().item()
                 # Normalize variance (assuming typical variance range 0-1)
@@ -338,8 +340,7 @@ class UnityVRInterface:
         if self.temporal_agg and self.use_dynamic_window:
             # Store current action in circular buffer
             self.recent_actions[self.action_history_index] = raw_action.squeeze()
-            self.recent_qpos[self.action_history_index] = qpos.squeeze()
-            self.action_history_index = (self.action_history_index + 1) % 10
+            self.action_history_index = (self.action_history_index + 1) % self.action_history_size
             
             # Update previous qpos for next iteration
             self.previous_qpos = qpos.squeeze().clone()
@@ -547,18 +548,17 @@ class UnityVRInterface:
                     
                     # Find all valid entries in the buffer (timestep >= 0) within current window size
                     valid_indices = (self.prediction_timesteps >= 0)
-                    if self.use_dynamic_window:
-                        # Limit to current dynamic window size by finding the most recent entries
-                        valid_timesteps = self.prediction_timesteps[valid_indices]
-                        if len(valid_timesteps) > self.window_size:
-                            # Get indices of the most recent window_size entries
-                            sorted_indices = torch.argsort(valid_timesteps, descending=True)
-                            keep_indices = sorted_indices[:self.window_size]
-                            # Create new valid_indices mask
-                            new_valid_indices = torch.zeros_like(valid_indices)
-                            valid_positions = torch.where(valid_indices)[0]
-                            new_valid_indices[valid_positions[keep_indices]] = True
-                            valid_indices = new_valid_indices
+                    # Limit to current window size by finding the most recent entries
+                    valid_timesteps = self.prediction_timesteps[valid_indices]
+                    if len(valid_timesteps) > self.window_size:
+                        # Get indices of the most recent window_size entries
+                        sorted_indices = torch.argsort(valid_timesteps, descending=True)
+                        keep_indices = sorted_indices[:self.window_size]
+                        # Create new valid_indices mask
+                        new_valid_indices = torch.zeros_like(valid_indices)
+                        valid_positions = torch.where(valid_indices)[0]
+                        new_valid_indices[valid_positions[keep_indices]] = True
+                        valid_indices = new_valid_indices
                     
                     # Get the current action from the most recent prediction
                     current_prediction_idx = (self.buffer_index - 1) % self.max_window_size
@@ -641,7 +641,7 @@ class UnityVRInterface:
                 self.window_size = self._calculate_dynamic_window_size(raw_action, qpos, actions_for_current)
                 # Update decay factor based on window size
                 self.decay_factor = self._calculate_dynamic_decay_factor(self.window_size)
-                print(f"Dynamic window size: {self.window_size}, decay factor: {self.decay_factor:.4f}")
+                # print(f"Dynamic window size: {self.window_size}, decay factor: {self.decay_factor:.4f}")
             
             # Post-process action using shared utility
             raw_action = raw_action.squeeze(0)
@@ -791,9 +791,10 @@ def main():
     parser.add_argument('--use_dynamic_window', action='store_true', help='Use dynamic window sizing')
     parser.add_argument('--min_window_size', type=int, default=4, help='Minimum window size for dynamic sizing')
     parser.add_argument('--max_window_size', type=int, default=24, help='Maximum window size for dynamic sizing')
-    parser.add_argument('--base_window_size', type=int, default=16, help='Base window size when not using dynamic sizing')
-    parser.add_argument('--action_variance_weight', type=float, default=0.2, help='Weight for action variance factor (0 to disable)')
-    parser.add_argument('--action_magnitude_weight', type=float, default=0.0, help='Weight for action magnitude factor (0 to disable)')
+    parser.add_argument('--base_window_size', type=int, default=12, help='Base window size when not using dynamic sizing')
+    parser.add_argument('--action_history_size', type=int, default=20, help='Size of action history buffer for dynamic window sizing')
+    parser.add_argument('--action_variance_weight', type=float, default=0.0, help='Weight for action variance factor (0 to disable)')
+    parser.add_argument('--action_magnitude_weight', type=float, default=0.2, help='Weight for action magnitude factor (0 to disable)')
     parser.add_argument('--prediction_consistency_weight', type=float, default=0.8, help='Weight for prediction consistency factor (0 to disable)')
     parser.add_argument('--state_change_weight', type=float, default=0.0, help='Weight for state change rate factor (0 to disable)')
     parser.add_argument('--base_decay_factor', type=float, default=0.02, help='Base decay factor for exponential weighting')
@@ -833,6 +834,7 @@ def main():
         min_window_size=args.min_window_size,
         max_window_size=args.max_window_size,
         base_window_size=args.base_window_size,
+        action_history_size=args.action_history_size,
         action_variance_weight=args.action_variance_weight,
         action_magnitude_weight=args.action_magnitude_weight,
         prediction_consistency_weight=args.prediction_consistency_weight,
