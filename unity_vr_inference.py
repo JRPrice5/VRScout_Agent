@@ -58,7 +58,18 @@ class UnityVRInterface:
                  nheads=8,
                  query_frequency=1,
                  reverse_weighting=False,
-                 activation='relu'):
+                 activation='relu',
+                 use_dynamic_window=False,
+                 min_window_size=4,
+                 max_window_size=32,
+                 base_window_size=16,
+                 action_variance_weight=0.3,
+                 action_magnitude_weight=0.2,
+                 prediction_consistency_weight=0.4,
+                 state_change_weight=0.1,
+                 base_decay_factor=0.02,
+                 min_decay_factor=0.01,
+                 max_decay_factor=0.1):
         """
         Initialize the interface.
         
@@ -86,6 +97,17 @@ class UnityVRInterface:
             chunk_size: Chunk size for ACT policy
             reverse_weighting: Whether to put more weight on older actions instead of recent ones
             activation: Activation function to use
+            use_dynamic_window: Whether to use dynamic window sizing
+            min_window_size: Minimum window size for dynamic sizing
+            max_window_size: Maximum window size for dynamic sizing
+            base_window_size: Base window size when not using dynamic sizing
+            action_variance_weight: Weight for action variance factor (0 to disable)
+            action_magnitude_weight: Weight for action magnitude factor (0 to disable)
+            prediction_consistency_weight: Weight for prediction consistency factor (0 to disable)
+            state_change_weight: Weight for state change rate factor (0 to disable)
+            base_decay_factor: Base decay factor for exponential weighting
+            min_decay_factor: Minimum decay factor (for large windows)
+            max_decay_factor: Maximum decay factor (for small windows)
             """
         self.host = host
         self.port = port
@@ -110,6 +132,19 @@ class UnityVRInterface:
         self.nheads = nheads
         self.activation = activation
         
+        # Dynamic window sizing parameters
+        self.use_dynamic_window = use_dynamic_window
+        self.min_window_size = min_window_size
+        self.max_window_size = max_window_size
+        self.base_window_size = base_window_size
+        self.action_variance_weight = action_variance_weight
+        self.action_magnitude_weight = action_magnitude_weight
+        self.prediction_consistency_weight = prediction_consistency_weight
+        self.state_change_weight = state_change_weight
+        self.base_decay_factor = base_decay_factor
+        self.min_decay_factor = min_decay_factor
+        self.max_decay_factor = max_decay_factor
+        
         # Load dataset statistics
         stats_path = os.path.join(self.ckpt_dir, f'dataset_stats.pkl')
         with open(stats_path, 'rb') as f:
@@ -130,14 +165,21 @@ class UnityVRInterface:
         # Initialize temporal aggregation variables if needed
         if self.temporal_agg:
             self.state_dim = len(self.stats['qpos_mean'])
-            self.window_size = 16  # Number of past predictions to store
+            self.window_size = self.base_window_size  # Current window size
             self.prediction_buffer = None  # Will store predictions from past policy calls
             self.prediction_timesteps = None  # Will store the timestep when each prediction was made
             self.buffer_index = 0  # Current position in the circular buffer
             self.last_unique_timestep = -1  # Track the last unique timestep to handle repeats
-            self.decay_factor = 0.02  # Decay factor for exponential weighting (higher = more focus on recent)
+            self.decay_factor = self.base_decay_factor  # Current decay factor (dynamically adjusted)
             self.current_weight = 0.0  # Weight given to the current prediction (0-1)
-            self.reverse_weighting = False  # If True, put more weight on older actions instead of recent ones
+            self.reverse_weighting = reverse_weighting
+            
+            # Initialize action history for dynamic window sizing
+            if self.use_dynamic_window:
+                self.recent_actions = torch.zeros([10, self.state_dim]).cuda()
+                self.recent_qpos = torch.zeros([10, self.state_dim]).cuda()
+                self.action_history_index = 0
+                self.previous_qpos = None
         
         # Initialize socket
         self.socket = None
@@ -208,6 +250,99 @@ class UnityVRInterface:
                 print(f"torch.compile failed, continuing without compile: {e}")
 
         return policy
+    
+    def _calculate_dynamic_window_size(self, raw_action, qpos, actions_for_current=None):
+        """
+        Calculate dynamic window size based on action characteristics with individual factor controls
+        
+        Args:
+            raw_action: Current raw action tensor
+            qpos: Current joint positions
+            actions_for_current: Past predictions for current timestep (optional)
+            
+        Returns:
+            int: New window size between min_window_size and max_window_size
+        """
+        if not self.use_dynamic_window:
+            return self.base_window_size
+            
+        factors = []
+        total_weight = 0
+        
+        # Factor 1: Action Variance (higher variance -> smaller window for responsiveness)
+        if self.action_variance_weight > 0 and self.timestep >= 5:  # Need some history
+            # Get valid recent actions
+            valid_actions = self.recent_actions[:min(self.timestep, 10)]
+            if len(valid_actions) > 1:
+                action_variance = torch.var(valid_actions, dim=0).mean().item()
+                # Normalize variance (assuming typical variance range 0-1)
+                variance_factor = min(action_variance / 0.1, 1.0)  # Scale factor
+                factors.append(self.action_variance_weight * (1.0 - variance_factor))
+                total_weight += self.action_variance_weight
+        
+        # Factor 2: Action Magnitude (higher magnitude -> smaller window for responsiveness)
+        if self.action_magnitude_weight > 0:
+            action_magnitude = torch.norm(raw_action).item()
+            # Normalize magnitude (assuming typical action range 0-2)
+            magnitude_factor = min(action_magnitude / 2.0, 1.0)
+            factors.append(self.action_magnitude_weight * (1.0 - magnitude_factor))
+            total_weight += self.action_magnitude_weight
+        
+        # Factor 3: Prediction Consistency (higher consistency -> larger window for smoothness)
+        if self.prediction_consistency_weight > 0 and actions_for_current is not None and len(actions_for_current) > 1:
+            prediction_variance = torch.var(actions_for_current, dim=0).mean().item()
+            # Normalize prediction variance
+            consistency_factor = 1.0 - min(prediction_variance / 0.1, 1.0)
+            factors.append(self.prediction_consistency_weight * consistency_factor)
+            total_weight += self.prediction_consistency_weight
+        
+        # Factor 4: State Change Rate (higher change rate -> smaller window)
+        if self.state_change_weight > 0 and self.previous_qpos is not None:
+            state_change = torch.norm(qpos.squeeze() - self.previous_qpos).item()
+            # Normalize state change (assuming typical change range 0-0.5)
+            change_factor = min(state_change / 0.5, 1.0)
+            factors.append(self.state_change_weight * (1.0 - change_factor))
+            total_weight += self.state_change_weight
+        
+        # Combine factors (weighted average of available factors)
+        if factors and total_weight > 0:
+            combined_factor = sum(factors) / total_weight
+        else:
+            combined_factor = 0.5  # Default to middle ground
+        
+        # Map combined factor to window size range
+        window_size = int(self.min_window_size + 
+                         combined_factor * (self.max_window_size - self.min_window_size))
+        
+        return max(self.min_window_size, min(window_size, self.max_window_size))
+    
+    def _calculate_dynamic_decay_factor(self, window_size):
+        """
+        Calculate dynamic decay factor based on window size
+        Smaller windows -> higher decay factor (more focus on recent)
+        Larger windows -> lower decay factor (more smoothing)
+        """
+        if not self.use_dynamic_window:
+            return self.base_decay_factor
+        
+        # Normalize window size to [0, 1] range
+        window_ratio = (window_size - self.min_window_size) / (self.max_window_size - self.min_window_size)
+        
+        # Invert the ratio so smaller windows get higher decay factors
+        decay_factor = self.max_decay_factor - (window_ratio * (self.max_decay_factor - self.min_decay_factor))
+        
+        return decay_factor
+    
+    def _update_action_history(self, raw_action, qpos):
+        """Update the action and state history for dynamic window sizing"""
+        if self.temporal_agg and self.use_dynamic_window:
+            # Store current action in circular buffer
+            self.recent_actions[self.action_history_index] = raw_action.squeeze()
+            self.recent_qpos[self.action_history_index] = qpos.squeeze()
+            self.action_history_index = (self.action_history_index + 1) % 10
+            
+            # Update previous qpos for next iteration
+            self.previous_qpos = qpos.squeeze().clone()
     
     def start_server(self):
         """Start the server to listen for Unity connections"""
@@ -288,9 +423,9 @@ class UnityVRInterface:
             if self.temporal_agg:
                 # Initialize prediction buffer with sliding window approach
                 # [window_size, chunk_size, state_dim] - each entry stores chunk_size predictions
-                self.prediction_buffer = torch.zeros([self.window_size, self.chunk_size, self.state_dim]).cuda()
+                self.prediction_buffer = torch.zeros([self.max_window_size, self.chunk_size, self.state_dim]).cuda()
                 # Track which timestep each buffer entry was made at
-                self.prediction_timesteps = torch.full([self.window_size], -1, dtype=torch.long).cuda()
+                self.prediction_timesteps = torch.full([self.max_window_size], -1, dtype=torch.long).cuda()
             
             buffer_size = 4096
             data_buffer = b""
@@ -408,13 +543,25 @@ class UnityVRInterface:
                     self.prediction_timesteps[self.buffer_index] = self.timestep
                     
                     # Update buffer index for circular buffer behavior
-                    self.buffer_index = (self.buffer_index + 1) % self.window_size
+                    self.buffer_index = (self.buffer_index + 1) % self.max_window_size
                     
-                    # Find all valid entries in the buffer (timestep >= 0)
+                    # Find all valid entries in the buffer (timestep >= 0) within current window size
                     valid_indices = (self.prediction_timesteps >= 0)
+                    if self.use_dynamic_window:
+                        # Limit to current dynamic window size by finding the most recent entries
+                        valid_timesteps = self.prediction_timesteps[valid_indices]
+                        if len(valid_timesteps) > self.window_size:
+                            # Get indices of the most recent window_size entries
+                            sorted_indices = torch.argsort(valid_timesteps, descending=True)
+                            keep_indices = sorted_indices[:self.window_size]
+                            # Create new valid_indices mask
+                            new_valid_indices = torch.zeros_like(valid_indices)
+                            valid_positions = torch.where(valid_indices)[0]
+                            new_valid_indices[valid_positions[keep_indices]] = True
+                            valid_indices = new_valid_indices
                     
                     # Get the current action from the most recent prediction
-                    current_prediction_idx = (self.buffer_index - 1) % self.window_size
+                    current_prediction_idx = (self.buffer_index - 1) % self.max_window_size
                     if self.prediction_timesteps[current_prediction_idx] >= 0:
                         current_action = self.prediction_buffer[current_prediction_idx, time_index]
                     else:
@@ -474,13 +621,27 @@ class UnityVRInterface:
                         else:
                             # No valid predictions for current timestep
                             raw_action = current_action.unsqueeze(0)
+                            actions_for_current = None
                     else:
                         # No valid predictions yet
                         raw_action = current_action.unsqueeze(0)
+                        actions_for_current = None
                 else:
                     raw_action = all_actions[:, time_index]
+                    actions_for_current = None
             elif self.policy_class == 'CNNMLP':
                 raw_action = self.policy(qpos, curr_image)
+                actions_for_current = None
+            
+            # Update action history for dynamic window sizing
+            self._update_action_history(raw_action, qpos)
+            
+            # Calculate dynamic window size if needed
+            if self.temporal_agg and self.use_dynamic_window:
+                self.window_size = self._calculate_dynamic_window_size(raw_action, qpos, actions_for_current)
+                # Update decay factor based on window size
+                self.decay_factor = self._calculate_dynamic_decay_factor(self.window_size)
+                # print(f"Dynamic window size: {self.window_size}, decay factor: {self.decay_factor:.4f}")
             
             # Post-process action using shared utility
             raw_action = raw_action.squeeze(0)
@@ -626,6 +787,19 @@ def main():
     parser.add_argument('--reverse_weighting', action='store_true', help='Use reverse weighting for temporal aggregation')
     parser.add_argument('--activation', type=str, default='relu', help='Activation function to use')
     
+    # Dynamic window sizing arguments
+    parser.add_argument('--use_dynamic_window', action='store_true', help='Use dynamic window sizing')
+    parser.add_argument('--min_window_size', type=int, default=4, help='Minimum window size for dynamic sizing')
+    parser.add_argument('--max_window_size', type=int, default=16, help='Maximum window size for dynamic sizing')
+    parser.add_argument('--base_window_size', type=int, default=16, help='Base window size when not using dynamic sizing')
+    parser.add_argument('--action_variance_weight', type=float, default=0.3, help='Weight for action variance factor (0 to disable)')
+    parser.add_argument('--action_magnitude_weight', type=float, default=0.0, help='Weight for action magnitude factor (0 to disable)')
+    parser.add_argument('--prediction_consistency_weight', type=float, default=0.7, help='Weight for prediction consistency factor (0 to disable)')
+    parser.add_argument('--state_change_weight', type=float, default=0.0, help='Weight for state change rate factor (0 to disable)')
+    parser.add_argument('--base_decay_factor', type=float, default=0.02, help='Base decay factor for exponential weighting')
+    parser.add_argument('--min_decay_factor', type=float, default=-0.01, help='Minimum decay factor (for large windows)')
+    parser.add_argument('--max_decay_factor', type=float, default=0.04, help='Maximum decay factor (for small windows)')
+    
     args = parser.parse_args()
     
     # If ckpt_dir is not provided, use the directory of ckpt_path
@@ -654,7 +828,18 @@ def main():
         dec_layers=args.dec_layers,
         nheads=args.nheads,
         query_frequency=args.query_frequency,
-        activation=args.activation
+        activation=args.activation,
+        use_dynamic_window=args.use_dynamic_window,
+        min_window_size=args.min_window_size,
+        max_window_size=args.max_window_size,
+        base_window_size=args.base_window_size,
+        action_variance_weight=args.action_variance_weight,
+        action_magnitude_weight=args.action_magnitude_weight,
+        prediction_consistency_weight=args.prediction_consistency_weight,
+        state_change_weight=args.state_change_weight,
+        base_decay_factor=args.base_decay_factor,
+        min_decay_factor=args.min_decay_factor,
+        max_decay_factor=args.max_decay_factor
     )
     
     interface.start_server()
