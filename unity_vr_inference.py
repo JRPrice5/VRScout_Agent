@@ -377,6 +377,11 @@ class UnityVRInterface:
         # Apply gradual adjustment toward smoothed target
         current_window = float(self.window_size)
         adjustment = (smoothed_target - current_window) * self.window_adjustment_rate
+        
+        # Ensure minimum adjustment of 1 when there's a significant difference
+        if abs(smoothed_target - current_window) >= 1.0 and abs(adjustment) < 1.0:
+            adjustment = 1.0 if smoothed_target > current_window else -1.0
+            
         new_window_size = int(round(current_window + adjustment))
         
         return max(self.min_window_size, min(new_window_size, self.max_window_size))

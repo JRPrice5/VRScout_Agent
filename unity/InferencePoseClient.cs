@@ -20,6 +20,11 @@ namespace CLOVR.IPCClient
     /// </summary>
     public class InferencePoseClient : MonoBehaviour
     {
+        // Dynamic window tracking
+        private int currentWindowSize = 0;
+        private string currentDecayFactor = "0.0000";
+        private float currentInferenceUpdateRate = 0.02f;
+        
         // Performance tracking
         private Dictionary<string, float> timingStats = new Dictionary<string, float>();
         private Dictionary<string, int> timingCounts = new Dictionary<string, int>();
@@ -141,7 +146,8 @@ namespace CLOVR.IPCClient
         private CVRSystem _vrSystem;
 
         [Header("Update Frequency Settings")]
-        [SerializeField] [Range(1, 120)] private int targetFrameRate = 30;
+        // Auto update rate control
+        [SerializeField] private bool useAutoUpdateRate = true;
         [SerializeField] [Tooltip("How frequently to send state and apply actions (in seconds)")]
         private float updateInterval = 0.033f; // Default for ~30Hz
         private float updateTimer = 0f;
@@ -157,6 +163,13 @@ namespace CLOVR.IPCClient
         [SerializeField] private Transform leftControllerTransform;
         [SerializeField] private Transform rightControllerTransform;
 
+        [Header("Button triggering Threshold")]
+        [SerializeField] private float pressThreshold = 0.5f;
+        [SerializeField] private float releaseThreshold = 0.4f;
+
+        [Header("Communication Timeout Auto-Stop switch")]
+        [SerializeField] private bool autoStop = true;
+
         // Socket and connection variables
         private TcpClient client;
         private NetworkStream stream;
@@ -171,13 +184,15 @@ namespace CLOVR.IPCClient
         public string ServerIP => serverIP;
         public int ServerPort => serverPort;
 
-        // Action data received from Python
-        private float[] latestAction;
+        // Flag if any Action data received from Python
+        private bool actionReceived = false;
 
         // Timestep synchronization
         private int clientTimestep = 0;
         private Dictionary<int, float[]> actionQueue = new Dictionary<int, float[]>();
         private int maxQueueSize = 10; // Limit queue size to prevent memory issues
+        // Track the latest timestep present in the action queue for O(1) retrieval
+        private int latestTimestepInQueue = int.MinValue;
 
         // Status properties
         public bool IsConnected 
@@ -187,6 +202,7 @@ namespace CLOVR.IPCClient
             { 
                 shouldReconnect = value;
                 isConnected = value;
+                actionReceived = false;
             }
         }
         public int CurrentTimestep => clientTimestep;
@@ -201,6 +217,12 @@ namespace CLOVR.IPCClient
         private float leftThumbstickY = 0f;
         private float rightThumbstickX = 0f;
         private float rightThumbstickY = 0f;
+        
+        // Previous controller input states (for trigger and grip)
+        private bool prevLeftTriggerState = false;
+        private bool prevRightTriggerState = false;
+        private bool prevLeftGripState = false;
+        private bool prevRightGripState = false;
         
         // Latest HMD and controller positions and rotations (stored from received actions)
         private Vector3 latestHmdPosition = Vector3.zero;
@@ -346,17 +368,23 @@ namespace CLOVR.IPCClient
                 bool actionApplied = false;
                 lock (lockObject)
                 {
-                    // Check if we have an action for the current timestep in the queue
-                    if (actionQueue.ContainsKey(clientTimestep))
+                    // Apply the latest available action (highest timestep) using tracked max
+                    if (actionQueue.Count > 0 && latestTimestepInQueue != int.MinValue)
                     {
-                        ApplyAction(actionQueue[clientTimestep]);
-                        UnityEngine.Debug.Log($"Applied action for timestep {clientTimestep}");
-                        
-                        actionQueue.Remove(clientTimestep); // Remove used action
-                        // Increment client timestep
-                        clientTimestep++;
+                        int latestTimestep = latestTimestepInQueue;
+
+                        ApplyAction(actionQueue[latestTimestep]);
+                        UnityEngine.Debug.Log($"Applied latest action for timestep {latestTimestep}");
+
+                        // Drop all queued (older) actions as they are now stale
+                        actionQueue.Clear();
+                        latestTimestepInQueue = int.MinValue;
+
+                        // Advance client timestep to one past the applied action
+                        clientTimestep = latestTimestep + 1;
                         // Flag that we applied an action this update
                         actionApplied = true;
+                        actionReceived = true;
                     }
                 }
 
@@ -388,6 +416,14 @@ namespace CLOVR.IPCClient
                         // After maxUpdatesBetweenSends updates without an action, retry sending state
                         if (updatesSinceLastAction >= maxUpdatesBetweenSends)
                         {
+                            // If autoStop is enabled, set isConnected to false to stop sending state
+                            if (autoStop && actionReceived)
+                            {
+                                shouldReconnect = false;
+                                isConnected = false;
+                                actionReceived = false;
+                            }
+
                             // Use either synchronous or asynchronous processing based on settings
                             if (useAsyncProcessing)
                             {
@@ -397,7 +433,7 @@ namespace CLOVR.IPCClient
                             {
                                 SendStateToServer();
                             }
-                            
+                            UnityEngine.Debug.Log($"IsConnected: {isConnected}");
                             UnityEngine.Debug.Log($"Retry sending state after {maxUpdatesBetweenSends} updates without action");
                             updatesSinceLastAction = 0; // Reset counter after retry
                         }
@@ -424,6 +460,7 @@ namespace CLOVR.IPCClient
                     {
                         stream = client.GetStream();
                         isConnected = true;
+                        actionReceived = false;
                     }
                     
                     UnityEngine.Debug.Log("Connected to inference server!");
@@ -584,10 +621,30 @@ namespace CLOVR.IPCClient
                 
                 if (actionData != null && actionData.action != null)
                 {
+                    // Update window size and decay factor tracking
+                    currentWindowSize = actionData.window_size;
+                    currentDecayFactor = actionData.decay_factor ?? "0.0000";
+                    
+                    // Update inference update rate and apply if auto-adjustment is enabled
+                    if (float.TryParse(actionData.stepped_inference_update_rate ?? "0.02", out float newUpdateRate))
+                    {
+                        currentInferenceUpdateRate = newUpdateRate;
+                        if (useAutoUpdateRate)
+                        {
+                            updateInterval = currentInferenceUpdateRate;
+                        }
+                    }
+                    
                     lock (lockObject)
                     {
                         // Add the action to the queue with its timestep
                         actionQueue[actionData.timestep] = actionData.action;
+                        UnityEngine.Debug.Log($"Added action for timestep {actionData.timestep}");
+                        // Update tracked latest timestep
+                        if (actionData.timestep > latestTimestepInQueue)
+                        {
+                            latestTimestepInQueue = actionData.timestep;
+                        }
                         
                         // Limit queue size by removing oldest entries if needed
                         if (actionQueue.Count > maxQueueSize)
@@ -600,7 +657,7 @@ namespace CLOVR.IPCClient
                                     oldestTimestep = timestep;
                                 }
                             }
-                            actionQueue.Remove(oldestTimestep);
+                            actionQueue.Remove(oldestTimestep); // TODO: see if we can use more efficient removal
                         }
                     }
                 }
@@ -1874,15 +1931,85 @@ namespace CLOVR.IPCClient
                     float rightThumbstickX = action[index++];
                     float rightThumbstickY = action[index++];
                     
+                    // Set button values
+                    // frame.leftTriggerValue = leftIndexTrigger;
+                    // frame.leftGripValue = leftHandTrigger;
+                    // frame.rightTriggerValue = rightIndexTrigger;
+                    // frame.rightGripValue = rightHandTrigger;
+                    
+                    // Set button states using edge detection
+                    if (!prevLeftTriggerState && leftIndexTrigger > pressThreshold)
+                    {
+                        frame.leftTriggerState = true;
+                    }
+                    else if (prevLeftTriggerState && leftIndexTrigger < releaseThreshold)
+                    {
+                        frame.leftTriggerState = false;
+                    }
+                    else
+                    {
+                        frame.leftTriggerState = prevLeftTriggerState;
+                    }
+                    
+                    if (!prevLeftGripState && leftHandTrigger > pressThreshold)
+                    {
+                        frame.leftGripState = true;
+                    }
+                    else if (prevLeftGripState && leftHandTrigger < releaseThreshold)
+                    {
+                        frame.leftGripState = false;
+                    }
+                    else
+                    {
+                        frame.leftGripState = prevLeftGripState;
+                    }
+                    
+                    if (!prevRightTriggerState && rightIndexTrigger > pressThreshold)
+                    {
+                        frame.rightTriggerState = true;
+                    }
+                    else if (prevRightTriggerState && rightIndexTrigger < releaseThreshold)
+                    {
+                        frame.rightTriggerState = false;
+                    }
+                    else
+                    {
+                        frame.rightTriggerState = prevRightTriggerState;
+                    }
+                    
+                    if (!prevRightGripState && rightHandTrigger > pressThreshold)
+                    {
+                        frame.rightGripState = true;
+                    }
+                    else if (prevRightGripState && rightHandTrigger < releaseThreshold)
+                    {
+                        frame.rightGripState = false;
+                    }
+                    else
+                    {
+                        frame.rightGripState = prevRightGripState;
+                    }
+                    
+                    // Log button values
+                    UnityEngine.Debug.Log($"Left Index Trigger: {leftIndexTrigger}, Left Hand Trigger: {leftHandTrigger}, Right Index Trigger: {rightIndexTrigger}, Right Hand Trigger: {rightHandTrigger}");
+
+                    // Store current button states as previous for next comparison
+                    prevLeftTriggerState = frame.leftTriggerState;
+                    prevRightTriggerState = frame.rightTriggerState;
+                    prevLeftGripState = frame.leftGripState;
+                    prevRightGripState = frame.rightGripState;
+                    
+                    // Update button states
+                    leftIndexTrigger = frame.leftTriggerState ? 1.0f : 0.0f;
+                    leftHandTrigger = frame.leftGripState ? 1.0f : 0.0f;
+                    rightIndexTrigger = frame.rightTriggerState ? 1.0f : 0.0f;
+                    rightHandTrigger = frame.rightGripState ? 1.0f : 0.0f;
+
+                    // log button states
+                    // UnityEngine.Debug.Log($"Left Index Trigger: {leftIndexTrigger}, Left Hand Trigger: {leftHandTrigger}, Right Index Trigger: {rightIndexTrigger}, Right Hand Trigger: {rightHandTrigger}");
                     // Store these values for use in GetCurrentQPos
                     StoreControllerInputValues(leftIndexTrigger, rightIndexTrigger, leftHandTrigger, rightHandTrigger,
                                               leftThumbstickX, leftThumbstickY, rightThumbstickX, rightThumbstickY);
-                    
-                    // Set button states (true if value > 0.5)
-                    frame.leftTriggerState = leftIndexTrigger > 0.5f;
-                    frame.leftGripState = leftHandTrigger > 0.5f;
-                    frame.rightTriggerState = rightIndexTrigger > 0.5f;
-                    frame.rightGripState = rightHandTrigger > 0.5f;
                 }
                 
                 // Apply the pose to OpenVR devices
@@ -1917,6 +2044,32 @@ namespace CLOVR.IPCClient
         {
             shouldReconnect = false;
             DisconnectFromServer();
+            
+            // Clear stored controller input values
+            leftIndexTrigger = 0f;
+            rightIndexTrigger = 0f;
+            leftHandTrigger = 0f;
+            rightHandTrigger = 0f;
+            leftThumbstickX = 0f;
+            leftThumbstickY = 0f;
+            rightThumbstickX = 0f;
+            rightThumbstickY = 0f;
+            
+            // Clear stored pose values
+            latestHmdPosition = Vector3.zero;
+            latestHmdRotation = Quaternion.identity;
+            latestLeftControllerPosition = Vector3.zero;
+            latestLeftControllerRotation = Quaternion.identity;
+            latestRightControllerPosition = Vector3.zero;
+            latestRightControllerRotation = Quaternion.identity;
+            useLatestPoseValues = false;
+            
+            // Clear action queue
+            lock (lockObject)
+            {
+                actionQueue.Clear();
+                latestTimestepInQueue = int.MinValue;
+            }
         }
 
         /// <summary>
@@ -1928,6 +2081,7 @@ namespace CLOVR.IPCClient
             {
                 clientTimestep = 0;
                 actionQueue.Clear();
+                latestTimestepInQueue = int.MinValue;
             }
         }
 
@@ -1962,6 +2116,27 @@ namespace CLOVR.IPCClient
         {
             public float[] action;
             public int timestep;
+            public int window_size;
+            public string decay_factor;
+            public string stepped_inference_update_rate;
+        }
+        
+        /// <summary>
+        /// Display dynamic window information on screen
+        /// </summary>
+        private void OnGUI()
+        {
+            // Create a GUI style for the text
+            GUIStyle style = new GUIStyle();
+            style.fontSize = 16;
+            style.normal.textColor = Color.white;
+            style.fontStyle = FontStyle.Bold;
+            
+            // Display window size, decay factor, and update rate in top-left corner
+            GUI.Label(new Rect(10, 10, 300, 25), $"Window Size: {currentWindowSize}", style);
+            GUI.Label(new Rect(10, 35, 300, 25), $"Decay Factor: {currentDecayFactor}", style);
+            GUI.Label(new Rect(10, 60, 300, 25), $"Update Rate: {currentInferenceUpdateRate:F4}s", style);
+            GUI.Label(new Rect(10, 85, 300, 25), $"Auto Rate: {(useAutoUpdateRate ? "ON" : "OFF")}", style);
         }
     }
 }
