@@ -491,13 +491,13 @@ class UnityVRInterface:
     
     def _update_smoothed_update_rate(self, target_update_rate):
         """
-        Apply smoothed historical weighting update to update rate
+        Apply smoothed historical weighting update to update rate - allow fast decreases and slow increases
         
         Args:
             target_update_rate: The target update rate calculated from window size
             
         Returns:
-            float: Smoothed update rate
+            float: Smoothed update rate (monotonically decreasing)
         """
         if not self.use_dynamic_window:
             return self.base_update_rate
@@ -509,9 +509,17 @@ class UnityVRInterface:
         # Calculate smoothed update rate using exponential moving average
         smoothed_target = sum(self.update_rate_history) / len(self.update_rate_history)
         
-        # Apply exponential smoothing
-        self.smoothed_update_rate = (self.update_rate_smoothing_factor * smoothed_target + 
-                                   (1 - self.update_rate_smoothing_factor) * self.smoothed_update_rate)
+        # Allow both increases and decreases with asymmetric rates: fast decrease, slow increase
+        if smoothed_target < self.smoothed_update_rate:
+            # Decreasing: use higher smoothing factor for faster response
+            effective_smoothing_factor = min(self.update_rate_smoothing_factor * 5.0, 0.95)
+        else:
+            # Increasing: use lower smoothing factor for slower response
+            effective_smoothing_factor = self.update_rate_smoothing_factor * 0.2
+        
+        # Apply asymmetric exponential smoothing
+        self.smoothed_update_rate = (effective_smoothing_factor * smoothed_target + 
+                                   (1 - effective_smoothing_factor) * self.smoothed_update_rate)
         
         # Find nearest preset to ensure smoothed rate stays within preset values
         distances = [abs(self.smoothed_update_rate - preset) for preset in self.update_rate_presets]
@@ -611,6 +619,28 @@ class UnityVRInterface:
                 self.prediction_buffer = torch.zeros([self.max_window_size, self.chunk_size, self.state_dim]).cuda()
                 # Track which timestep each buffer entry was made at
                 self.prediction_timesteps = torch.full([self.max_window_size], -1, dtype=torch.long).cuda()
+                
+                # Reset dynamic window sizing buffers and state
+                if self.use_dynamic_window:
+                    # Reset action history buffer
+                    self.recent_actions = torch.zeros([self.action_history_size, self.state_dim]).cuda()
+                    self.action_history_index = 0
+                    self.previous_qpos = None
+                    
+                    # Reset window size state
+                    self.window_size = self.base_window_size
+                    self.target_window_size = self.base_window_size
+                    self.target_window_history = [self.base_window_size] * self.target_window_history_size
+                    
+                    # Reset decay factor state
+                    self.decay_factor = self.base_decay_factor
+                    self.smoothed_decay_factor = self.base_decay_factor
+                    self.decay_factor_history = [self.base_decay_factor] * self.target_window_history_size
+                    
+                    # Reset update rate state
+                    self.current_update_rate = self.base_update_rate
+                    self.smoothed_update_rate = self.base_update_rate
+                    self.update_rate_history = [self.base_update_rate] * self.update_rate_history_size
             
             buffer_size = 4096
             data_buffer = b""
@@ -816,6 +846,7 @@ class UnityVRInterface:
                 else:
                     raw_action = all_actions[:, time_index]
                     actions_for_current = None
+
             elif self.policy_class == 'CNNMLP':
                 raw_action = self.policy(qpos, curr_image)
                 actions_for_current = None
@@ -1008,8 +1039,8 @@ def main():
     # Tier 2: Weight Factor (Medium adaptation)
     parser.add_argument('--weight_smoothing_factor', type=float, default=0.05, help='Smoothing factor for historical weighting updates (0-1) - MEDIUM')
     # Tier 3: Update Rate (Slowest adaptation)
-    parser.add_argument('--update_rate_smoothing_factor', type=float, default=0.05, help='Smoothing factor for historical update rate updates (0-1) - SLOWEST')
-    parser.add_argument('--update_rate_history_size', type=int, default=110, help='Number of recent update rates to track - SLOWEST')
+    parser.add_argument('--update_rate_smoothing_factor', type=float, default=0.2, help='Smoothing factor for historical update rate updates (0-1) - SLOWEST')
+    parser.add_argument('--update_rate_history_size', type=int, default=300, help='Number of recent update rates to track - SLOWEST')
 
     args = parser.parse_args()
     
