@@ -74,7 +74,7 @@ class UnityVRInterface:
                  window_adjustment_rate=0.1,
                  weight_smoothing_factor=0.3,
                  target_window_history_size=5,
-                 update_rate_presets=[0.016, 0.018, 0.02, 0.025, 0.03, 0.035],
+                 update_rate_presets=[0.012, 0.014, 0.016, 0.018, 0.02, 0.025, 0.03, 0.035, 0.04],
                  base_update_rate=0.02,
                  update_rate_smoothing_factor=0.3,
                  update_rate_history_size=5):
@@ -449,7 +449,7 @@ class UnityVRInterface:
         window_ratio = (window_size - self.min_window_size) / (self.max_window_size - self.min_window_size)
         
         # Map to preset index (larger windows get slower rates)
-        preset_index = int(window_ratio * (len(self.update_rate_presets) - 1))
+        preset_index = round(window_ratio * (len(self.update_rate_presets) - 1))
         preset_index = max(0, min(preset_index, len(self.update_rate_presets) - 1))
         
         return self.update_rate_presets[preset_index]
