@@ -68,13 +68,14 @@ class UnityVRInterface:
                  action_magnitude_weight=0.2,
                  prediction_consistency_weight=0.4,
                  state_change_weight=0.1,
+                 action_speed_weight=0.3,
                  base_decay_factor=0.02,
                  min_decay_factor=0.01,
                  max_decay_factor=0.1,
                  window_adjustment_rate=0.1,
                  weight_smoothing_factor=0.3,
                  target_window_history_size=5,
-                 update_rate_presets=[0.012, 0.014, 0.016, 0.018, 0.02, 0.025, 0.03, 0.035, 0.04],
+                 update_rate_presets=[0.016, 0.017, 0.018, 0.019, 0.02, 0.022, 0.024, 0.026, 0.03, 0.035, 0.04],
                  base_update_rate=0.02,
                  update_rate_smoothing_factor=0.3,
                  update_rate_history_size=5):
@@ -158,6 +159,7 @@ class UnityVRInterface:
         self.action_magnitude_weight = action_magnitude_weight
         self.prediction_consistency_weight = prediction_consistency_weight
         self.state_change_weight = state_change_weight
+        self.action_speed_weight = action_speed_weight
         self.base_decay_factor = base_decay_factor
         self.min_decay_factor = min_decay_factor
         self.max_decay_factor = max_decay_factor
@@ -341,6 +343,39 @@ class UnityVRInterface:
             change_factor = min(state_change / 0.5, 1.0)
             factors.append(self.state_change_weight * (1.0 - change_factor))
             total_weight += self.state_change_weight
+        
+        # Factor 5: Action Speed (higher speed -> smaller window for responsiveness)
+        if self.action_speed_weight > 0 and self.timestep >= 2:  # Need at least 2 actions
+            # Calculate mean speed using vectorized operations
+            num_actions = min(self.timestep, self.action_history_size)
+            if num_actions >= 2:
+                # Get slice of recent actions (most recent first)
+                end_idx = self.action_history_index
+                start_idx = (end_idx - num_actions) % self.action_history_size
+                
+                if start_idx < end_idx:
+                    # Contiguous slice
+                    recent_actions = self.recent_actions[start_idx:end_idx]
+                else:
+                    # Wrap-around slice
+                    recent_actions = torch.cat([
+                        self.recent_actions[start_idx:],
+                        self.recent_actions[:end_idx]
+                    ], dim=0)
+                
+                # Calculate differences between consecutive actions
+                action_diffs = recent_actions[1:] - recent_actions[:-1]
+                
+                # Calculate speeds (L2 norms) for all differences at once
+                speeds = torch.norm(action_diffs, dim=1)
+                
+                # Calculate mean speed
+                mean_action_speed = speeds.mean().item()
+                
+                # Normalize speed (assuming typical speed range 0-1)
+                speed_factor = min(mean_action_speed / 1.0, 1.0)  # Scale factor
+                factors.append(self.action_speed_weight * (1.0 - speed_factor))
+                total_weight += self.action_speed_weight
         
         # Combine factors (weighted average of available factors)
         if factors and total_weight > 0:
@@ -961,15 +996,21 @@ def main():
     parser.add_argument('--action_magnitude_weight', type=float, default=0.0, help='Weight for action magnitude factor (0 to disable)')
     parser.add_argument('--prediction_consistency_weight', type=float, default=0.8, help='Weight for prediction consistency factor (0 to disable)')
     parser.add_argument('--state_change_weight', type=float, default=0.0, help='Weight for state change rate factor (0 to disable)')
+    parser.add_argument('--action_speed_weight', type=float, default=0.6, help='Weight for action speed factor (0 to disable)')
     parser.add_argument('--base_decay_factor', type=float, default=0.02, help='Base decay factor for exponential weighting')
-    parser.add_argument('--min_decay_factor', type=float, default=-0.01, help='Minimum decay factor (for large windows)')
-    parser.add_argument('--max_decay_factor', type=float, default=0.03, help='Maximum decay factor (for small windows)')
+    parser.add_argument('--min_decay_factor', type=float, default=0.00, help='Minimum decay factor (for large windows)')
+    parser.add_argument('--max_decay_factor', type=float, default=0.04, help='Maximum decay factor (for small windows)')
     
-    # Gradual adjustment arguments
-    parser.add_argument('--window_adjustment_rate', type=float, default=0.15, help='Rate of gradual window size adjustment (0-1)')
-    parser.add_argument('--weight_smoothing_factor', type=float, default=0.3, help='Smoothing factor for historical weighting updates (0-1)')
-    parser.add_argument('--target_window_history_size', type=int, default=5, help='Number of recent target window sizes to track')
-    
+    # Gradual adjustment arguments - 3-tier control system
+    # Tier 1: Window Size (Fastest adaptation)
+    parser.add_argument('--window_adjustment_rate', type=float, default=0.15, help='Rate of gradual window size adjustment (0-1) - FASTEST')
+    parser.add_argument('--target_window_history_size', type=int, default=50, help='Number of recent target window sizes to track - FASTEST')
+    # Tier 2: Weight Factor (Medium adaptation)
+    parser.add_argument('--weight_smoothing_factor', type=float, default=0.05, help='Smoothing factor for historical weighting updates (0-1) - MEDIUM')
+    # Tier 3: Update Rate (Slowest adaptation)
+    parser.add_argument('--update_rate_smoothing_factor', type=float, default=0.05, help='Smoothing factor for historical update rate updates (0-1) - SLOWEST')
+    parser.add_argument('--update_rate_history_size', type=int, default=110, help='Number of recent update rates to track - SLOWEST')
+
     args = parser.parse_args()
     
     # If ckpt_dir is not provided, use the directory of ckpt_path
@@ -1008,12 +1049,15 @@ def main():
         action_magnitude_weight=args.action_magnitude_weight,
         prediction_consistency_weight=args.prediction_consistency_weight,
         state_change_weight=args.state_change_weight,
+        action_speed_weight=args.action_speed_weight,
         base_decay_factor=args.base_decay_factor,
         min_decay_factor=args.min_decay_factor,
         max_decay_factor=args.max_decay_factor,
         window_adjustment_rate=args.window_adjustment_rate,
         weight_smoothing_factor=args.weight_smoothing_factor,
-        target_window_history_size=args.target_window_history_size
+        target_window_history_size=args.target_window_history_size,
+        update_rate_smoothing_factor=args.update_rate_smoothing_factor,
+        update_rate_history_size=args.update_rate_history_size
     )
     
     interface.start_server()
