@@ -73,7 +73,11 @@ class UnityVRInterface:
                  max_decay_factor=0.1,
                  window_adjustment_rate=0.1,
                  weight_smoothing_factor=0.3,
-                 target_window_history_size=5):
+                 target_window_history_size=5,
+                 update_rate_presets=[0.016, 0.018, 0.02, 0.025, 0.03, 0.035],
+                 base_update_rate=0.02,
+                 update_rate_smoothing_factor=0.3,
+                 update_rate_history_size=5):
         """
         Initialize the interface.
         
@@ -116,6 +120,10 @@ class UnityVRInterface:
             window_adjustment_rate: Rate of gradual window size adjustment (0-1)
             weight_smoothing_factor: Smoothing factor for historical weighting updates (0-1)
             target_window_history_size: Number of recent target window sizes to track
+            update_rate_presets: List of preset update rates to choose from
+            base_update_rate: Base update rate when not using dynamic adjustment
+            update_rate_smoothing_factor: Smoothing factor for update rate adjustments (0-1)
+            update_rate_history_size: Number of recent target update rates to track
             """
         self.host = host
         self.port = port
@@ -145,6 +153,7 @@ class UnityVRInterface:
         self.min_window_size = min_window_size
         self.max_window_size = max_window_size
         self.base_window_size = base_window_size
+        self.action_history_size = action_history_size
         self.action_variance_weight = action_variance_weight
         self.action_magnitude_weight = action_magnitude_weight
         self.prediction_consistency_weight = prediction_consistency_weight
@@ -152,7 +161,12 @@ class UnityVRInterface:
         self.base_decay_factor = base_decay_factor
         self.min_decay_factor = min_decay_factor
         self.max_decay_factor = max_decay_factor
-        self.action_history_size = action_history_size
+        
+        # Dynamic update rate parameters
+        self.update_rate_presets = update_rate_presets
+        self.base_update_rate = base_update_rate
+        self.update_rate_smoothing_factor = update_rate_smoothing_factor
+        self.update_rate_history_size = update_rate_history_size
         
         # Gradual adjustment parameters
         self.window_adjustment_rate = window_adjustment_rate
@@ -199,6 +213,11 @@ class UnityVRInterface:
                 self.target_window_history = [self.base_window_size] * self.target_window_history_size
                 self.smoothed_decay_factor = self.base_decay_factor  # Smoothed decay factor
                 self.decay_factor_history = [self.base_decay_factor] * self.target_window_history_size
+                
+                # Dynamic update rate state tracking
+                self.current_update_rate = self.base_update_rate  # Current update rate
+                self.smoothed_update_rate = self.base_update_rate  # Smoothed update rate
+                self.update_rate_history = [self.base_update_rate] * self.update_rate_history_size
         
         # Initialize socket
         self.socket = None
@@ -405,6 +424,60 @@ class UnityVRInterface:
                                      (1 - self.weight_smoothing_factor) * self.smoothed_decay_factor)
         
         return self.smoothed_decay_factor
+    
+    def _calculate_target_update_rate(self, window_size):
+        """
+        Calculate target update rate based on window size using preset rates
+        Smaller windows -> faster update rates (more responsive)
+        Larger windows -> slower update rates (more stable)
+        
+        Args:
+            window_size: Current window size
+            
+        Returns:
+            float: Target update rate from preset list
+        """
+        if not self.use_dynamic_window:
+            return self.base_update_rate
+        
+        # Normalize window size to [0, 1] range
+        window_ratio = (window_size - self.min_window_size) / (self.max_window_size - self.min_window_size)
+        
+        # Map to preset index (larger windows get slower rates)
+        preset_index = int(window_ratio * (len(self.update_rate_presets) - 1))
+        preset_index = max(0, min(preset_index, len(self.update_rate_presets) - 1))
+        
+        return self.update_rate_presets[preset_index]
+    
+    def _update_smoothed_update_rate(self, target_update_rate):
+        """
+        Apply smoothed historical weighting update to update rate
+        
+        Args:
+            target_update_rate: The target update rate calculated from window size
+            
+        Returns:
+            float: Smoothed update rate
+        """
+        if not self.use_dynamic_window:
+            return self.base_update_rate
+        
+        # Update update rate history for smoothing
+        self.update_rate_history.pop(0)
+        self.update_rate_history.append(target_update_rate)
+        
+        # Calculate smoothed update rate using exponential moving average
+        smoothed_target = sum(self.update_rate_history) / len(self.update_rate_history)
+        
+        # Apply exponential smoothing
+        self.smoothed_update_rate = (self.update_rate_smoothing_factor * smoothed_target + 
+                                   (1 - self.update_rate_smoothing_factor) * self.smoothed_update_rate)
+        
+        # Find nearest preset to ensure smoothed rate stays within preset values
+        distances = [abs(self.smoothed_update_rate - preset) for preset in self.update_rate_presets]
+        nearest_preset_index = distances.index(min(distances))
+        
+        return self.update_rate_presets[nearest_preset_index]
     
     def _update_action_history(self, raw_action, qpos):
         """Update the action and state history for dynamic window sizing"""
@@ -715,10 +788,12 @@ class UnityVRInterface:
                 # Calculate target values based on current conditions
                 target_window_size = self._calculate_target_window_size(raw_action, qpos, actions_for_current)
                 target_decay_factor = self._calculate_target_decay_factor(target_window_size)
+                target_update_rate = self._calculate_target_update_rate(target_window_size)
                 
                 # Apply gradual adjustments with smoothing
                 self.window_size = self._update_gradual_window_size(target_window_size)
                 self.decay_factor = self._update_smoothed_decay_factor(target_decay_factor)
+                self.current_update_rate = self._update_smoothed_update_rate(target_update_rate)
                 
                 # Optional debug output
                 # print(f"Target window: {target_window_size}, Actual window: {self.window_size}, "
@@ -733,7 +808,10 @@ class UnityVRInterface:
             
             return {
                 'action': action_list,
-                'timestep': self.timestep
+                'timestep': self.timestep,
+                'window_size': self.window_size,
+                'decay_factor': f"{self.decay_factor:.4f}",
+                'stepped_inference_update_rate': f"{self.current_update_rate:.4f}"
             }
     
     def _process_image_data(self, state_data):
