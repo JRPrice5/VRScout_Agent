@@ -75,7 +75,7 @@ class UnityVRInterface:
                  window_adjustment_rate=0.1,
                  weight_smoothing_factor=0.3,
                  target_window_history_size=5,
-                 update_rate_presets=[0.016, 0.017, 0.018, 0.019, 0.02, 0.022, 0.024, 0.026, 0.03, 0.035, 0.04],
+                 update_rate_presets=[0.015 ,0.016, 0.017, 0.018, 0.019, 0.02, 0.021, 0.022, 0.024, 0.026, 0.03, 0.035, 0.04],
                  base_update_rate=0.02,
                  update_rate_smoothing_factor=0.3,
                  update_rate_history_size=5):
@@ -512,7 +512,7 @@ class UnityVRInterface:
         # Allow both increases and decreases with asymmetric rates: fast decrease, slow increase
         if smoothed_target < self.smoothed_update_rate:
             # Decreasing: use higher smoothing factor for faster response
-            effective_smoothing_factor = min(self.update_rate_smoothing_factor * 5.0, 0.95)
+            effective_smoothing_factor = min(self.update_rate_smoothing_factor * 5.0, 1.0)
         else:
             # Increasing: use lower smoothing factor for slower response
             effective_smoothing_factor = self.update_rate_smoothing_factor * 0.2
@@ -1023,7 +1023,7 @@ def main():
     parser.add_argument('--max_window_size', type=int, default=24, help='Maximum window size for dynamic sizing')
     parser.add_argument('--base_window_size', type=int, default=12, help='Base window size when not using dynamic sizing')
     parser.add_argument('--action_history_size', type=int, default=20, help='Size of action history buffer for dynamic window sizing')
-    parser.add_argument('--action_variance_weight', type=float, default=0.2, help='Weight for action variance factor (0 to disable)')
+    parser.add_argument('--action_variance_weight', type=float, default=0.1, help='Weight for action variance factor (0 to disable)')
     parser.add_argument('--action_magnitude_weight', type=float, default=0.0, help='Weight for action magnitude factor (0 to disable)')
     parser.add_argument('--prediction_consistency_weight', type=float, default=0.8, help='Weight for prediction consistency factor (0 to disable)')
     parser.add_argument('--state_change_weight', type=float, default=0.0, help='Weight for state change rate factor (0 to disable)')
