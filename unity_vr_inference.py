@@ -76,7 +76,7 @@ class UnityVRInterface:
                  window_adjustment_rate=0.1,
                  weight_smoothing_factor=0.3,
                  target_window_history_size=5,
-                 update_rate_presets=[0.018, 0.02, 0.022, 0.025, 0.028, 0.032, 0.036],
+                 update_rate_presets=[0.018, 0.02, 0.022, 0.024, 0.026, 0.032, 0.036],
                  base_update_rate=0.02,
                  update_rate_smoothing_factor=0.3,
                  update_rate_history_size=5,
@@ -216,18 +216,21 @@ class UnityVRInterface:
         self.query_frequency = query_frequency
         self.last_actions = None
         
+        # For dynamic window sizing sent to Unity
+        self.window_size = self.base_window_size  # Current window size
+        self.decay_factor = self.base_decay_factor  # Current decay factor (dynamically adjusted)
+        self.current_update_rate = self.base_update_rate  # Current update rate
+
         # Initialize temporal aggregation variables if needed
         if self.temporal_agg:
             self.state_dim = len(self.stats['qpos_mean'])
-            self.window_size = self.base_window_size  # Current window size
             self.prediction_buffer = None  # Will store predictions from past policy calls
             self.prediction_timesteps = None  # Will store the timestep when each prediction was made
             self.buffer_index = 0  # Current position in the circular buffer
             self.last_unique_timestep = -1  # Track the last unique timestep to handle repeats
-            self.decay_factor = self.base_decay_factor  # Current decay factor (dynamically adjusted)
             self.current_weight = 0.0  # Weight given to the current prediction (0-1)
             self.reverse_weighting = reverse_weighting
-            
+
             # Initialize action history for dynamic window sizing
             if self.use_dynamic_window:
                 self.recent_actions = torch.zeros([self.action_history_size, self.state_dim]).cuda()
@@ -241,7 +244,6 @@ class UnityVRInterface:
                 self.decay_factor_history = [self.base_decay_factor] * self.target_window_history_size
                 
                 # Dynamic update rate state tracking
-                self.current_update_rate = self.base_update_rate  # Current update rate
                 self.smoothed_update_rate = self.base_update_rate  # Smoothed update rate
                 self.update_rate_history = [self.base_update_rate] * self.update_rate_history_size
                 
@@ -405,16 +407,16 @@ class UnityVRInterface:
             return False
             
         # Check stability based on recent window size changes
-        if len(self.recent_window_changes) >= 5:
-            recent_std = np.std(self.recent_window_changes[-5:])
-            if recent_std < self.stability_threshold:
+        if len(self.recent_window_changes) >= 8:  # Need more history for stable detection
+            recent_std = np.std(self.recent_window_changes[-8:])
+            if recent_std < self.stability_threshold * 2.0:  # More lenient threshold
                 self.stability_counter += 1
                 # Only throttle if we've been stable AND enough time has passed
                 timesteps_since_calc = self.timestep - self.last_calculation_timestep
-                if self.stability_counter > 3 and timesteps_since_calc < self.throttle_interval:
+                if self.stability_counter > 1 and timesteps_since_calc < self.throttle_interval:  # Less strict counter
                     return True
             else:
-                self.stability_counter = 0
+                self.stability_counter = max(0, self.stability_counter - 1)  # Gradual decay instead of reset
                 
         return False
     
@@ -1232,16 +1234,16 @@ def main():
     # Gradual adjustment arguments - 3-tier control system
     # Tier 1: Window Size (Fastest adaptation)
     parser.add_argument('--window_adjustment_rate', type=float, default=0.15, help='Rate of gradual window size adjustment (0-1) - FASTEST')
-    parser.add_argument('--target_window_history_size', type=int, default=50, help='Number of recent target window sizes to track - FASTEST')
+    parser.add_argument('--target_window_history_size', type=int, default=100, help='Number of recent target window sizes to track - FASTEST')
     # Tier 2: Weight Factor (Medium adaptation)
     parser.add_argument('--weight_smoothing_factor', type=float, default=0.05, help='Smoothing factor for historical weighting updates (0-1) - MEDIUM')
     # Tier 3: Update Rate (Slowest adaptation)
     parser.add_argument('--update_rate_smoothing_factor', type=float, default=0.2, help='Smoothing factor for historical update rate updates (0-1) - SLOWEST')
-    parser.add_argument('--update_rate_history_size', type=int, default=300, help='Number of recent update rates to track - SLOWEST')
+    parser.add_argument('--update_rate_history_size', type=int, default=120, help='Number of recent update rates to track - SLOWEST')
 
     # Adaptive normalization (EMA) arguments
     parser.add_argument('--adaptive_scale_beta_up', type=float, default=0.3, help='EMA rate when metric exceeds current scale (fast increase)')
-    parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.0, help='EMA rate when metric is below current scale (slow decrease)')
+    parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.0001, help='EMA rate when metric is below current scale (slow decrease)')
     parser.add_argument('--adaptive_min_scale', type=float, default=1e-4, help='Minimum allowed scale to avoid division by zero')
 
     args = parser.parse_args()
