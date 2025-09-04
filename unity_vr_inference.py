@@ -86,7 +86,11 @@ class UnityVRInterface:
                  adaptive_min_scale=1e-4,
                  # Debugging
                  dw_debug=True,
-                 dw_debug_interval=20):
+                 dw_debug_interval=20,
+                 # Dynamic component toggles
+                 enable_dynamic_window_size=True,
+                 enable_dynamic_decay_factor=True,
+                 enable_dynamic_update_rate=True):
         """
         Initialize the interface.
         
@@ -181,6 +185,11 @@ class UnityVRInterface:
         # Debugging
         self.dw_debug = dw_debug
         self.dw_debug_interval = max(1, int(dw_debug_interval))
+        
+        # Dynamic component toggles
+        self.enable_dynamic_window_size = enable_dynamic_window_size
+        self.enable_dynamic_decay_factor = enable_dynamic_decay_factor
+        self.enable_dynamic_update_rate = enable_dynamic_update_rate
         
         # Dynamic update rate parameters
         self.update_rate_presets = update_rate_presets
@@ -594,7 +603,7 @@ class UnityVRInterface:
         Returns:
             int: Gradually adjusted window size
         """
-        if not self.use_dynamic_window:
+        if not self.use_dynamic_window or not self.enable_dynamic_window_size:
             return self.base_window_size
         
         # Update target window history for smoothing
@@ -622,7 +631,7 @@ class UnityVRInterface:
         Smaller windows -> higher decay factor (more focus on recent)
         Larger windows -> lower decay factor (more smoothing)
         """
-        if not self.use_dynamic_window:
+        if not self.use_dynamic_window or not self.enable_dynamic_decay_factor:
             return self.base_decay_factor
         
         # Normalize window size to [0, 1] range
@@ -643,7 +652,7 @@ class UnityVRInterface:
         Returns:
             float: Smoothed decay factor
         """
-        if not self.use_dynamic_window:
+        if not self.use_dynamic_window or not self.enable_dynamic_decay_factor:
             return self.base_decay_factor
         
         # Update decay factor history for smoothing
@@ -672,7 +681,7 @@ class UnityVRInterface:
         Returns:
             float: Target update rate from preset list
         """
-        if not self.use_dynamic_window:
+        if not self.use_dynamic_window or not self.enable_dynamic_update_rate:
             return self.base_update_rate
         
         # Normalize window size to [0, 1] range
@@ -694,7 +703,7 @@ class UnityVRInterface:
         Returns:
             float: Smoothed update rate (monotonically decreasing)
         """
-        if not self.use_dynamic_window:
+        if not self.use_dynamic_window or not self.enable_dynamic_update_rate:
             return self.base_update_rate
         
         # Update update rate history for smoothing
@@ -720,6 +729,38 @@ class UnityVRInterface:
         nearest_preset_index = distances.index(min(distances))
         
         return self.update_rate_presets[nearest_preset_index]
+    
+    def _handle_unity_toggle_commands(self, state_data):
+        """
+        Handle toggle commands from Unity client for dynamic window components
+        
+        Args:
+            state_data: Dictionary containing state data from Unity
+            
+        Returns:
+            bool: True if this is a toggle-only message, False otherwise
+        """
+        is_toggle_message = False
+        # Check for toggle commands in state_data (now using int format: -1=not set, 0=false, 1=true)
+        if 'toggle_window_size' in state_data and state_data['toggle_window_size'] != -1:
+            self.enable_dynamic_window_size = bool(state_data['toggle_window_size'])
+            is_toggle_message = True
+            if self.dw_debug:
+                print(f"Dynamic window size toggled: {self.enable_dynamic_window_size}")
+        
+        if 'toggle_decay_factor' in state_data and state_data['toggle_decay_factor'] != -1:
+            self.enable_dynamic_decay_factor = bool(state_data['toggle_decay_factor'])
+            is_toggle_message = True
+            if self.dw_debug:
+                print(f"Dynamic decay factor toggled: {self.enable_dynamic_decay_factor}")
+        
+        if 'toggle_update_rate' in state_data and state_data['toggle_update_rate'] != -1:
+            self.enable_dynamic_update_rate = bool(state_data['toggle_update_rate'])
+            is_toggle_message = True
+            if self.dw_debug:
+                print(f"Dynamic update rate toggled: {self.enable_dynamic_update_rate}")
+        
+        return is_toggle_message
     
     def _update_action_history(self, raw_action, qpos):
         """Update the action and state history for dynamic window sizing"""
@@ -867,6 +908,11 @@ class UnityVRInterface:
                             # Use client timestep for synchronization if available
                             if 'timestep' in state_data:
                                 self.timestep = state_data['timestep']
+                            
+                            # Handle toggle commands from Unity client
+                            if self._handle_unity_toggle_commands(state_data):
+                                # This is a toggle-only message, no response needed
+                                continue
                                 
                             action = self._process_state_and_get_action(state_data)
                             
@@ -1050,15 +1096,15 @@ class UnityVRInterface:
             
             # Calculate dynamic window size and decay factor with gradual adjustment if needed
             if self.temporal_agg and self.use_dynamic_window:
-                # Calculate target values based on current conditions
+                # Calculate target values based on current conditions (only if respective components are enabled)
                 target_window_size = self._calculate_target_window_size(raw_action, qpos, actions_for_current)
-                target_decay_factor = self._calculate_target_decay_factor(target_window_size)
-                target_update_rate = self._calculate_target_update_rate(target_window_size)
+                target_decay_factor = self._calculate_target_decay_factor(target_window_size) if self.enable_dynamic_decay_factor else self.base_decay_factor
+                target_update_rate = self._calculate_target_update_rate(target_window_size) if self.enable_dynamic_update_rate else self.base_update_rate
                 
-                # Apply gradual adjustments with smoothing
-                self.window_size = self._update_gradual_window_size(target_window_size)
-                self.decay_factor = self._update_smoothed_decay_factor(target_decay_factor)
-                self.current_update_rate = self._update_smoothed_update_rate(target_update_rate)
+                # Apply gradual adjustments with smoothing (only if respective components are enabled)
+                self.window_size = self._update_gradual_window_size(target_window_size) if self.enable_dynamic_window_size else self.base_window_size
+                self.decay_factor = self._update_smoothed_decay_factor(target_decay_factor) if self.enable_dynamic_decay_factor else self.base_decay_factor
+                self.current_update_rate = self._update_smoothed_update_rate(target_update_rate) if self.enable_dynamic_update_rate else self.base_update_rate
                 
                 # Optional debug output
                 # print(f"Target window: {target_window_size}, Actual window: {self.window_size}, "
@@ -1083,7 +1129,10 @@ class UnityVRInterface:
                 'timestep': self.timestep,
                 'window_size': self.window_size,
                 'decay_factor': f"{self.decay_factor:.4f}",
-                'stepped_inference_update_rate': f"{self.current_update_rate:.4f}"
+                'stepped_inference_update_rate': f"{self.current_update_rate:.4f}",
+                'enable_dynamic_window_size': self.enable_dynamic_window_size,
+                'enable_dynamic_decay_factor': self.enable_dynamic_decay_factor,
+                'enable_dynamic_update_rate': self.enable_dynamic_update_rate
             }
     
     def _process_image_data(self, state_data):
@@ -1245,6 +1294,11 @@ def main():
     parser.add_argument('--adaptive_scale_beta_up', type=float, default=0.3, help='EMA rate when metric exceeds current scale (fast increase)')
     parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.0001, help='EMA rate when metric is below current scale (slow decrease)')
     parser.add_argument('--adaptive_min_scale', type=float, default=1e-4, help='Minimum allowed scale to avoid division by zero')
+    
+    # Dynamic component toggle arguments
+    # parser.add_argument('--enable_dynamic_window_size', action='store_true', help='Enable dynamic window size adjustment')
+    # parser.add_argument('--enable_dynamic_decay_factor', action='store_true', help='Enable dynamic decay factor adjustment')
+    # parser.add_argument('--enable_dynamic_update_rate', action='store_true', help='Enable dynamic update rate adjustment')
 
     args = parser.parse_args()
     
@@ -1293,7 +1347,10 @@ def main():
         update_rate_history_size=args.update_rate_history_size,
         adaptive_scale_beta_up=args.adaptive_scale_beta_up,
         adaptive_scale_beta_down=args.adaptive_scale_beta_down,
-        adaptive_min_scale=args.adaptive_min_scale
+        adaptive_min_scale=args.adaptive_min_scale,
+        # enable_dynamic_window_size=args.enable_dynamic_window_size,
+        # enable_dynamic_decay_factor=args.enable_dynamic_decay_factor,
+        # enable_dynamic_update_rate=args.enable_dynamic_update_rate
     )
     
     interface.start_server()

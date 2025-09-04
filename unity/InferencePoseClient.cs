@@ -25,6 +25,16 @@ namespace CLOVR.IPCClient
         private string currentDecayFactor = "0.0000";
         private float currentInferenceUpdateRate = 0.02f;
         
+        // Dynamic window component toggle states
+        private bool enableDynamicWindowSize = true;
+        private bool enableDynamicDecayFactor = true;
+        private bool enableDynamicUpdateRate = true;
+        
+        // GUI toggle states (for immediate feedback)
+        private bool guiWindowSizeToggle = true;
+        private bool guiDecayFactorToggle = true;
+        private bool guiUpdateRateToggle = true;
+        
         // Performance tracking
         private Dictionary<string, float> timingStats = new Dictionary<string, float>();
         private Dictionary<string, int> timingCounts = new Dictionary<string, int>();
@@ -624,6 +634,16 @@ namespace CLOVR.IPCClient
                     // Update window size and decay factor tracking
                     currentWindowSize = actionData.window_size;
                     currentDecayFactor = actionData.decay_factor ?? "0.0000";
+                    
+                    // Update toggle states from server
+                    enableDynamicWindowSize = actionData.enable_dynamic_window_size;
+                    enableDynamicDecayFactor = actionData.enable_dynamic_decay_factor;
+                    enableDynamicUpdateRate = actionData.enable_dynamic_update_rate;
+                    
+                    // Sync GUI toggles with server state
+                    guiWindowSizeToggle = enableDynamicWindowSize;
+                    guiDecayFactorToggle = enableDynamicDecayFactor;
+                    guiUpdateRateToggle = enableDynamicUpdateRate;
                     
                     // Update inference update rate and apply if auto-adjustment is enabled
                     if (float.TryParse(actionData.stepped_inference_update_rate ?? "0.02", out float newUpdateRate))
@@ -2109,6 +2129,11 @@ namespace CLOVR.IPCClient
             public int imageWidth;
             public int imageHeight;
             public string imageFormat = "jpg"; // Now using JPG encoding instead of raw data
+            
+            // Toggle commands to send to Python server (using int for JsonUtility compatibility)
+            public int toggle_window_size = -1;  // -1 = not set, 0 = false, 1 = true
+            public int toggle_decay_factor = -1;
+            public int toggle_update_rate = -1;
         }
 
         [Serializable]
@@ -2119,10 +2144,13 @@ namespace CLOVR.IPCClient
             public int window_size;
             public string decay_factor;
             public string stepped_inference_update_rate;
+            public bool enable_dynamic_window_size;
+            public bool enable_dynamic_decay_factor;
+            public bool enable_dynamic_update_rate;
         }
         
         /// <summary>
-        /// Display dynamic window information on screen
+        /// Display dynamic window information and toggle controls on screen
         /// </summary>
         private void OnGUI()
         {
@@ -2132,11 +2160,108 @@ namespace CLOVR.IPCClient
             style.normal.textColor = Color.white;
             style.fontStyle = FontStyle.Bold;
             
-            // Display window size, decay factor, and update rate in top-left corner
+            // Create a GUI style for buttons
+            GUIStyle buttonStyle = new GUIStyle(GUI.skin.button);
+            buttonStyle.fontSize = 14;
+            buttonStyle.fontStyle = FontStyle.Bold;
+            
+            // Display current values in top-left corner
             GUI.Label(new Rect(10, 10, 300, 25), $"Window Size: {currentWindowSize}", style);
             GUI.Label(new Rect(10, 35, 300, 25), $"Decay Factor: {currentDecayFactor}", style);
             GUI.Label(new Rect(10, 60, 300, 25), $"Update Rate: {currentInferenceUpdateRate:F4}s", style);
             GUI.Label(new Rect(10, 85, 300, 25), $"Auto Rate: {(useAutoUpdateRate ? "ON" : "OFF")}", style);
+            
+            // Dynamic Window Component Toggles
+            GUI.Label(new Rect(10, 120, 300, 25), "Dynamic Window Controls:", style);
+            
+            // Window Size Toggle
+            bool newWindowSizeToggle = GUI.Toggle(new Rect(10, 150, 200, 25), guiWindowSizeToggle, "Dynamic Window Size");
+            if (newWindowSizeToggle != guiWindowSizeToggle)
+            {
+                guiWindowSizeToggle = newWindowSizeToggle;
+                SendToggleCommand("window_size", guiWindowSizeToggle);
+            }
+            
+            // Decay Factor Toggle
+            bool newDecayFactorToggle = GUI.Toggle(new Rect(10, 175, 200, 25), guiDecayFactorToggle, "Dynamic Decay Factor");
+            if (newDecayFactorToggle != guiDecayFactorToggle)
+            {
+                guiDecayFactorToggle = newDecayFactorToggle;
+                SendToggleCommand("decay_factor", guiDecayFactorToggle);
+            }
+            
+            // Update Rate Toggle
+            bool newUpdateRateToggle = GUI.Toggle(new Rect(10, 200, 200, 25), guiUpdateRateToggle, "Dynamic Update Rate");
+            if (newUpdateRateToggle != guiUpdateRateToggle)
+            {
+                guiUpdateRateToggle = newUpdateRateToggle;
+                SendToggleCommand("update_rate", guiUpdateRateToggle);
+            }
+            
+            // Status indicators
+            GUI.Label(new Rect(220, 150, 100, 25), enableDynamicWindowSize ? "[ON]" : "[OFF]", 
+                     enableDynamicWindowSize ? style : new GUIStyle(style) { normal = { textColor = Color.red } });
+            GUI.Label(new Rect(220, 175, 100, 25), enableDynamicDecayFactor ? "[ON]" : "[OFF]", 
+                     enableDynamicDecayFactor ? style : new GUIStyle(style) { normal = { textColor = Color.red } });
+            GUI.Label(new Rect(220, 200, 100, 25), enableDynamicUpdateRate ? "[ON]" : "[OFF]", 
+                     enableDynamicUpdateRate ? style : new GUIStyle(style) { normal = { textColor = Color.red } });
+        }
+        
+        /// <summary>
+        /// Send toggle command to Python server
+        /// </summary>
+        /// <param name="componentType">Type of component to toggle (window_size, decay_factor, update_rate)</param>
+        /// <param name="enabled">Whether to enable or disable the component</param>
+        private void SendToggleCommand(string componentType, bool enabled)
+        {
+            if (!isConnected)
+            {
+                UnityEngine.Debug.LogWarning($"Cannot send toggle command - not connected to server");
+                return;
+            }
+            
+            try
+            {
+                // Create state data with toggle command
+                var stateData = new StateData
+                {
+                    qpos = GetCurrentQPos(),
+                    image = "", // Empty image for toggle commands to reduce bandwidth
+                    timestep = clientTimestep
+                };
+                
+                // Set the appropriate toggle field (using int values for JsonUtility compatibility)
+                switch (componentType)
+                {
+                    case "window_size":
+                        stateData.toggle_window_size = enabled ? 1 : 0;
+                        break;
+                    case "decay_factor":
+                        stateData.toggle_decay_factor = enabled ? 1 : 0;
+                        break;
+                    case "update_rate":
+                        stateData.toggle_update_rate = enabled ? 1 : 0;
+                        break;
+                }
+                
+                // Convert to JSON and send
+                string jsonData = JsonUtility.ToJson(stateData);
+                byte[] data = Encoding.UTF8.GetBytes(jsonData + "END_OF_MESSAGE");
+                
+                lock (lockObject)
+                {
+                    if (isConnected && stream != null)
+                    {
+                        stream.Write(data, 0, data.Length);
+                        UnityEngine.Debug.Log($"Sent toggle command: {componentType} = {enabled}");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                UnityEngine.Debug.LogError($"Error sending toggle command: {e.Message}");
+                HandleConnectionError();
+            }
         }
     }
 }
