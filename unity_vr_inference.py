@@ -60,28 +60,29 @@ class UnityVRInterface:
                  reverse_weighting=False,
                  activation='relu',
                  use_dynamic_window=False,
-                 min_window_size=4,
-                 max_window_size=32,
+                 # Optimized parameter ranges
+                 min_window_size=8,
+                 max_window_size=24,
                  base_window_size=16,
                  action_history_size=10,
-                 action_variance_weight=0.3,
-                 action_magnitude_weight=0.2,
-                 prediction_consistency_weight=0.4,
-                 state_change_weight=0.1,
-                 action_speed_weight=0.3,
-                 base_decay_factor=0.02,
-                 min_decay_factor=0.01,
-                 max_decay_factor=0.1,
+                 # Unified responsiveness parameter (0.0=smooth, 1.0=responsive)
+                 responsiveness=0.5,
+                 # Computational throttling
+                 stability_threshold=0.1,
+                 throttle_interval=5,
+                 base_decay_factor=0.04,
+                 min_decay_factor=0.02,
+                 max_decay_factor=0.08,
                  window_adjustment_rate=0.1,
                  weight_smoothing_factor=0.3,
                  target_window_history_size=5,
-                 update_rate_presets=[0.017, 0.018, 0.019, 0.02, 0.022, 0.024, 0.026, 0.03, 0.035, 0.04],
+                 update_rate_presets=[0.018, 0.02, 0.022, 0.025, 0.028, 0.032, 0.036],
                  base_update_rate=0.02,
                  update_rate_smoothing_factor=0.3,
                  update_rate_history_size=5,
                  # Adaptive normalization parameters
                  adaptive_scale_beta_up=0.3,
-                 adaptive_scale_beta_down=0.001,
+                 adaptive_scale_beta_down=0.0,
                  adaptive_min_scale=1e-4,
                  # Debugging
                  dw_debug=True,
@@ -118,10 +119,9 @@ class UnityVRInterface:
             max_window_size: Maximum window size for dynamic sizing
             base_window_size: Base window size when not using dynamic sizing
             action_history_size: Length of recent action buffer for dynamic window computation
-            action_variance_weight: Weight for action variance factor (0 to disable)
-            action_magnitude_weight: Weight for action magnitude factor (0 to disable)
-            prediction_consistency_weight: Weight for prediction consistency factor (0 to disable)
-            state_change_weight: Weight for state change rate factor (0 to disable)
+            responsiveness: Unified responsiveness parameter (0.0=smooth, 1.0=responsive)
+            stability_threshold: Threshold for detecting stable periods (for throttling)
+            throttle_interval: Number of timesteps to skip calculations during stable periods
             base_decay_factor: Base decay factor for exponential weighting
             min_decay_factor: Minimum decay factor (for large windows)
             max_decay_factor: Maximum decay factor (for small windows)
@@ -162,11 +162,13 @@ class UnityVRInterface:
         self.max_window_size = max_window_size
         self.base_window_size = base_window_size
         self.action_history_size = action_history_size
-        self.action_variance_weight = action_variance_weight
-        self.action_magnitude_weight = action_magnitude_weight
-        self.prediction_consistency_weight = prediction_consistency_weight
-        self.state_change_weight = state_change_weight
-        self.action_speed_weight = action_speed_weight
+        
+        # Unified responsiveness system
+        self.responsiveness = responsiveness
+        self.stability_threshold = stability_threshold
+        self.throttle_interval = throttle_interval
+        
+        # Decay factor parameters
         self.base_decay_factor = base_decay_factor
         self.min_decay_factor = min_decay_factor
         self.max_decay_factor = max_decay_factor
@@ -195,6 +197,12 @@ class UnityVRInterface:
         stats_path = os.path.join(self.ckpt_dir, f'dataset_stats.pkl')
         with open(stats_path, 'rb') as f:
             self.stats = pickle.load(f)
+        
+        # Load persistent normalization statistics
+        self.normalization_stats_path = os.path.join(self.ckpt_dir, 'normalization_stats.pkl')
+        self.normalization_stats = self._load_normalization_stats()
+        self.save_counter = 0  # Counter for periodic saving
+        self.save_frequency = 1000  # Save every N timesteps
         
         # Centralized preprocessing/postprocessing
         self.boolean_indices = ACTION_INDICES['boolean']
@@ -237,18 +245,67 @@ class UnityVRInterface:
                 self.smoothed_update_rate = self.base_update_rate  # Smoothed update rate
                 self.update_rate_history = [self.base_update_rate] * self.update_rate_history_size
                 
-                # Initialize adaptive normalization scales with prior fixed heuristics
-                # These will adapt online to data distribution
-                self.scale_variance = 0.1
-                self.scale_magnitude = 2.0
-                self.scale_consistency = 0.1
-                self.scale_state_change = 0.5
-                self.scale_speed = 1.0
+                # Initialize adaptive normalization scales from persistent stats or defaults
+                self.scale_variance = self.normalization_stats.get('scale_variance', 0.1)
+                self.scale_magnitude = self.normalization_stats.get('scale_magnitude', 2.0)
+                self.scale_consistency = self.normalization_stats.get('scale_consistency', 0.1)
+                self.scale_state_change = self.normalization_stats.get('scale_state_change', 0.5)
+                self.scale_speed = self.normalization_stats.get('scale_speed', 0.5)
+                
+                # Computational throttling state
+                self.last_calculation_timestep = -1
+                self.cached_target_window = self.base_window_size
+                self.stability_counter = 0
+                self.recent_window_changes = []
         
         # Initialize socket
         self.socket = None
         self.client_socket = None
         self.running = False
+    
+    def _load_normalization_stats(self):
+        """Load persistent normalization statistics from file, with fallback to defaults"""
+        try:
+            if os.path.exists(self.normalization_stats_path):
+                with open(self.normalization_stats_path, 'rb') as f:
+                    stats = pickle.load(f)
+                print(f"Loaded normalization stats from {self.normalization_stats_path}")
+                return stats
+            else:
+                print(f"No normalization stats file found at {self.normalization_stats_path}, using defaults")
+                return {}
+        except Exception as e:
+            print(f"Error loading normalization stats: {e}, using defaults")
+            return {}
+    
+    def _save_normalization_stats(self):
+        """Save current normalization statistics to file"""
+        try:
+            stats = {
+                'scale_variance': self.scale_variance,
+                'scale_magnitude': self.scale_magnitude,
+                'scale_consistency': self.scale_consistency,
+                'scale_state_change': self.scale_state_change,
+                'scale_speed': self.scale_speed,
+                'last_updated': self.timestep,
+                'total_updates': getattr(self, 'total_updates', 0) + 1
+            }
+            
+            # Atomic write to prevent corruption
+            temp_path = self.normalization_stats_path + '.tmp'
+            with open(temp_path, 'wb') as f:
+                pickle.dump(stats, f)
+            
+            # Replace original file atomically
+            if os.path.exists(self.normalization_stats_path):
+                os.remove(self.normalization_stats_path)
+            os.rename(temp_path, self.normalization_stats_path)
+            
+            self.total_updates = stats['total_updates']
+            print(f"Saved normalization stats to {self.normalization_stats_path}")
+            
+        except Exception as e:
+            print(f"Error saving normalization stats: {e}")
     
     def _load_policy(self):
         """Load the trained policy from checkpoint"""
@@ -315,9 +372,55 @@ class UnityVRInterface:
 
         return policy
     
+    def _get_responsiveness_weights(self):
+        """
+        Convert unified responsiveness parameter to individual factor weights
+        
+        Returns:
+            dict: Factor weights based on responsiveness level
+        """
+        # Responsiveness curves: 0.0=smooth, 1.0=responsive
+        r = self.responsiveness
+        
+        return {
+            'variance': 0.0,               # disabled
+            'magnitude': 0.0,              # disabled
+            'consistency': 0.0,            # disabled
+            'state_change': 0.0,           # disabled  
+            'speed': 2.0 * r               # 0.0 to 2.0 (speed dominates at high responsiveness)
+        }
+    
+    def _should_skip_calculation(self):
+        """
+        Determine if we should skip expensive factor calculations due to stability
+        
+        Returns:
+            bool: True if calculation should be skipped
+        """
+        if not self.use_dynamic_window:
+            return False
+            
+        # Always calculate on first few timesteps
+        if self.timestep < 10:
+            return False
+            
+        # Check stability based on recent window size changes
+        if len(self.recent_window_changes) >= 5:
+            recent_std = np.std(self.recent_window_changes[-5:])
+            if recent_std < self.stability_threshold:
+                self.stability_counter += 1
+                # Only throttle if we've been stable AND enough time has passed
+                timesteps_since_calc = self.timestep - self.last_calculation_timestep
+                if self.stability_counter > 3 and timesteps_since_calc < self.throttle_interval:
+                    return True
+            else:
+                self.stability_counter = 0
+                
+        return False
+    
     def _calculate_target_window_size(self, raw_action, qpos, actions_for_current=None):
         """
-        Calculate target window size based on action characteristics with individual factor controls
+        Calculate target window size using unified responsiveness parameter and computational throttling
         
         Args:
             raw_action: Current raw action tensor
@@ -329,10 +432,21 @@ class UnityVRInterface:
         """
         if not self.use_dynamic_window:
             return self.base_window_size
+        
+        # Check if we should skip expensive calculations
+        if self._should_skip_calculation():
+            return self.cached_target_window
             
+        # Update calculation timestamp
+        self.last_calculation_timestep = self.timestep
+        
+        # Get factor weights from unified responsiveness parameter
+        weights = self._get_responsiveness_weights()
+        
         factors = []
         total_weight = 0
         debug_info = {
+            'responsiveness': self.responsiveness,
             'variance': None, 'var_scale': None, 'var_norm': None,
             'magnitude': None, 'mag_scale': None, 'mag_norm': None,
             'pred_var': None, 'cons_scale': None, 'cons_norm': None,
@@ -352,7 +466,7 @@ class UnityVRInterface:
             return new_scale
 
         # Factor 1: Action Variance (higher variance -> smaller window for responsiveness)
-        if self.action_variance_weight > 0 and self.timestep >= 5:  # Need some history
+        if weights['variance'] > 0 and self.timestep >= 5:  # Need some history
             # Get valid recent actions
             valid_actions = self.recent_actions[:min(self.timestep, self.action_history_size)]
             if len(valid_actions) > 1:
@@ -360,54 +474,54 @@ class UnityVRInterface:
                 # Adaptive normalization
                 variance_scale = _update_scale('variance', action_variance)
                 variance_factor = min(action_variance / (variance_scale + 1e-8), 1.0)
-                factors.append(self.action_variance_weight * (1.0 - variance_factor))
-                total_weight += self.action_variance_weight
+                factors.append(weights['variance'] * (1.0 - variance_factor))
+                total_weight += weights['variance']
                 # Debug capture
                 debug_info['variance'] = action_variance
                 debug_info['var_scale'] = variance_scale
                 debug_info['var_norm'] = variance_factor
         
         # Factor 2: Action Magnitude (higher magnitude -> smaller window for responsiveness)
-        if self.action_magnitude_weight > 0:
+        if weights['magnitude'] > 0:
             action_magnitude = torch.norm(raw_action).item()
             # Adaptive normalization
             magnitude_scale = _update_scale('magnitude', action_magnitude)
             magnitude_factor = min(action_magnitude / (magnitude_scale + 1e-8), 1.0)
-            factors.append(self.action_magnitude_weight * (1.0 - magnitude_factor))
-            total_weight += self.action_magnitude_weight
+            factors.append(weights['magnitude'] * (1.0 - magnitude_factor))
+            total_weight += weights['magnitude']
             # Debug capture
             debug_info['magnitude'] = action_magnitude
             debug_info['mag_scale'] = magnitude_scale
             debug_info['mag_norm'] = magnitude_factor
         
         # Factor 3: Prediction Consistency (higher consistency -> larger window for smoothness)
-        if self.prediction_consistency_weight > 0 and actions_for_current is not None and len(actions_for_current) > 1:
+        if weights['consistency'] > 0 and actions_for_current is not None and len(actions_for_current) > 1:
             prediction_variance = torch.var(actions_for_current, dim=0).mean().item()
             # Adaptive normalization (higher variance -> less consistency)
             consistency_scale = _update_scale('consistency', prediction_variance)
             consistency_factor = 1.0 - min(prediction_variance / (consistency_scale + 1e-8), 1.0)
-            factors.append(self.prediction_consistency_weight * consistency_factor)
-            total_weight += self.prediction_consistency_weight
+            factors.append(weights['consistency'] * consistency_factor)
+            total_weight += weights['consistency']
             # Debug capture
             debug_info['pred_var'] = prediction_variance
             debug_info['cons_scale'] = consistency_scale
             debug_info['cons_norm'] = 1.0 - consistency_factor  # normalized variance component
         
         # Factor 4: State Change Rate (higher change rate -> smaller window)
-        if self.state_change_weight > 0 and self.previous_qpos is not None:
+        if weights['state_change'] > 0 and self.previous_qpos is not None:
             state_change = torch.norm(qpos.squeeze() - self.previous_qpos).item()
             # Adaptive normalization
             state_change_scale = _update_scale('state_change', state_change)
             change_factor = min(state_change / (state_change_scale + 1e-8), 1.0)
-            factors.append(self.state_change_weight * (1.0 - change_factor))
-            total_weight += self.state_change_weight
+            factors.append(weights['state_change'] * (1.0 - change_factor))
+            total_weight += weights['state_change']
             # Debug capture
             debug_info['state_change'] = state_change
             debug_info['state_scale'] = state_change_scale
             debug_info['state_norm'] = change_factor
         
         # Factor 5: Action Speed (higher speed -> smaller window for responsiveness)
-        if self.action_speed_weight > 0 and self.timestep >= 2:  # Need at least 2 actions
+        if weights['speed'] > 0 and self.timestep >= 2:  # Need at least 2 actions
             # Calculate mean speed using vectorized operations
             num_actions = min(self.timestep, self.action_history_size)
             if num_actions >= 2:
@@ -437,8 +551,8 @@ class UnityVRInterface:
                 # Adaptive normalization
                 speed_scale = _update_scale('speed', mean_action_speed)
                 speed_factor = min(mean_action_speed / (speed_scale + 1e-8), 1.0)
-                factors.append(self.action_speed_weight * (1.0 - speed_factor))
-                total_weight += self.action_speed_weight
+                factors.append(weights['speed'] * (1.0 - speed_factor))
+                total_weight += weights['speed']
                 # Debug capture
                 debug_info['speed'] = mean_action_speed
                 debug_info['speed_scale'] = speed_scale
@@ -456,6 +570,15 @@ class UnityVRInterface:
     
         if self.dw_debug and self.timestep % self.dw_debug_interval == 0:
             print(f"Debug info: {debug_info}")
+            print(f"Combined factor: {combined_factor:.3f}, Target window: {target_window_size}")
+
+        # Cache the result for potential throttling
+        self.cached_target_window = target_window_size
+        
+        # Update recent window changes for stability detection
+        self.recent_window_changes.append(target_window_size)
+        if len(self.recent_window_changes) > 10:
+            self.recent_window_changes.pop(0)
 
         return max(self.min_window_size, min(target_window_size, self.max_window_size))
     
@@ -585,7 +708,7 @@ class UnityVRInterface:
             self.smoothed_update_rate = smoothed_target
         else:
             # Increasing: use lower smoothing factor for slower response
-            effective_smoothing_factor = self.update_rate_smoothing_factor * 0.2
+            effective_smoothing_factor = self.update_rate_smoothing_factor
             # Apply exponential smoothing for increases only
             self.smoothed_update_rate = (effective_smoothing_factor * smoothed_target + 
                                        (1 - effective_smoothing_factor) * self.smoothed_update_rate)
@@ -946,6 +1069,13 @@ class UnityVRInterface:
             # Convert to list for JSON serialization
             action_list = action.tolist()
             
+            # Periodic saving of normalization stats
+            if self.use_dynamic_window:
+                self.save_counter += 1
+                if self.save_counter >= self.save_frequency:
+                    self._save_normalization_stats()
+                    self.save_counter = 0
+            
             return {
                 'action': action_list,
                 'timestep': self.timestep,
@@ -1088,18 +1218,16 @@ def main():
     
     # Dynamic window sizing arguments
     parser.add_argument('--use_dynamic_window', action='store_true', help='Use dynamic window sizing')
-    parser.add_argument('--min_window_size', type=int, default=4, help='Minimum window size for dynamic sizing')
+    parser.add_argument('--min_window_size', type=int, default=8, help='Minimum window size for dynamic sizing')
     parser.add_argument('--max_window_size', type=int, default=24, help='Maximum window size for dynamic sizing')
-    parser.add_argument('--base_window_size', type=int, default=12, help='Base window size when not using dynamic sizing')
-    parser.add_argument('--action_history_size', type=int, default=40, help='Size of action history buffer for dynamic window sizing')
-    parser.add_argument('--action_variance_weight', type=float, default=0.1, help='Weight for action variance factor (0 to disable)')
-    parser.add_argument('--action_magnitude_weight', type=float, default=0.0, help='Weight for action magnitude factor (0 to disable)')
-    parser.add_argument('--prediction_consistency_weight', type=float, default=1.0, help='Weight for prediction consistency factor (0 to disable)')
-    parser.add_argument('--state_change_weight', type=float, default=0.0, help='Weight for state change rate factor (0 to disable)')
-    parser.add_argument('--action_speed_weight', type=float, default=0.2, help='Weight for action speed factor (0 to disable)')
+    parser.add_argument('--base_window_size', type=int, default=16, help='Base window size when not using dynamic sizing')
+    parser.add_argument('--action_history_size', type=int, default=100, help='Size of action history buffer for dynamic window sizing')
+    parser.add_argument('--responsiveness', type=float, default=0.8, help='Unified responsiveness parameter (0.0=smooth, 1.0=responsive)')
+    parser.add_argument('--stability_threshold', type=float, default=0.1, help='Threshold for detecting stable periods (for throttling)')
+    parser.add_argument('--throttle_interval', type=int, default=5, help='Number of timesteps to skip calculations during stable periods')
     parser.add_argument('--base_decay_factor', type=float, default=0.02, help='Base decay factor for exponential weighting')
-    parser.add_argument('--min_decay_factor', type=float, default=0.00, help='Minimum decay factor (for large windows)')
-    parser.add_argument('--max_decay_factor', type=float, default=0.04, help='Maximum decay factor (for small windows)')
+    parser.add_argument('--min_decay_factor', type=float, default=0.01, help='Minimum decay factor (for large windows)')
+    parser.add_argument('--max_decay_factor', type=float, default=0.022, help='Maximum decay factor (for small windows)')
     
     # Gradual adjustment arguments - 3-tier control system
     # Tier 1: Window Size (Fastest adaptation)
@@ -1113,7 +1241,7 @@ def main():
 
     # Adaptive normalization (EMA) arguments
     parser.add_argument('--adaptive_scale_beta_up', type=float, default=0.3, help='EMA rate when metric exceeds current scale (fast increase)')
-    parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.001, help='EMA rate when metric is below current scale (slow decrease)')
+    parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.0, help='EMA rate when metric is below current scale (slow decrease)')
     parser.add_argument('--adaptive_min_scale', type=float, default=1e-4, help='Minimum allowed scale to avoid division by zero')
 
     args = parser.parse_args()
@@ -1150,11 +1278,9 @@ def main():
         max_window_size=args.max_window_size,
         base_window_size=args.base_window_size,
         action_history_size=args.action_history_size,
-        action_variance_weight=args.action_variance_weight,
-        action_magnitude_weight=args.action_magnitude_weight,
-        prediction_consistency_weight=args.prediction_consistency_weight,
-        state_change_weight=args.state_change_weight,
-        action_speed_weight=args.action_speed_weight,
+        responsiveness=args.responsiveness,
+        stability_threshold=args.stability_threshold,
+        throttle_interval=args.throttle_interval,
         base_decay_factor=args.base_decay_factor,
         min_decay_factor=args.min_decay_factor,
         max_decay_factor=args.max_decay_factor,
