@@ -1271,7 +1271,7 @@ def main():
     parser.add_argument('--use_dynamic_window', action='store_true', help='Use dynamic window sizing')
     parser.add_argument('--min_window_size', type=int, default=8, help='Minimum window size for dynamic sizing')
     parser.add_argument('--max_window_size', type=int, default=24, help='Maximum window size for dynamic sizing')
-    parser.add_argument('--base_window_size', type=int, default=16, help='Base window size when not using dynamic sizing')
+    parser.add_argument('--base_window_size', type=int, default=12, help='Base window size when not using dynamic sizing')
     parser.add_argument('--action_history_size', type=int, default=100, help='Size of action history buffer for dynamic window sizing')
     parser.add_argument('--responsiveness', type=float, default=0.8, help='Unified responsiveness parameter (0.0=smooth, 1.0=responsive)')
     parser.add_argument('--stability_threshold', type=float, default=0.1, help='Threshold for detecting stable periods (for throttling)')
