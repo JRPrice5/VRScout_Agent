@@ -1269,8 +1269,8 @@ def main():
     
     # Dynamic window sizing arguments
     parser.add_argument('--use_dynamic_window', action='store_true', help='Use dynamic window sizing')
-    parser.add_argument('--min_window_size', type=int, default=8, help='Minimum window size for dynamic sizing')
-    parser.add_argument('--max_window_size', type=int, default=24, help='Maximum window size for dynamic sizing')
+    parser.add_argument('--min_window_size', type=int, default=6, help='Minimum window size for dynamic sizing')
+    parser.add_argument('--max_window_size', type=int, default=30, help='Maximum window size for dynamic sizing')
     parser.add_argument('--base_window_size', type=int, default=12, help='Base window size when not using dynamic sizing')
     parser.add_argument('--action_history_size', type=int, default=100, help='Size of action history buffer for dynamic window sizing')
     parser.add_argument('--responsiveness', type=float, default=0.8, help='Unified responsiveness parameter (0.0=smooth, 1.0=responsive)')
@@ -1288,11 +1288,11 @@ def main():
     parser.add_argument('--weight_smoothing_factor', type=float, default=0.05, help='Smoothing factor for historical weighting updates (0-1) - MEDIUM')
     # Tier 3: Update Rate (Slowest adaptation)
     parser.add_argument('--update_rate_smoothing_factor', type=float, default=0.2, help='Smoothing factor for historical update rate updates (0-1) - SLOWEST')
-    parser.add_argument('--update_rate_history_size', type=int, default=120, help='Number of recent update rates to track - SLOWEST')
+    parser.add_argument('--update_rate_history_size', type=int, default=200, help='Number of recent update rates to track - SLOWEST')
 
     # Adaptive normalization (EMA) arguments
     parser.add_argument('--adaptive_scale_beta_up', type=float, default=0.3, help='EMA rate when metric exceeds current scale (fast increase)')
-    parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.0001, help='EMA rate when metric is below current scale (slow decrease)')
+    parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.00005, help='EMA rate when metric is below current scale (slow decrease)')
     parser.add_argument('--adaptive_min_scale', type=float, default=1e-4, help='Minimum allowed scale to avoid division by zero')
     
     # Dynamic component toggle arguments
