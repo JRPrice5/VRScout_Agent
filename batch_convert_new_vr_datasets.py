@@ -77,7 +77,7 @@ def find_dataset_folders(input_dir):
     return datasets
 
 
-def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update_constants=False, task_name="vr_dataset"):
+def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update_constants=False, task_name="vr_dataset", ignore_devices=None):
     """
     Process multiple VR datasets in batch mode, combining them as episodes of a single task.
     
@@ -87,6 +87,7 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
         episode_length: Optional length to split episodes
         update_constants: Whether to update constants.py with the new task
         task_name: Name for the combined task in constants.py
+        ignore_devices: List of devices to ignore (e.g., ['left_controller', 'right_controller', 'hmd'])
     """
     # Find all dataset folders
     print(f"Scanning for datasets in {input_dir}...")
@@ -127,7 +128,8 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
             image_dir,
             output_dir,
             episode_length,
-            start_episode_idx=start_episode_idx + total_episodes
+            start_episode_idx=start_episode_idx + total_episodes,
+            ignore_devices=ignore_devices
         )
         
         total_episodes += num_new_episodes
@@ -174,6 +176,8 @@ def main():
     parser.add_argument('--update_constants', action='store_true', help='Update constants.py with new tasks')
     parser.add_argument('--task_name', type=str, default='vr_dataset', help='Name for the combined task in constants.py')
     parser.add_argument('--constants_file', type=str, default=None, help='Path to constants.py file (optional)')
+    parser.add_argument('--ignore_devices', type=str, nargs='+', default=None, 
+                        help='Devices to ignore (zero out). Options: hmd, left_controller, right_controller. Example: --ignore_devices left_controller')
     
     args = parser.parse_args()
     
@@ -186,7 +190,8 @@ def main():
         args.output_dir,
         args.episode_length,
         args.update_constants,
-        args.task_name
+        args.task_name,
+        ignore_devices=args.ignore_devices
     )
 
 

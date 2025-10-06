@@ -116,7 +116,7 @@ def find_closest_image(timestamp, image_timestamps):
     return image_timestamps[closest_ts]
 
 
-def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False):
+def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False, ignore_devices=None):
     """
     Convert VR dataset to HDF5 format for ACT training.
     
@@ -126,12 +126,28 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
         output_dir: Directory to save HDF5 files
         episode_length: Optional length to split episodes
         start_episode_idx: Starting index for episode numbering (for batch processing)
+        flip_vertical: Whether to flip images vertically
+        ignore_devices: List of devices to ignore (e.g., ['left_controller', 'right_controller', 'hmd'])
         
     Returns:
         Number of episodes created
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Process ignore_devices parameter
+    if ignore_devices is None:
+        ignore_devices = []
+    ignore_devices = [d.lower() for d in ignore_devices]
+    
+    # Validate device names
+    valid_devices = ['hmd', 'left_controller', 'right_controller']
+    for device in ignore_devices:
+        if device not in valid_devices:
+            print(f"Warning: Unknown device '{device}'. Valid devices are: {valid_devices}")
+    
+    if ignore_devices:
+        print(f"Ignoring devices: {ignore_devices}")
     
     # Load CSV data
     print(f"Loading data from {csv_file}...")
@@ -280,25 +296,52 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     righthand_grip_state = 1.0 if row['righthand_grip_state_changed'].lower() == 'true' else 0.0
                         
                 # Map new CSV columns to qpos format
+                # Apply device ignoring logic
+                if 'hmd' in ignore_devices:
+                    hmd_pos = [0.0, 0.0, 0.0]
+                    hmd_rot = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
+                else:
+                    hmd_pos = [float(row['hmd_position_x']), float(row['hmd_position_y']), float(row['hmd_position_z'])]
+                    hmd_rot = [float(row['hmd_rotation_x']), float(row['hmd_rotation_y']), float(row['hmd_rotation_z']), float(row['hmd_rotation_w'])]
+                
+                if 'left_controller' in ignore_devices:
+                    left_pos = [0.0, 0.0, 0.0]
+                    left_rot = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
+                    left_trigger = 0.0
+                    left_grip = 0.0
+                else:
+                    left_pos = [float(row['controller_lefthand_position_x']), float(row['controller_lefthand_position_y']), float(row['controller_lefthand_position_z'])]
+                    left_rot = [float(row['controller_lefthand_rotation_x']), float(row['controller_lefthand_rotation_y']), float(row['controller_lefthand_rotation_z']), float(row['controller_lefthand_rotation_w'])]
+                    left_trigger = lefthand_trigger_state
+                    left_grip = lefthand_grip_state
+                
+                if 'right_controller' in ignore_devices:
+                    right_pos = [0.0, 0.0, 0.0]
+                    right_rot = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
+                    right_trigger = 0.0
+                    right_grip = 0.0
+                else:
+                    right_pos = [float(row['controller_righthand_position_x']), float(row['controller_righthand_position_y']), float(row['controller_righthand_position_z'])]
+                    right_rot = [float(row['controller_righthand_rotation_x']), float(row['controller_righthand_rotation_y']), float(row['controller_righthand_rotation_z']), float(row['controller_righthand_rotation_w'])]
+                    right_trigger = righthand_trigger_state
+                    right_grip = righthand_grip_state
+                
                 qpos_row = [
                     # Head (local position)
-                    float(row['hmd_position_x']), float(row['hmd_position_y']), float(row['hmd_position_z']),
-                    float(row['hmd_rotation_x']), float(row['hmd_rotation_y']), float(row['hmd_rotation_z']), float(row['hmd_rotation_w']),
+                    *hmd_pos, *hmd_rot,
                     
                     # Left controller (local position)
-                    float(row['controller_lefthand_position_x']), float(row['controller_lefthand_position_y']), float(row['controller_lefthand_position_z']),
-                    float(row['controller_lefthand_rotation_x']), float(row['controller_lefthand_rotation_y']), float(row['controller_lefthand_rotation_z']), float(row['controller_lefthand_rotation_w']),
+                    *left_pos, *left_rot,
                     
                     # Right controller (local position)
-                    float(row['controller_righthand_position_x']), float(row['controller_righthand_position_y']), float(row['controller_righthand_position_z']),
-                    float(row['controller_righthand_rotation_x']), float(row['controller_righthand_rotation_y']), float(row['controller_righthand_rotation_z']), float(row['controller_righthand_rotation_w']),
+                    *right_pos, *right_rot,
                     
                     # XR Origin (world position) - assuming 0 for now as it's not in the new CSV
                     0.0, 0.0, 0.0,
                     
                     # Controller inputs - map trigger and grip states to expected format
-                    lefthand_trigger_state, righthand_trigger_state,
-                    lefthand_grip_state, righthand_grip_state,
+                    left_trigger, right_trigger,
+                    left_grip, right_grip,
                     0.0, 0.0,  # Thumbstick_0_x/y - assuming 0 as not in new CSV
                     0.0, 0.0   # Thumbstick_1_x/y - assuming 0 as not in new CSV
                 ]
@@ -485,6 +528,8 @@ def main():
     parser.add_argument('--task_name', type=str, default='new_vr_dataset', help='Name for the task in constants.py')
     parser.add_argument('--update_constants', action='store_true', help='Update constants.py with new task')
     parser.add_argument('--constants_file', type=str, default=None, help='Path to constants.py file (optional)')
+    parser.add_argument('--ignore_devices', type=str, nargs='+', default=None, 
+                        help='Devices to ignore (zero out). Options: hmd, left_controller, right_controller. Example: --ignore_devices left_controller')
     
     args = parser.parse_args()
     
@@ -493,7 +538,8 @@ def main():
         args.csv_file, 
         args.image_dir, 
         args.output_dir, 
-        args.episode_length
+        args.episode_length,
+        ignore_devices=args.ignore_devices
     )
     
     # Count number of episodes
