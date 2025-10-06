@@ -1069,12 +1069,30 @@ class UnityVRInterface:
                                 
                             weights = weights / weights.sum()
                             
-                            # Compute weighted average of past predictions (vectorized)
-                            history_action = (actions_for_current * weights.unsqueeze(-1)).sum(dim=0)
+                            # Separate continuous and boolean actions for aggregation
+                            # Boolean buttons should not be aggregated - use most recent state
+                            continuous_indices = ACTION_INDICES['continuous']
+                            boolean_indices = ACTION_INDICES['boolean']
                             
-                            # Blend current action with history using the current_weight parameter
-                            raw_action = (self.current_weight * current_action + 
-                                         (1 - self.current_weight) * history_action).unsqueeze(0)
+                            # Extract continuous actions for aggregation
+                            actions_for_current_continuous = actions_for_current[:, continuous_indices]
+                            current_action_continuous = current_action[continuous_indices]
+                            
+                            # Compute weighted average of past predictions for continuous actions only
+                            history_action_continuous = (actions_for_current_continuous * weights.unsqueeze(-1)).sum(dim=0)
+                            
+                            # Blend current action with history using the current_weight parameter (continuous only)
+                            aggregated_continuous = (self.current_weight * current_action_continuous + 
+                                                    (1 - self.current_weight) * history_action_continuous)
+                            
+                            # For boolean buttons, use the most recent prediction without aggregation
+                            current_action_boolean = current_action[boolean_indices]
+                            
+                            # Reconstruct full action by combining aggregated continuous and non-aggregated boolean
+                            raw_action = torch.zeros_like(current_action)
+                            raw_action[continuous_indices] = aggregated_continuous
+                            raw_action[boolean_indices] = current_action_boolean
+                            raw_action = raw_action.unsqueeze(0)
                         else:
                             # No valid predictions for current timestep
                             raw_action = current_action.unsqueeze(0)
