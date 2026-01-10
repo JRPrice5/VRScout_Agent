@@ -5,7 +5,7 @@ import numpy as np
 # These indices are based on the qpos format in convert_new_vr_dataset.py
 ACTION_INDICES = {
     # Controller positions and rotations (continuous)
-    'continuous': list(range(0, 24)) + list(range(28, 32)),  # All except button states and world position
+    'continuous': list(range(0, 24)) + list(range(28, 32)),  # Default (legacy 32D); dynamic handling is in split_actions_by_type
     
     # Button states (boolean)
     'boolean': list(range(24, 28)),  # Indices 24-27 are the button states
@@ -28,8 +28,12 @@ def split_actions_by_type(actions):
         continuous_actions: Tensor containing only continuous action dimensions
         boolean_actions: Tensor containing only boolean action dimensions
     """
-    continuous_indices = ACTION_INDICES['continuous']
-    boolean_indices = ACTION_INDICES['boolean']
+    action_dim = int(actions.shape[-1])
+    if action_dim < 28:
+        raise ValueError(f"action_dim too small ({action_dim}); expected at least 28")
+
+    continuous_indices = list(range(0, 24)) + list(range(28, action_dim))
+    boolean_indices = list(range(24, 28))
     
     continuous_actions = actions[:, :, continuous_indices]
     boolean_actions = actions[:, :, boolean_indices]

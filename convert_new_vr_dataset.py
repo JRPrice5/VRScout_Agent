@@ -173,6 +173,14 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
     
     # We'll process the CSV in chunks by episode to save memory
     header_fields = header.split(',')
+
+    def _get_float(row, key, default=0.0):
+        if key not in row:
+            return default
+        v = row[key]
+        if v == "" or pd.isna(v):
+            return default
+        return float(v)
     
     # Get column indices for required fields to avoid loading entire dataframe
     required_cols = [
@@ -185,6 +193,13 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
         'controller_righthand_rotation_x', 'controller_righthand_rotation_y', 'controller_righthand_rotation_z', 'controller_righthand_rotation_w',
         'lefthand_trigger_state_changed', 'lefthand_grip_state_changed',
         'righthand_trigger_state_changed', 'righthand_grip_state_changed'
+        ,
+        'generictracker_1_position_x', 'generictracker_1_position_y', 'generictracker_1_position_z',
+        'generictracker_1_rotation_x', 'generictracker_1_rotation_y', 'generictracker_1_rotation_z', 'generictracker_1_rotation_w',
+        'generictracker_2_position_x', 'generictracker_2_position_y', 'generictracker_2_position_z',
+        'generictracker_2_rotation_x', 'generictracker_2_rotation_y', 'generictracker_2_rotation_z', 'generictracker_2_rotation_w',
+        'generictracker_3_position_x', 'generictracker_3_position_y', 'generictracker_3_position_z',
+        'generictracker_3_rotation_x', 'generictracker_3_rotation_y', 'generictracker_3_rotation_z', 'generictracker_3_rotation_w'
     ]
     
     # Process image directory - map timestamps to file paths
@@ -301,8 +316,8 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     hmd_pos = [0.0, 0.0, 0.0]
                     hmd_rot = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
                 else:
-                    hmd_pos = [float(row['hmd_position_x']), float(row['hmd_position_y']), float(row['hmd_position_z'])]
-                    hmd_rot = [float(row['hmd_rotation_x']), float(row['hmd_rotation_y']), float(row['hmd_rotation_z']), float(row['hmd_rotation_w'])]
+                    hmd_pos = [_get_float(row, 'hmd_position_x'), _get_float(row, 'hmd_position_y'), _get_float(row, 'hmd_position_z')]
+                    hmd_rot = [_get_float(row, 'hmd_rotation_x'), _get_float(row, 'hmd_rotation_y'), _get_float(row, 'hmd_rotation_z'), _get_float(row, 'hmd_rotation_w', 1.0)]
                 
                 if 'left_controller' in ignore_devices:
                     left_pos = [0.0, 0.0, 0.0]
@@ -310,8 +325,8 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     left_trigger = 0.0
                     left_grip = 0.0
                 else:
-                    left_pos = [float(row['controller_lefthand_position_x']), float(row['controller_lefthand_position_y']), float(row['controller_lefthand_position_z'])]
-                    left_rot = [float(row['controller_lefthand_rotation_x']), float(row['controller_lefthand_rotation_y']), float(row['controller_lefthand_rotation_z']), float(row['controller_lefthand_rotation_w'])]
+                    left_pos = [_get_float(row, 'controller_lefthand_position_x'), _get_float(row, 'controller_lefthand_position_y'), _get_float(row, 'controller_lefthand_position_z')]
+                    left_rot = [_get_float(row, 'controller_lefthand_rotation_x'), _get_float(row, 'controller_lefthand_rotation_y'), _get_float(row, 'controller_lefthand_rotation_z'), _get_float(row, 'controller_lefthand_rotation_w', 1.0)]
                     left_trigger = lefthand_trigger_state
                     left_grip = lefthand_grip_state
                 
@@ -321,10 +336,17 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     right_trigger = 0.0
                     right_grip = 0.0
                 else:
-                    right_pos = [float(row['controller_righthand_position_x']), float(row['controller_righthand_position_y']), float(row['controller_righthand_position_z'])]
-                    right_rot = [float(row['controller_righthand_rotation_x']), float(row['controller_righthand_rotation_y']), float(row['controller_righthand_rotation_z']), float(row['controller_righthand_rotation_w'])]
+                    right_pos = [_get_float(row, 'controller_righthand_position_x'), _get_float(row, 'controller_righthand_position_y'), _get_float(row, 'controller_righthand_position_z')]
+                    right_rot = [_get_float(row, 'controller_righthand_rotation_x'), _get_float(row, 'controller_righthand_rotation_y'), _get_float(row, 'controller_righthand_rotation_z'), _get_float(row, 'controller_righthand_rotation_w', 1.0)]
                     right_trigger = righthand_trigger_state
                     right_grip = righthand_grip_state
+
+                tracker_1_pos = [_get_float(row, 'generictracker_1_position_x'), _get_float(row, 'generictracker_1_position_y'), _get_float(row, 'generictracker_1_position_z')]
+                tracker_1_rot = [_get_float(row, 'generictracker_1_rotation_x'), _get_float(row, 'generictracker_1_rotation_y'), _get_float(row, 'generictracker_1_rotation_z'), _get_float(row, 'generictracker_1_rotation_w', 1.0)]
+                tracker_2_pos = [_get_float(row, 'generictracker_2_position_x'), _get_float(row, 'generictracker_2_position_y'), _get_float(row, 'generictracker_2_position_z')]
+                tracker_2_rot = [_get_float(row, 'generictracker_2_rotation_x'), _get_float(row, 'generictracker_2_rotation_y'), _get_float(row, 'generictracker_2_rotation_z'), _get_float(row, 'generictracker_2_rotation_w', 1.0)]
+                tracker_3_pos = [_get_float(row, 'generictracker_3_position_x'), _get_float(row, 'generictracker_3_position_y'), _get_float(row, 'generictracker_3_position_z')]
+                tracker_3_rot = [_get_float(row, 'generictracker_3_rotation_x'), _get_float(row, 'generictracker_3_rotation_y'), _get_float(row, 'generictracker_3_rotation_z'), _get_float(row, 'generictracker_3_rotation_w', 1.0)]
                 
                 qpos_row = [
                     # Head (local position)
@@ -343,7 +365,12 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     left_trigger, right_trigger,
                     left_grip, right_grip,
                     0.0, 0.0,  # Thumbstick_0_x/y - assuming 0 as not in new CSV
-                    0.0, 0.0   # Thumbstick_1_x/y - assuming 0 as not in new CSV
+                    0.0, 0.0,  # Thumbstick_1_x/y - assuming 0 as not in new CSV
+                    
+                    # Generic trackers
+                    *tracker_1_pos, *tracker_1_rot,
+                    *tracker_2_pos, *tracker_2_rot,
+                    *tracker_3_pos, *tracker_3_rot
                 ]
                 
                 qpos_data.append(qpos_row)

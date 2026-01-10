@@ -24,8 +24,13 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
         hidden_dim = self.model.transformer.d_model
         self.hidden_dim = hidden_dim
         # Infer action splits
-        self.cont_dim = len(ACTION_INDICES['continuous'])
-        self.bin_dim = len(ACTION_INDICES['boolean'])
+        action_dim = int(getattr(self.model, 'action_dim', 32))
+        if action_dim < 28:
+            raise ValueError(f"action_dim too small ({action_dim}); expected at least 28")
+        # continuous: 0..23 plus 28..(action_dim-1)
+        self.cont_dim = 24 + max(0, action_dim - 28)
+        # boolean: 24..27
+        self.bin_dim = 4
         # Stochastic heads
         self.cont_mu_head = nn.Linear(hidden_dim, self.cont_dim)
         self.cont_log_std_head = nn.Linear(hidden_dim, self.cont_dim)
@@ -59,7 +64,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             # Compute mixed loss for continuous and boolean actions
             mixed_losses = compute_mixed_loss(a_hat, actions, is_pad, 
                                              continuous_weight=1.0, 
-                                             boolean_weight=0.1)  # Lower weight for boolean actions
+                                             boolean_weight=0.0)  # Lower weight for boolean actions
             
             loss_dict = dict()
             loss_dict['continuous_l1'] = mixed_losses['continuous_l1']

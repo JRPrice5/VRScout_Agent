@@ -326,6 +326,7 @@ class UnityVRInterface:
         if self.policy_class == 'ACT':
             # ACT policy configuration with DETR required parameters
             policy_config = {
+                'state_dim': len(self.stats['qpos_mean']),
                 'num_queries': self.chunk_size,
                 'kl_weight': self.kl_weight,
                 'hidden_dim': self.hidden_dim,

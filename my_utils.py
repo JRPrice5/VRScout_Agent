@@ -92,11 +92,10 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # normalize image and change dtype to float
         image_data = image_data / 255.0
 
-        # Import action indices for splitting actions by type
-        from action_utils import ACTION_INDICES
-
-        # Get boolean indices for clamping after normalization
-        boolean_indices = ACTION_INDICES['boolean']
+        # Boolean indices are fixed in the action layout
+        if action_dim < 28:
+            raise ValueError(f"action_dim too small ({action_dim}); expected at least 28")
+        boolean_indices = list(range(24, 28))
 
         # Convert numpy arrays to torch tensors and ensure float32 dtype
         action_mean = torch.tensor(self.norm_stats["action_mean"], dtype=torch.float32)

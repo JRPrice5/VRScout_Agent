@@ -51,7 +51,13 @@ def main(args):
     camera_names = task_config['camera_names']
 
     # fixed parameters
-    state_dim = 32  # Updated from 14 to match actual dimension
+    # Infer state/action dimension from dataset (supports extended layouts)
+    first_episode_path = os.path.join(dataset_dir, 'episode_0.hdf5')
+    if not os.path.isfile(first_episode_path):
+        raise FileNotFoundError(f"Could not find {first_episode_path} to infer state_dim")
+    import h5py
+    with h5py.File(first_episode_path, 'r') as f:
+        state_dim = int(f['/observations/qpos'].shape[1])
     lr_backbone = args.get('lr_backbone', 1e-6)
     # Use backbone from args if provided, otherwise default to resnet18
     backbone = args.get('backbone', 'resnet18')
@@ -72,10 +78,12 @@ def main(args):
                          'nheads': nheads,
                          'activation': activation,
                          'camera_names': camera_names,
+                         'state_dim': state_dim,
                          }
     elif policy_class == 'CNNMLP':
         policy_config = {'lr': args['lr'], 'lr_backbone': lr_backbone, 'backbone': backbone, 'num_queries': 1,
-                         'camera_names': camera_names, }
+                         'camera_names': camera_names,
+                         'state_dim': state_dim, }
     else:
         raise NotImplementedError
 
