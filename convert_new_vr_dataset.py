@@ -30,6 +30,8 @@ from pyquaternion import Quaternion
 from datetime import datetime
 import matplotlib.pyplot as plt
 import re
+import torch
+import torchaudio
 
 
 def calculate_quaternion_delta(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
@@ -116,7 +118,7 @@ def find_closest_image(timestamp, image_timestamps):
     return image_timestamps[closest_ts]
 
 
-def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False, ignore_devices=None):
+def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False, ignore_devices=None, audio_file=None, audio_csv=None, audio_window_len=0.3, audio_n_mels=80):
     """
     Convert VR dataset to HDF5 format for ACT training.
     
@@ -128,6 +130,10 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
         start_episode_idx: Starting index for episode numbering (for batch processing)
         flip_vertical: Whether to flip images vertically
         ignore_devices: List of devices to ignore (e.g., ['left_controller', 'right_controller', 'hmd'])
+        audio_file: Path to the .wav audio file
+        audio_csv: Path to the aligned audio timestamps CSV
+        audio_window_len: Length of audio window in seconds
+        audio_n_mels: Number of mel bins for spectrogram
         
     Returns:
         Number of episodes created
@@ -149,6 +155,56 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
     if ignore_devices:
         print(f"Ignoring devices: {ignore_devices}")
     
+    # Load Audio Data if provided
+    waveform = None
+    sample_rate = None
+    anchor_sample_index = 0
+    mel_transform = None
+    amp_to_db = None
+    
+    if audio_file and audio_csv:
+        print(f"Loading audio from {audio_file}...")
+        try:
+            waveform, sample_rate = torchaudio.load(audio_file)
+            print(f"Audio loaded: {waveform.shape}, SR: {sample_rate}")
+            
+            print(f"Loading audio alignment from {audio_csv}...")
+            audio_df = pd.read_csv(audio_csv)
+            
+            # Calculate the anchor sample index (where timestamp == 0.0)
+            # timestamp = (frame_index_end - anchor_sample_index) / sample_rate
+            # => anchor_sample_index = frame_index_end - (timestamp * sample_rate)
+            # We calculate this for all rows and take the median to be robust
+            audio_df['calculated_anchor'] = audio_df['frame_index_end'] - (audio_df['timestamp'] * sample_rate)
+            anchor_sample_index = int(audio_df['calculated_anchor'].median())
+            print(f"Calculated anchor sample index: {anchor_sample_index}")
+            
+            # Initialize transforms
+            # Standard settings for log-mel
+            n_fft = 1024
+            hop_length = 512
+            win_length = 1024
+            
+            mel_transform = torchaudio.transforms.MelSpectrogram(
+                sample_rate=sample_rate,
+                n_fft=n_fft,
+                win_length=win_length,
+                hop_length=hop_length,
+                n_mels=audio_n_mels,
+                center=True,
+                pad_mode="reflect",
+                power=2.0,
+                norm="slaney",
+                mel_scale="slaney",
+            )
+            
+            amp_to_db = torchaudio.transforms.AmplitudeToDB()
+            
+        except Exception as e:
+            print(f"Error loading audio: {e}")
+            print("Continuing without audio data...")
+            waveform = None
+
     # Load CSV data
     print(f"Loading data from {csv_file}...")
     
@@ -288,6 +344,7 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
             qpos_data = []
             action_data = []
             image_data = []
+            audio_data = []
             
             # Reset state tracking at the beginning of each episode
             lefthand_trigger_state = 0
@@ -406,6 +463,49 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                             blank_img = np.zeros((224, 224, 3), dtype=np.uint8)
                         image_data.append(blank_img)
                         print(f"Warning: No matching image found for timestamp {row['timestamp']}")
+
+                # Extract Audio Feature
+                if waveform is not None:
+                    # Current timestamp in seconds (relative to anchor)
+                    curr_time = float(row['timestamp'])
+                    
+                    # Calculate sample indices
+                    # Window is [curr_time - audio_window_len, curr_time]
+                    end_sample = int(anchor_sample_index + curr_time * sample_rate)
+                    start_sample = int(end_sample - audio_window_len * sample_rate)
+                    
+                    # Handle boundaries
+                    waveform_len = waveform.shape[1]
+                    
+                    if end_sample > 0 and start_sample < waveform_len:
+                        # Calculate valid extraction range
+                        valid_start = max(0, start_sample)
+                        valid_end = min(waveform_len, end_sample)
+                        
+                        # Extract valid chunk
+                        chunk = waveform[:, valid_start:valid_end]
+                        
+                        # Pad if necessary
+                        pad_left = valid_start - start_sample
+                        pad_right = end_sample - valid_end
+                        
+                        if pad_left > 0 or pad_right > 0:
+                            chunk = torch.nn.functional.pad(chunk, (pad_left, pad_right))
+                    else:
+                        # Completely out of bounds, return silence
+                        chunk = torch.zeros((waveform.shape[0], int(audio_window_len * sample_rate)))
+
+                    # Compute Log-Mel Spectrogram
+                    # chunk shape: (channels, time)
+                    melspec = mel_transform(chunk)
+                    log_mel = amp_to_db(melspec)
+                    
+                    # Average across channels to get (n_mels, time)
+                    # Or keep it as is? Usually (n_mels, time) is expected for standard inputs
+                    # Let's average for now to be safe and reduce dimensions
+                    log_mel_mono = torch.mean(log_mel, dim=0)
+                    
+                    audio_data.append(log_mel_mono.numpy())
             
             # Create action data (using next row values directly)
             for i in range(len(qpos_data) - 1):
@@ -427,6 +527,11 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
             
             # Store images
             images_group = f.create_group('/observations/images')
+            
+            # Store audio
+            if audio_data:
+                audio_data = np.array(audio_data)
+                f.create_dataset('/observations/audio_obs', data=audio_data, compression='gzip', compression_opts=4)
             
             if image_data:
                 # Process images in smaller batches to reduce peak memory usage
@@ -558,6 +663,12 @@ def main():
     parser.add_argument('--ignore_devices', type=str, nargs='+', default=None, 
                         help='Devices to ignore (zero out). Options: hmd, left_controller, right_controller. Example: --ignore_devices left_controller')
     
+    # Audio arguments
+    parser.add_argument('--audio_file', type=str, default=None, help='Path to .wav file')
+    parser.add_argument('--audio_csv', type=str, default=None, help='Path to audio timestamps CSV')
+    parser.add_argument('--audio_window_len', type=float, default=0.3, help='Audio window duration in seconds')
+    parser.add_argument('--audio_n_mels', type=int, default=64, help='Number of mel bins')
+    
     args = parser.parse_args()
     
     # Convert dataset
@@ -566,7 +677,11 @@ def main():
         args.image_dir, 
         args.output_dir, 
         args.episode_length,
-        ignore_devices=args.ignore_devices
+        ignore_devices=args.ignore_devices,
+        audio_file=args.audio_file,
+        audio_csv=args.audio_csv,
+        audio_window_len=args.audio_window_len,
+        audio_n_mels=args.audio_n_mels
     )
     
     # Count number of episodes

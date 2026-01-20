@@ -24,12 +24,13 @@ def find_dataset_folders(input_dir):
     Find all potential dataset folders in the input directory.
     A valid dataset folder must contain a CSV file in the /Poses subdirectory
     and JPG images in the /Pictures/leftEye subdirectory.
+    It may optionally contain audio files in /Audio or root.
     
     Args:
         input_dir: Path to the parent directory containing dataset folders
         
     Returns:
-        List of tuples (folder_path, csv_file, image_dir)
+        List of tuples (folder_path, csv_file, image_dir, audio_file, audio_csv)
     """
     datasets = []
     
@@ -72,12 +73,53 @@ def find_dataset_folders(input_dir):
         # Use the leftEye directory as the image directory
         image_dir = left_eye_dir
         
-        datasets.append((folder_path, csv_file, image_dir))
+        # Look for Audio files
+        # Expecting .wav file and timestamps .csv file
+        audio_file = None
+        audio_csv = None
+        
+        # Check standard locations: root, Audio/
+        search_paths = [
+            folder_path,
+            os.path.join(folder_path, "VR_Audio_recordings")
+        ]
+        
+        found_audio_wav = []
+        found_audio_csv = []
+        
+        for sp in search_paths:
+            if os.path.exists(sp):
+                # Look for WAV files (assuming VR_Audio prefix as per previous context)
+                # Or just any .wav file if that's safer? Let's look for *.wav
+                wavs = glob.glob(os.path.join(sp, "*.wav"))
+                found_audio_wav.extend(wavs)
+                
+                # Look for corresponding CSVs (timestamps)
+                # Usually named like VR_Audio_..._timestamps.csv or similar
+                # We'll look for any CSV that isn't the main Pose CSV if possible, 
+                # or specifically one that looks like an audio timestamp file.
+                # Let's search for *timestamps*.csv to be safe
+                csvs = glob.glob(os.path.join(sp, "*timestamps*.csv"))
+                found_audio_csv.extend(csvs)
+
+        if found_audio_wav:
+            audio_file = found_audio_wav[0] # Take the first one found
+            
+        if found_audio_csv:
+            audio_csv = found_audio_csv[0] # Take the first one found
+            
+        # Basic validation: if we have one but not the other, warn but proceed without audio
+        if (audio_file and not audio_csv) or (audio_csv and not audio_file):
+            print(f"Warning: Incomplete audio data in {folder_path}. Wav: {bool(audio_file)}, CSV: {bool(audio_csv)}. Skipping audio.")
+            audio_file = None
+            audio_csv = None
+
+        datasets.append((folder_path, csv_file, image_dir, audio_file, audio_csv))
     
     return datasets
 
 
-def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update_constants=False, task_name="vr_dataset", ignore_devices=None):
+def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update_constants=False, task_name="vr_dataset", ignore_devices=None, audio_window_len=0.3, audio_n_mels=80):
     """
     Process multiple VR datasets in batch mode, combining them as episodes of a single task.
     
@@ -88,6 +130,8 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
         update_constants: Whether to update constants.py with the new task
         task_name: Name for the combined task in constants.py
         ignore_devices: List of devices to ignore (e.g., ['left_controller', 'right_controller', 'hmd'])
+        audio_window_len: Length of audio window in seconds
+        audio_n_mels: Number of mel bins for spectrogram
     """
     # Find all dataset folders
     print(f"Scanning for datasets in {input_dir}...")
@@ -108,12 +152,17 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
     
     # Process each dataset
     total_episodes = 0
-    for i, (folder_path, csv_file, image_dir) in enumerate(tqdm(datasets, desc="Processing datasets")):
+    for i, (folder_path, csv_file, image_dir, audio_file, audio_csv) in enumerate(tqdm(datasets, desc="Processing datasets")):
         folder_name = os.path.basename(folder_path)
         
         print(f"\nProcessing dataset {i+1}/{len(datasets)}: {folder_name}")
         print(f"  CSV file: {csv_file}")
         print(f"  Image directory: {image_dir}")
+        if audio_file:
+            print(f"  Audio file: {audio_file}")
+            print(f"  Audio CSV: {audio_csv}")
+        else:
+            print(f"  Audio: None")
         print(f"  Output directory: {output_dir}")
         print(f"  Starting from episode index: {start_episode_idx + total_episodes}")
         
@@ -129,7 +178,11 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
             output_dir,
             episode_length,
             start_episode_idx=start_episode_idx + total_episodes,
-            ignore_devices=ignore_devices
+            ignore_devices=ignore_devices,
+            audio_file=audio_file,
+            audio_csv=audio_csv,
+            audio_window_len=audio_window_len,
+            audio_n_mels=audio_n_mels
         )
         
         total_episodes += num_new_episodes
@@ -179,6 +232,10 @@ def main():
     parser.add_argument('--ignore_devices', type=str, nargs='+', default=None, 
                         help='Devices to ignore (zero out). Options: hmd, left_controller, right_controller. Example: --ignore_devices left_controller')
     
+    # Audio arguments
+    parser.add_argument('--audio_window_len', type=float, default=0.3, help='Audio window duration in seconds')
+    parser.add_argument('--audio_n_mels', type=int, default=64, help='Number of mel bins')
+    
     args = parser.parse_args()
     
     # Create output directory if it doesn't exist
@@ -191,7 +248,9 @@ def main():
         args.episode_length,
         args.update_constants,
         args.task_name,
-        ignore_devices=args.ignore_devices
+        ignore_devices=args.ignore_devices,
+        audio_window_len=args.audio_window_len,
+        audio_n_mels=args.audio_n_mels
     )
 
 
