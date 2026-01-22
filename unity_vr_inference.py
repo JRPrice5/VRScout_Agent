@@ -23,6 +23,9 @@ import pickle
 from PIL import Image
 import io
 import base64
+import torchaudio
+import tensorflow as tf
+import tensorflow_hub as hub
 
 # Add the current directory to path to import ACT modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -90,7 +93,10 @@ class UnityVRInterface:
                  # Dynamic component toggles
                  enable_dynamic_window_size=True,
                  enable_dynamic_decay_factor=True,
-                 enable_dynamic_update_rate=True):
+                 enable_dynamic_update_rate=True,
+                 # Audio processing
+                 use_audio=False,
+                 input_sample_rate=48000):
         """
         Initialize the interface.
         
@@ -136,11 +142,37 @@ class UnityVRInterface:
             base_update_rate: Base update rate when not using dynamic adjustment
             update_rate_smoothing_factor: Smoothing factor for update rate adjustments (0-1)
             update_rate_history_size: Number of recent target update rates to track
+            use_audio: Whether to use audio features
+            input_sample_rate: Input sample rate for audio from Unity
             """
         self.host = host
         self.port = port
         self.camera_names = camera_names
         self.temporal_agg = temporal_agg
+        
+        # Audio configuration
+        self.use_audio = use_audio
+        self.input_sample_rate = input_sample_rate
+        self.target_sample_rate = 16000
+        self.audio_window_seconds = 0.96 # YAMNet expects ~0.96s
+        self.audio_buffer_size = int(self.target_sample_rate * self.audio_window_seconds)
+        self.audio_buffer = np.zeros(self.audio_buffer_size, dtype=np.float32)
+        
+        if self.use_audio:
+            print(f"Initializing Audio Processing (YAMNet)... Input SR: {self.input_sample_rate}, Target SR: {self.target_sample_rate}")
+            # Initialize resampler
+            if self.input_sample_rate != self.target_sample_rate:
+                self.resampler = torchaudio.transforms.Resample(self.input_sample_rate, self.target_sample_rate)
+            else:
+                self.resampler = None
+                
+            # Load YAMNet model
+            try:
+                self.yamnet_model = hub.load('https://tfhub.dev/google/yamnet/1')
+                print("YAMNet model loaded successfully.")
+            except Exception as e:
+                print(f"Error loading YAMNet model: {e}")
+                self.use_audio = False # Disable if model load fails
         
         # Store DETR required parameters
         self.ckpt_dir = ckpt_dir
@@ -971,18 +1003,21 @@ class UnityVRInterface:
             # Process image data
             curr_image = self._process_image_data(state_data)
             
+            # Process audio data
+            curr_audio = self._process_audio_data(state_data)
+            
             # Get action from policy
             if self.policy_class == 'ACT':
                 # Only query the policy when needed based on query_frequency
                 time_index = self.timestep % self.query_frequency
                 if time_index == 0:
-                    all_actions = self.policy(qpos, curr_image)
+                    all_actions = self.policy(qpos, curr_image, audio=curr_audio)
                     self.last_actions = all_actions  # Store for future timesteps
                 else:
                     # Use previously computed actions if not querying on this timestep
                     if self.last_actions is None:
                         # First timestep or in case there's no previous action
-                        all_actions = self.policy(qpos, curr_image)
+                        all_actions = self.policy(qpos, curr_image, audio=curr_audio)
                         self.last_actions = all_actions
                         time_index = 0
                     else:
@@ -1089,7 +1124,7 @@ class UnityVRInterface:
                     actions_for_current = None
             
             elif self.policy_class == 'CNNMLP':
-                raw_action = self.policy(qpos, curr_image)
+                raw_action = self.policy(qpos, curr_image) # CNNMLP doesn't support audio yet
                 actions_for_current = None
             
             # Update action history for dynamic window sizing
@@ -1136,6 +1171,74 @@ class UnityVRInterface:
                 'enable_dynamic_update_rate': self.enable_dynamic_update_rate
             }
     
+    def _process_audio_data(self, state_data):
+        """
+        Process audio data from Unity
+        
+        Args:
+            state_data: Dictionary containing state data from Unity
+            
+        Returns:
+            Processed audio embedding tensor (1024-d)
+        """
+        if not self.use_audio:
+            return None
+            
+        # Extract audio samples from state_data
+        # Expecting 'audio' key with list of float samples
+        new_samples = state_data.get('audio', [])
+        
+        if not new_samples:
+            # If no audio samples, return zero embedding or handle gracefully
+            # For now, just return zeros if buffer is empty, or use last embedding?
+            # Better to return None and let policy handle it (policy expects None or tensor)
+            # But policy expects 1024-d tensor if audio is provided.
+            # If we enabled use_audio, we should provide something.
+            pass
+        else:
+            new_samples = np.array(new_samples, dtype=np.float32)
+            
+            # Resample if necessary
+            if self.input_sample_rate != self.target_sample_rate and hasattr(self, 'resampler') and self.resampler is not None:
+                # Torchaudio expects tensor [channel, time]
+                waveform = torch.from_numpy(new_samples).unsqueeze(0)
+                waveform = self.resampler(waveform)
+                new_samples = waveform.squeeze(0).numpy()
+        
+            # Append to buffer (ring buffer style)
+            # Shift buffer
+            num_new = len(new_samples)
+            if num_new > 0:
+                self.audio_buffer = np.roll(self.audio_buffer, -num_new)
+                self.audio_buffer[-num_new:] = new_samples
+        
+        # Get the window for inference
+        waveform = self.audio_buffer
+        
+        # Run YAMNet inference
+        # YAMNet expects a batch of waveforms: [N, samples]
+        # We process a single window
+        # Note: YAMNet might output multiple scores for a long waveform.
+        # We want the embedding for the whole window (or the latest frame).
+        # TF Hub YAMNet returns (scores, embeddings, log_mel_spectrogram)
+        # scores: [N, 521]
+        # embeddings: [N, 1024]
+        
+        try:
+            scores, embeddings, spectrogram = self.yamnet_model(waveform)
+            # Take the mean embedding if multiple frames, or just the last one?
+            # YAMNet window is 0.96s, hop is 0.48s.
+            # If we provide exactly 0.96s, we get 1 frame.
+            embedding = embeddings[-1] # Take the latest frame
+            
+            # Convert to torch tensor
+            audio_emb = torch.from_numpy(embedding.numpy()).float().cuda()
+            return audio_emb
+            
+        except Exception as e:
+            print(f"Error in YAMNet inference: {e}")
+            return torch.zeros(1024).float().cuda()
+
     def _process_image_data(self, state_data):
         """
         Process image data from Unity
@@ -1296,6 +1399,10 @@ def main():
     parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.00005, help='EMA rate when metric is below current scale (slow decrease)')
     parser.add_argument('--adaptive_min_scale', type=float, default=1e-4, help='Minimum allowed scale to avoid division by zero')
     
+    # Audio arguments
+    parser.add_argument('--use_audio', action='store_true', help='Use audio features')
+    parser.add_argument('--input_sample_rate', type=int, default=48000, help='Input sample rate for audio from Unity')
+
     # Dynamic component toggle arguments
     # parser.add_argument('--enable_dynamic_window_size', action='store_true', help='Enable dynamic window size adjustment')
     # parser.add_argument('--enable_dynamic_decay_factor', action='store_true', help='Enable dynamic decay factor adjustment')
@@ -1349,6 +1456,8 @@ def main():
         adaptive_scale_beta_up=args.adaptive_scale_beta_up,
         adaptive_scale_beta_down=args.adaptive_scale_beta_down,
         adaptive_min_scale=args.adaptive_min_scale,
+        use_audio=args.use_audio,
+        input_sample_rate=args.input_sample_rate
         # enable_dynamic_window_size=args.enable_dynamic_window_size,
         # enable_dynamic_decay_factor=args.enable_dynamic_decay_factor,
         # enable_dynamic_update_rate=args.enable_dynamic_update_rate

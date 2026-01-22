@@ -7,19 +7,22 @@ def custom_collate_fn(batch):
     Custom collate function to handle variable-length sequences in the batch.
     
     Args:
-        batch: List of tuples (image_data, qpos_data, action_data, is_pad)
+        batch: List of tuples (image_data, qpos_data, action_data, is_pad, audio_data)
     
     Returns:
         Batched tensors with proper padding
     """
     # Separate the batch components
-    image_data, qpos_data, action_data, is_pad = zip(*batch)
+    image_data, qpos_data, action_data, is_pad, audio_data = zip(*batch)
     
     # Stack images - these should all be the same size
     image_data = torch.stack(image_data, dim=0)
     
     # Stack qpos - these should all be the same size
     qpos_data = torch.stack(qpos_data, dim=0)
+
+    # Stack audio - these should all be the same size
+    audio_data = torch.stack(audio_data, dim=0)
     
     # For action_data which has variable lengths, we need to pad
     # First determine the max length
@@ -52,4 +55,4 @@ def custom_collate_fn(batch):
     # Stack the padded is_pad
     is_pad = torch.stack(padded_is_pad, dim=0)
     
-    return image_data, qpos_data, action_data, is_pad
+    return image_data, qpos_data, action_data, is_pad, audio_data

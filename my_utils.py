@@ -80,6 +80,20 @@ class EpisodicDataset(torch.utils.data.Dataset):
             all_cam_images.append(image_dict[cam_name])
         all_cam_images = np.stack(all_cam_images, axis=0)
 
+        # load audio if available
+        audio_data = torch.zeros(1024) # Default to zero if not found
+        if '/observations/audio_obs' in root:
+            # Load audio for the current timestep
+            # Assuming audio_obs is aligned with qpos at same index
+            # Check shape of audio_obs
+            if len(root['/observations/audio_obs'].shape) > 0:
+                # If it has same length as qpos, index it
+                # Otherwise, it might be a single embedding per episode? 
+                # Based on convert script, it's per timestep.
+                audio_idx = min(start_ts, root['/observations/audio_obs'].shape[0] - 1)
+                audio_np = root['/observations/audio_obs'][audio_idx]
+                audio_data = torch.from_numpy(audio_np).float()
+
         # construct observations
         image_data = torch.from_numpy(all_cam_images)
         qpos_data = torch.from_numpy(qpos).float()
@@ -112,7 +126,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
         qpos_data = (qpos_data - qpos_mean) / qpos_std
 
-        return image_data, qpos_data, action_data, is_pad
+        return image_data, qpos_data, action_data, is_pad, audio_data
 
 
 def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
@@ -289,6 +303,14 @@ class StepDataset(torch.utils.data.Dataset):
                 all_cam_images.append(root[f'/observations/images/{cam_name}'][t])
             all_cam_images = np.stack(all_cam_images, axis=0)  # [K, H, W, C]
 
+            # Audio at t
+            audio_data = torch.zeros(1024)
+            if '/observations/audio_obs' in root:
+                if len(root['/observations/audio_obs'].shape) > 0:
+                    audio_idx = min(t, root['/observations/audio_obs'].shape[0] - 1)
+                    audio_np = root['/observations/audio_obs'][audio_idx]
+                    audio_data = torch.from_numpy(audio_np).float()
+
             # Action alignment and chunking to mimic EpisodicDataset policy
             episode_len = self.episode_lengths[episode_pos]
             window_len = self.num_queries
@@ -329,7 +351,7 @@ class StepDataset(torch.utils.data.Dataset):
         if available_len < self.num_queries:
             is_pad[available_len:] = True
 
-        return image_data, qpos_data, action_data, is_pad
+        return image_data, qpos_data, action_data, is_pad, audio_data
 
 
 def load_expert_step_loader(dataset_dir, num_episodes, camera_names, batch_size,

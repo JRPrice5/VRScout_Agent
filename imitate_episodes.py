@@ -428,8 +428,12 @@ def train_bc(train_dataloader, val_dataloader, config):
             policy.eval()
             epoch_dicts = []
             for batch_idx, data in enumerate(val_dataloader):
-                forward_dict = forward_pass(data, policy)
-                epoch_dicts.append(forward_dict)
+                image, qpos, action, is_pad, audio = data
+                image, qpos, action, is_pad = image.cuda(), qpos.cuda(), action.cuda(), is_pad.cuda()
+                audio = audio.cuda()
+                
+                loss_dict = policy(qpos, image, action, is_pad, audio)
+                epoch_dicts.append(loss_dict)
             epoch_summary = compute_dict_mean(epoch_dicts)
             validation_history.append(epoch_summary)
 
@@ -447,24 +451,21 @@ def train_bc(train_dataloader, val_dataloader, config):
         policy.train()
         optimizer.zero_grad()
         current_epoch_train = []
-        # Track sample visitation order using the DataLoader's sampler permutation
-        # try:
-        #     train_perm = list(iter(train_dataloader.sampler))
-        # except Exception:
-        #     train_perm = None
-        # if train_perm is not None:
-        #     # Basic sanity: expect permutation covering full dataset once
-        #     unique_count = len(set(train_perm))
-        #     expected = len(train_dataloader.dataset)
-        #     print(f"Train sampler order: {unique_count}/{expected} unique indices this epoch")
         for batch_idx, data in enumerate(train_dataloader):
-            forward_dict = forward_pass(data, policy)
-            # backward
-            loss = forward_dict['loss']
+            image, qpos, action, is_pad, audio = data
+            image, qpos, action, is_pad = image.cuda(), qpos.cuda(), action.cuda(), is_pad.cuda()
+            audio = audio.cuda()
+            
+            if batch_idx == 0:
+                print(f"[Train] Batch shapes - Image: {image.shape}, Qpos: {qpos.shape}, Action: {action.shape}, Audio: {audio.shape}")
+
+            optimizer.zero_grad()
+            loss_dict = policy(qpos, image, action, is_pad, audio)
+            loss = loss_dict['loss']
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            det = detach_dict(forward_dict)
+            det = detach_dict(loss_dict)
             train_history.append(det)
             current_epoch_train.append(det)
         epoch_summary = compute_dict_mean(current_epoch_train)

@@ -134,7 +134,7 @@ SIM_TASK_CONFIGS = {
     },
     'sim_vr_task_temp_audio_test': {
         'dataset_dir': r'D:\CLOVR_Output\TEMP\HDF5',
-        'num_episodes': 2,
+        'num_episodes': 10,
         'episode_len': 3071,
         'camera_names': ['camera1']
     },

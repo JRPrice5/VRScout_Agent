@@ -38,7 +38,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
         # Value head
         self.value_head = nn.Linear(hidden_dim, 1)
 
-    def __call__(self, qpos, image, actions=None, is_pad=None):
+    def __call__(self, qpos, image, actions=None, is_pad=None, audio=None):
         env_state = None
         # Print image shape and info before normalization
         print(f"[Policy] Input image shape: {image.shape}, dtype: {image.dtype}")
@@ -54,11 +54,14 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             raise
         # Convert inputs to float32 to match model weights
         qpos = qpos.float()
+        if audio is not None:
+            audio = audio.float()
+            
         if actions is not None: # training time
             actions = actions[:, :self.model.num_queries].float()
             is_pad = is_pad[:, :self.model.num_queries]
 
-            a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, actions, is_pad)
+            a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, actions, is_pad, audio=audio)
             total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
             
             # Compute mixed loss for continuous and boolean actions
@@ -74,10 +77,10 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             loss_dict['loss'] = mixed_losses['total_loss'] + loss_dict['kl'] * self.kl_weight
             return loss_dict
         else: # inference time
-            a_hat, _, (_, _) = self.model(qpos, image, env_state) # no action, sample from prior
+            a_hat, _, (_, _) = self.model(qpos, image, env_state, audio=audio) # no action, sample from prior
             return a_hat
 
-    def forward(self, qpos, image, prev_actions=None, is_pad=None, out_mode: str = "dist"):
+    def forward(self, qpos, image, prev_actions=None, is_pad=None, audio=None, out_mode: str = "dist"):
         """
         Enhanced forward that exposes ACT features and adds stochastic/value heads.
         - out_mode="dist": return distributions for continuous and binary actions + value + hidden.
@@ -99,10 +102,12 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
         else:
             raise ValueError(f"Unsupported image dims {image.dim()}, expected 4D or 5D tensor")
         qpos = qpos.float()
+        if audio is not None:
+            audio = audio.float()
 
         # Compute hidden states h using the backbone/transformer
         # forward() already normalized image, so skip extra normalization inside encoder
-        h = self.encode_to_hidden(qpos, image, env_state, do_normalize=False)  # [B, T, H]
+        h = self.encode_to_hidden(qpos, image, env_state, audio=audio, do_normalize=False)  # [B, T, H]
         try:
             print('[DBG][FWD] h', tuple(h.shape))
         except Exception:
@@ -188,7 +193,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                 'value': value,
             }
 
-    def encode_to_hidden(self, qpos, image, env_state=None, do_normalize: bool = True, microbatch: Optional[int] = None):
+    def encode_to_hidden(self, qpos, image, env_state=None, audio=None, do_normalize: bool = True, microbatch: Optional[int] = None):
         """
         Expose per-step hidden features h_t without refactoring the backbone.
         - Optionally normalize images (ImageNet stats) if do_normalize=True.
@@ -207,8 +212,13 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                 e = min(B, s + mb)
                 q_mb = qpos[s:e]
                 img_mb = image[s:e]
+                audio_mb = audio[s:e] if audio is not None else None
+                
                 # Move to device lazily per chunk
                 q_mb = q_mb.to(device, non_blocking=True).float()
+                if audio_mb is not None:
+                    audio_mb = audio_mb.to(device, non_blocking=True).float()
+                    
                 # Support 5D [B,K,C,H,W] and 4D [B,C,H,W]
                 if img_mb.dim() == 5:
                     Bm, K, C, H, W = img_mb.shape
@@ -242,6 +252,13 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                             all_cam_features.append(self.model.input_proj(features))
                             all_cam_pos.append(pos)
                         proprio_input = self.model.input_proj_robot_state(q_mb)
+                        
+                        # Handle audio input
+                        if audio_mb is not None:
+                            audio_input = self.model.input_proj_audio(audio_mb)
+                        else:
+                            audio_input = torch.zeros_like(proprio_input)
+                            
                         src = torch.cat(all_cam_features, axis=3)
                         pos = torch.cat(all_cam_pos, axis=3)
                         # Create zero latent and project to match model.forward
@@ -262,7 +279,8 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                             src, None, self.model.query_embed.weight, pos,
                             latent_input,
                             proprio_input,
-                            self.model.additional_pos_embed.weight
+                            self.model.additional_pos_embed.weight,
+                            audio_input=audio_input
                         )[0]
                         try:
                             print("[DBG][ENC] post-transformer")
@@ -273,7 +291,11 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                     with autocast(enabled=True):
                         qpos_proj = self.model.input_proj_robot_state(q_mb)
                         env_proj = self.model.input_proj_env_state(env_state)
-                        transformer_input = torch.cat([qpos_proj, env_proj], axis=1)
+                        if audio_mb is not None:
+                            audio_input = self.model.input_proj_audio(audio_mb)
+                            transformer_input = torch.cat([qpos_proj, env_proj, audio_input], axis=1)
+                        else:
+                            transformer_input = torch.cat([qpos_proj, env_proj], axis=1)
                         hs_mb = self.model.transformer(transformer_input, None, self.model.query_embed.weight, self.model.pos.weight)[0]
 
                 outs.append(hs_mb)

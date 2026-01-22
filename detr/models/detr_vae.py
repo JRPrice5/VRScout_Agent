@@ -57,10 +57,12 @@ class DETRVAE(nn.Module):
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
             self.backbones = nn.ModuleList(backbones)
             self.input_proj_robot_state = nn.Linear(state_dim, hidden_dim)
+            self.input_proj_audio = nn.Linear(1024, hidden_dim) # Project 1024-d audio embedding
         else:
             # input_dim = 32 + 7 # robot_state + env_state
             self.input_proj_robot_state = nn.Linear(state_dim, hidden_dim)
             self.input_proj_env_state = nn.Linear(7, hidden_dim)
+            self.input_proj_audio = nn.Linear(1024, hidden_dim)
             self.pos = torch.nn.Embedding(2, hidden_dim)
             self.backbones = None
 
@@ -77,14 +79,15 @@ class DETRVAE(nn.Module):
 
         # decoder extra parameters
         self.latent_out_proj = nn.Linear(self.latent_dim, hidden_dim) # project latent sample to embedding
-        self.additional_pos_embed = nn.Embedding(2, hidden_dim) # learned position embedding for proprio and latent
+        self.additional_pos_embed = nn.Embedding(3, hidden_dim) # learned position embedding for proprio, latent, and audio
 
-    def forward(self, qpos, image, env_state, actions=None, is_pad=None):
+    def forward(self, qpos, image, env_state, actions=None, is_pad=None, audio=None):
         """
         qpos: batch, qpos_dim
         image: batch, num_cam, channel, height, width
         env_state: None
         actions: batch, seq, action_dim
+        audio: batch, 1024
         """
         is_training = actions is not None # train or val
         bs, _ = qpos.shape
@@ -129,14 +132,48 @@ class DETRVAE(nn.Module):
                 all_cam_pos.append(pos)
             # proprioception features
             proprio_input = self.input_proj_robot_state(qpos)
+            
+            # audio features
+            if audio is not None:
+                audio_input = self.input_proj_audio(audio)
+                # unsqueeze to match sequence dimension expectations if needed, 
+                # but transformer handles [B, C] or [B, 1, C]?
+                # The transformer implementation expects src to be [B, C, H, W] for images or flattened.
+                # Here we are constructing src by concatenating features.
+                # Image features are [B, C, H, W] (spatial).
+                # Proprio input is [B, C].
+                # Audio input is [B, C].
+                
+                # We need to make non-spatial inputs compatible with spatial concatenation or sequence logic.
+                # Transformer forward method handles this:
+                # if len(src.shape) == 4:
+                #    ...
+                #    addition_input = torch.stack([latent_input, proprio_input], axis=0)
+                #    src = torch.cat([addition_input, src], axis=0)
+                
+                # So we should group audio with proprio_input.
+                # Let's verify Transformer.forward in transformer.py.
+                # It stacks [latent_input, proprio_input]. We should add audio there.
+                pass 
+            else:
+                audio_input = torch.zeros_like(proprio_input)
+
             # fold camera dimension into width dimension
             src = torch.cat(all_cam_features, axis=3)
             pos = torch.cat(all_cam_pos, axis=3)
-            hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight)[0]
+            # Pass audio_input to transformer. We need to update Transformer signature or pack it into proprio_input??
+            # Instead of modifying Transformer signature everywhere, let's pack it into a tuple or list for 'proprio_input' argument if possible,
+            # or better, modify the call here and update transformer.py
+            
+            hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight, audio_input=audio_input)[0]
         else:
             qpos = self.input_proj_robot_state(qpos)
             env_state = self.input_proj_env_state(env_state)
-            transformer_input = torch.cat([qpos, env_state], axis=1) # seq length = 2
+            if audio is not None:
+                audio_input = self.input_proj_audio(audio)
+                transformer_input = torch.cat([qpos, env_state, audio_input], axis=1) # seq length = 3
+            else:
+                transformer_input = torch.cat([qpos, env_state], axis=1) # seq length = 2
             hs = self.transformer(transformer_input, None, self.query_embed.weight, self.pos.weight)[0]
         a_hat = self.action_head(hs)
         is_pad_hat = self.is_pad_head(hs)
