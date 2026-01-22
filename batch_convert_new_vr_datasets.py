@@ -119,7 +119,7 @@ def find_dataset_folders(input_dir):
     return datasets
 
 
-def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update_constants=False, task_name="vr_dataset", ignore_devices=None, audio_window_len=0.3, audio_n_mels=80):
+def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update_constants=False, task_name="vr_dataset", ignore_devices=None, audio_window_len=0.96):
     """
     Process multiple VR datasets in batch mode, combining them as episodes of a single task.
     
@@ -181,8 +181,7 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
             ignore_devices=ignore_devices,
             audio_file=audio_file,
             audio_csv=audio_csv,
-            audio_window_len=audio_window_len,
-            audio_n_mels=audio_n_mels
+            audio_window_len=audio_window_len
         )
         
         total_episodes += num_new_episodes
@@ -233,8 +232,7 @@ def main():
                         help='Devices to ignore (zero out). Options: hmd, left_controller, right_controller. Example: --ignore_devices left_controller')
     
     # Audio arguments
-    parser.add_argument('--audio_window_len', type=float, default=0.3, help='Audio window duration in seconds')
-    parser.add_argument('--audio_n_mels', type=int, default=64, help='Number of mel bins')
+    parser.add_argument('--audio_window_len', type=float, default=0.96, help='Audio window duration in seconds')
     
     args = parser.parse_args()
     
@@ -249,8 +247,7 @@ def main():
         args.update_constants,
         args.task_name,
         ignore_devices=args.ignore_devices,
-        audio_window_len=args.audio_window_len,
-        audio_n_mels=args.audio_n_mels
+        audio_window_len=args.audio_window_len
     )
 
 

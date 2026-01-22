@@ -32,6 +32,8 @@ import matplotlib.pyplot as plt
 import re
 import torch
 import torchaudio
+import tensorflow as tf
+import tensorflow_hub as hub
 
 
 def calculate_quaternion_delta(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
@@ -118,7 +120,7 @@ def find_closest_image(timestamp, image_timestamps):
     return image_timestamps[closest_ts]
 
 
-def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False, ignore_devices=None, audio_file=None, audio_csv=None, audio_window_len=0.3, audio_n_mels=80):
+def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False, ignore_devices=None, audio_file=None, audio_csv=None, audio_window_len=0.96):
     """
     Convert VR dataset to HDF5 format for ACT training.
     
@@ -159,49 +161,59 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
     waveform = None
     sample_rate = None
     anchor_sample_index = 0
-    mel_transform = None
-    amp_to_db = None
+    yamnet_model = None
     
     if audio_file and audio_csv:
         print(f"Loading audio from {audio_file}...")
         try:
-            waveform, sample_rate = torchaudio.load(audio_file)
-            print(f"Audio loaded: {waveform.shape}, SR: {sample_rate}")
+            # Load with torchaudio
+            waveform, original_sr = torchaudio.load(audio_file)
+            
+            # Resample to 16k for YAMNet
+            target_sr = 16000
+            if original_sr != target_sr:
+                print(f"Resampling audio from {original_sr} to {target_sr} Hz...")
+                resampler = torchaudio.transforms.Resample(original_sr, target_sr)
+                waveform = resampler(waveform)
+                sample_rate = target_sr
+            else:
+                sample_rate = original_sr
+                
+            # Convert to mono if necessary
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0, keepdim=True)
+            
+            print(f"Audio ready: {waveform.shape}, SR: {sample_rate}")
             
             print(f"Loading audio alignment from {audio_csv}...")
             audio_df = pd.read_csv(audio_csv)
             
             # Calculate the anchor sample index (where timestamp == 0.0)
-            # timestamp = (frame_index_end - anchor_sample_index) / sample_rate
-            # => anchor_sample_index = frame_index_end - (timestamp * sample_rate)
+            # timestamp = (frame_index_end - anchor_sample_index) / original_sr
+            # => anchor_sample_index_original = frame_index_end - (timestamp * original_sr)
             # We calculate this for all rows and take the median to be robust
-            audio_df['calculated_anchor'] = audio_df['frame_index_end'] - (audio_df['timestamp'] * sample_rate)
-            anchor_sample_index = int(audio_df['calculated_anchor'].median())
-            print(f"Calculated anchor sample index: {anchor_sample_index}")
             
-            # Initialize transforms
-            # Standard settings for log-mel
-            n_fft = 1024
-            hop_length = 512
-            win_length = 1024
+            # Note: frame_index_end is based on the original sample rate.
+            # We need to find the anchor in the NEW sample rate domain.
             
-            mel_transform = torchaudio.transforms.MelSpectrogram(
-                sample_rate=sample_rate,
-                n_fft=n_fft,
-                win_length=win_length,
-                hop_length=hop_length,
-                n_mels=audio_n_mels,
-                center=True,
-                pad_mode="reflect",
-                power=2.0,
-                norm="slaney",
-                mel_scale="slaney",
-            )
+            # First, calculate anchor in original domain
+            audio_df['calculated_anchor_original'] = audio_df['frame_index_end'] - (audio_df['timestamp'] * original_sr)
+            anchor_sample_index_original = audio_df['calculated_anchor_original'].median()
             
-            amp_to_db = torchaudio.transforms.AmplitudeToDB()
+            # Convert anchor to new sample rate domain
+            # anchor_new = anchor_old * (target_sr / original_sr)
+            anchor_sample_index = int(anchor_sample_index_original * (sample_rate / original_sr))
+            
+            print(f"Calculated anchor sample index (original SR): {int(anchor_sample_index_original)}")
+            print(f"Calculated anchor sample index (target SR): {anchor_sample_index}")
+            
+            # Initialize YAMNet from TensorFlow Hub
+            print("Loading YAMNet model from TensorFlow Hub...")
+            yamnet_model = hub.load("https://tfhub.dev/google/yamnet/1")
+            print("YAMNet model loaded successfully.")
             
         except Exception as e:
-            print(f"Error loading audio: {e}")
+            print(f"Error loading audio or initializing YAMNet: {e}")
             print("Continuing without audio data...")
             waveform = None
 
@@ -465,7 +477,7 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                         print(f"Warning: No matching image found for timestamp {row['timestamp']}")
 
                 # Extract Audio Feature
-                if waveform is not None:
+                if waveform is not None and yamnet_model is not None:
                     # Current timestamp in seconds (relative to anchor)
                     curr_time = float(row['timestamp'])
                     
@@ -493,19 +505,35 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                             chunk = torch.nn.functional.pad(chunk, (pad_left, pad_right))
                     else:
                         # Completely out of bounds, return silence
-                        chunk = torch.zeros((waveform.shape[0], int(audio_window_len * sample_rate)))
+                        chunk = torch.zeros((1, int(audio_window_len * sample_rate)))
 
-                    # Compute Log-Mel Spectrogram
-                    # chunk shape: (channels, time)
-                    melspec = mel_transform(chunk)
-                    log_mel = amp_to_db(melspec)
-                    
-                    # Average across channels to get (n_mels, time)
-                    # Or keep it as is? Usually (n_mels, time) is expected for standard inputs
-                    # Let's average for now to be safe and reduce dimensions
-                    log_mel_mono = torch.mean(log_mel, dim=0)
-                    
-                    audio_data.append(log_mel_mono.numpy())
+                    # Compute YAMNet Embedding using TF Hub model
+                    try:
+                        # Convert PyTorch tensor to 1D numpy array for TensorFlow
+                        # chunk is (1, samples), we need (samples,)
+                        chunk_np = chunk.squeeze(0).numpy()
+                        
+                        # Run inference
+                        # scores, embeddings, spectrogram = yamnet(waveform)
+                        _, embeddings, _ = yamnet_model(chunk_np)
+                        
+                        # embeddings shape is [T, 1024]
+                        # For a 0.96s window, we expect 1 frame.
+                        # Take the mean if multiple frames, or just the last one?
+                        # Since we want a single vector for this timestep, let's take the mean.
+                        # If the window is perfectly aligned with YAMNet, it should be 1 frame.
+                        
+                        if len(embeddings.shape) > 1:
+                            # Average across time dimension
+                            embedding_vec = tf.reduce_mean(embeddings, axis=0).numpy()
+                        else:
+                            embedding_vec = embeddings.numpy()
+                            
+                        audio_data.append(embedding_vec)
+                    except Exception as e:
+                        print(f"Error extracting audio feature at {curr_time}s: {e}")
+                        # Fallback to zeros
+                        audio_data.append(np.zeros(1024, dtype=np.float32))
             
             # Create action data (using next row values directly)
             for i in range(len(qpos_data) - 1):
@@ -666,8 +694,7 @@ def main():
     # Audio arguments
     parser.add_argument('--audio_file', type=str, default=None, help='Path to .wav file')
     parser.add_argument('--audio_csv', type=str, default=None, help='Path to audio timestamps CSV')
-    parser.add_argument('--audio_window_len', type=float, default=0.3, help='Audio window duration in seconds')
-    parser.add_argument('--audio_n_mels', type=int, default=64, help='Number of mel bins')
+    parser.add_argument('--audio_window_len', type=float, default=0.96, help='Audio window duration in seconds')
     
     args = parser.parse_args()
     
@@ -680,8 +707,7 @@ def main():
         ignore_devices=args.ignore_devices,
         audio_file=args.audio_file,
         audio_csv=args.audio_csv,
-        audio_window_len=args.audio_window_len,
-        audio_n_mels=args.audio_n_mels
+        audio_window_len=args.audio_window_len
     )
     
     # Count number of episodes
