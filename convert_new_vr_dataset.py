@@ -553,6 +553,11 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
             # Store action data with compression
             f.create_dataset('/action', data=action_data, compression='gzip', compression_opts=4)
             
+            # Store timestamps for temporal augmentation
+            if 'timestamp' in episode_df.columns:
+                timestamps = episode_df['timestamp'].values.astype(np.float64)
+                f.create_dataset('/observations/timestamp', data=timestamps, compression='gzip', compression_opts=4)
+            
             # Store images
             images_group = f.create_group('/observations/images')
             

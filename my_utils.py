@@ -11,7 +11,7 @@ e = IPython.embed
 
 
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries, tail_clip: Optional[int] = None):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries, tail_clip: Optional[int] = None, temporal_jitter: float = 0.0):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
@@ -20,6 +20,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         self.num_queries = int(num_queries)
         # Optional: exclude last `tail_clip` timesteps of each episode from sampling
         self.tail_clip = int(tail_clip) if tail_clip is not None else 0
+        self.temporal_jitter = temporal_jitter
         self.is_sim = None
         self.__getitem__(0)  # initialize self.is_sim
 
@@ -91,6 +92,38 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 # Otherwise, it might be a single embedding per episode? 
                 # Based on convert script, it's per timestep.
                 audio_idx = min(start_ts, root['/observations/audio_obs'].shape[0] - 1)
+                
+                # Apply temporal jitter if enabled and timestamp data is available
+                if self.temporal_jitter > 0 and '/observations/timestamp' in root:
+                    try:
+                        # Get current timestamp
+                        current_time = root['/observations/timestamp'][audio_idx]
+                        
+                        # Sample a lag from [0, temporal_jitter]
+                        lag = np.random.uniform(0, self.temporal_jitter)
+                        target_time = current_time - lag
+                        
+                        # Find index with timestamp closest to target_time
+                        # Timestamps are sorted, so we can use searchsorted
+                        timestamps = root['/observations/timestamp'][()]
+                        jittered_idx = np.searchsorted(timestamps, target_time)
+                        
+                        # Check closest: jittered_idx or jittered_idx - 1
+                        if jittered_idx >= len(timestamps):
+                            jittered_idx = len(timestamps) - 1
+                        elif jittered_idx > 0:
+                            # Compare distance to target_time
+                            dist_curr = abs(timestamps[jittered_idx] - target_time)
+                            dist_prev = abs(timestamps[jittered_idx-1] - target_time)
+                            if dist_prev < dist_curr:
+                                jittered_idx -= 1
+                        
+                        # Ensure we don't look into the future relative to the original index
+                        audio_idx = min(jittered_idx, audio_idx)
+                        
+                    except Exception:
+                        pass
+                
                 audio_np = root['/observations/audio_obs'][audio_idx]
                 audio_data = torch.from_numpy(audio_np).float()
 
@@ -178,15 +211,17 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 
 
 def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, num_queries,
-              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic', tail_clip: Optional[int] = None):
+              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic', tail_clip: Optional[int] = None, temporal_jitter: float = 0.0):
     """Create train/val DataLoaders.
 
     - Default: EpisodicDataset for both splits (backward compatible).
     - Optionally: use StepDataset for training and/or validation via dataset_type args.
     - Normalization stats are computed on train episodes only and reused for val.
     - tail_clip: if provided, excludes the last N timesteps of each episode in both datasets.
+    - temporal_jitter: max seconds to jitter audio embeddings backwards (train only).
     """
     print(f'\nData from: {dataset_dir}\n')
+    print(f'\nTemporal jitter: {temporal_jitter}\n')
     # obtain train/val split at episode level
     train_ratio = 0.8
     shuffled_indices = np.random.permutation(num_episodes)
@@ -207,10 +242,12 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
                                     num_episodes=len(train_indices),
                                     num_queries=num_queries,
                                     episode_ids=train_indices.tolist(),
-                                    tail_clip=tail_clip)
+                                    tail_clip=tail_clip,
+                                    temporal_jitter=temporal_jitter)
     else:
         train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries,
-                                        tail_clip=tail_clip)
+                                        tail_clip=tail_clip,
+                                        temporal_jitter=temporal_jitter)
 
     if val_dataset_type == 'step':
         val_dataset = StepDataset(dataset_dir=dataset_dir,
@@ -219,10 +256,12 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
                                   num_episodes=len(val_indices),
                                   num_queries=num_queries,
                                   episode_ids=val_indices.tolist(),
-                                  tail_clip=tail_clip)
+                                  tail_clip=tail_clip,
+                                  temporal_jitter=0.0) # No jitter for validation
     else:
         val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries,
-                                      tail_clip=tail_clip)
+                                      tail_clip=tail_clip,
+                                      temporal_jitter=0.0) # No jitter for validation
 
     # DataLoader configuration
     num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many
@@ -248,7 +287,7 @@ class StepDataset(torch.utils.data.Dataset):
     This is designed for large-batch expert sampling in GAIL where batch size should depend on
     total timesteps, not number of episodes.
     """
-    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None, tail_clip: Optional[int] = None):
+    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None, tail_clip: Optional[int] = None, temporal_jitter: float = 0.0):
         super(StepDataset, self).__init__()
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
@@ -257,6 +296,7 @@ class StepDataset(torch.utils.data.Dataset):
         self.num_queries = int(num_queries) if num_queries is not None else 1
         # Optional: exclude last `tail_clip` timesteps of each episode from sampling
         self.tail_clip = int(tail_clip) if tail_clip is not None else 0
+        self.temporal_jitter = temporal_jitter
         self.is_sim = None
 
         # Precompute episode lengths and cumulative index for O(log E) lookup
@@ -308,6 +348,28 @@ class StepDataset(torch.utils.data.Dataset):
             if '/observations/audio_obs' in root:
                 if len(root['/observations/audio_obs'].shape) > 0:
                     audio_idx = min(t, root['/observations/audio_obs'].shape[0] - 1)
+                    
+                    # Apply temporal jitter if enabled and timestamp data is available
+                    if self.temporal_jitter > 0 and '/observations/timestamp' in root:
+                        try:
+                            current_time = root['/observations/timestamp'][audio_idx]
+                            lag = np.random.uniform(0, self.temporal_jitter)
+                            target_time = current_time - lag
+                            timestamps = root['/observations/timestamp'][()]
+                            jittered_idx = np.searchsorted(timestamps, target_time)
+                            
+                            if jittered_idx >= len(timestamps):
+                                jittered_idx = len(timestamps) - 1
+                            elif jittered_idx > 0:
+                                dist_curr = abs(timestamps[jittered_idx] - target_time)
+                                dist_prev = abs(timestamps[jittered_idx-1] - target_time)
+                                if dist_prev < dist_curr:
+                                    jittered_idx -= 1
+                                    
+                            audio_idx = min(jittered_idx, audio_idx)
+                        except Exception:
+                            pass
+                    
                     audio_np = root['/observations/audio_obs'][audio_idx]
                     audio_data = torch.from_numpy(audio_np).float()
 

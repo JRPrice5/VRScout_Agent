@@ -126,6 +126,7 @@ def main(args):
         dataset_type='episodic', # use StepDataset for training
         val_dataset_type='episodic', # use StepDataset for validation
         tail_clip=150, # HARD CODED: exclude the last 150 timesteps of each episode in both datasets
+        temporal_jitter=args.get('temporal_jitter', 0.0)
     )
 
     # save dataset stats
@@ -553,6 +554,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
+    parser.add_argument('--temporal_jitter', action='store', type=float, help='Max audio jitter in seconds', default=0.48)
     
 
     # for transformer
