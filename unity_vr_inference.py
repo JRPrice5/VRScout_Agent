@@ -143,7 +143,7 @@ class UnityVRInterface:
             update_rate_smoothing_factor: Smoothing factor for update rate adjustments (0-1)
             update_rate_history_size: Number of recent target update rates to track
             use_audio: Whether to use audio features
-            input_sample_rate: Input sample rate for audio from Unity
+            input_sample_rate: Default input sample rate if not provided by client
             """
         self.host = host
         self.port = port
@@ -152,19 +152,16 @@ class UnityVRInterface:
         
         # Audio configuration
         self.use_audio = use_audio
-        self.input_sample_rate = input_sample_rate
+        self.current_input_sample_rate = input_sample_rate
         self.target_sample_rate = 16000
         self.audio_window_seconds = 0.96 # YAMNet expects ~0.96s
         self.audio_buffer_size = int(self.target_sample_rate * self.audio_window_seconds)
         self.audio_buffer = np.zeros(self.audio_buffer_size, dtype=np.float32)
         
         if self.use_audio:
-            print(f"Initializing Audio Processing (YAMNet)... Input SR: {self.input_sample_rate}, Target SR: {self.target_sample_rate}")
+            print(f"Initializing Audio Processing (YAMNet)... Default Input SR: {self.current_input_sample_rate}, Target SR: {self.target_sample_rate}")
             # Initialize resampler
-            if self.input_sample_rate != self.target_sample_rate:
-                self.resampler = torchaudio.transforms.Resample(self.input_sample_rate, self.target_sample_rate)
-            else:
-                self.resampler = None
+            self._update_resampler(self.current_input_sample_rate)
                 
             # Load YAMNet model
             try:
@@ -1171,6 +1168,14 @@ class UnityVRInterface:
                 'enable_dynamic_update_rate': self.enable_dynamic_update_rate
             }
     
+    def _update_resampler(self, input_sr):
+        """Update or create resampler if input sample rate changes"""
+        if input_sr != self.target_sample_rate:
+            print(f"Updating audio resampler: {input_sr} Hz -> {self.target_sample_rate} Hz")
+            self.resampler = torchaudio.transforms.Resample(input_sr, self.target_sample_rate)
+        else:
+            self.resampler = None
+            
     def _process_audio_data(self, state_data):
         """
         Process audio data from Unity
@@ -1188,6 +1193,12 @@ class UnityVRInterface:
         # Expecting 'audio' key with list of float samples
         new_samples = state_data.get('audio', [])
         
+        # Check for dynamic sample rate update
+        incoming_sr = state_data.get('audioSampleRate', 0)
+        if incoming_sr > 0 and incoming_sr != self.current_input_sample_rate:
+            self.current_input_sample_rate = incoming_sr
+            self._update_resampler(self.current_input_sample_rate)
+        
         if not new_samples:
             # If no audio samples, return zero embedding or handle gracefully
             # For now, just return zeros if buffer is empty, or use last embedding?
@@ -1199,7 +1210,7 @@ class UnityVRInterface:
             new_samples = np.array(new_samples, dtype=np.float32)
             
             # Resample if necessary
-            if self.input_sample_rate != self.target_sample_rate and hasattr(self, 'resampler') and self.resampler is not None:
+            if self.current_input_sample_rate != self.target_sample_rate and hasattr(self, 'resampler') and self.resampler is not None:
                 # Torchaudio expects tensor [channel, time]
                 waveform = torch.from_numpy(new_samples).unsqueeze(0)
                 waveform = self.resampler(waveform)
