@@ -1244,11 +1244,11 @@ class UnityVRInterface:
             
             # Convert to torch tensor
             audio_emb = torch.from_numpy(embedding.numpy()).float().cuda()
-            return audio_emb
+            return audio_emb.unsqueeze(0) # Add batch dimension [1, 1024]
             
         except Exception as e:
             print(f"Error in YAMNet inference: {e}")
-            return torch.zeros(1024).float().cuda()
+            return torch.zeros(1, 1024).float().cuda()
 
     def _process_image_data(self, state_data):
         """
