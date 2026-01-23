@@ -156,7 +156,14 @@ class UnityVRInterface:
         self.target_sample_rate = 16000
         self.audio_window_seconds = 0.96 # YAMNet expects ~0.96s
         self.audio_buffer_size = int(self.target_sample_rate * self.audio_window_seconds)
-        self.audio_buffer = np.zeros(self.audio_buffer_size, dtype=np.float32)
+        # self.audio_buffer = np.zeros(self.audio_buffer_size, dtype=np.float32)
+        self.audio_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.audio_buffer_t = torch.zeros(self.audio_buffer_size, dtype=torch.float32, device=self.audio_device)
+        
+        # YAMNet Caching
+        self.yamnet_interval = 0.48
+        self.last_yamnet_time = 0
+        self.cached_audio_emb = torch.zeros(1, 1024, device=self.audio_device, dtype=torch.float32)
         
         if self.use_audio:
             print(f"Initializing Audio Processing (YAMNet)... Default Input SR: {self.current_input_sample_rate}, Target SR: {self.target_sample_rate}")
@@ -1173,6 +1180,10 @@ class UnityVRInterface:
         if input_sr != self.target_sample_rate:
             print(f"Updating audio resampler: {input_sr} Hz -> {self.target_sample_rate} Hz")
             self.resampler = torchaudio.transforms.Resample(input_sr, self.target_sample_rate)
+            try:
+                self.resampler = self.resampler.to(self.audio_device)
+            except Exception as e:
+                print(f"Warning: Could not move resampler to {self.audio_device} ({e}). Falling back to CPU resampling.")
         else:
             self.resampler = None
             
@@ -1199,56 +1210,66 @@ class UnityVRInterface:
             self.current_input_sample_rate = incoming_sr
             self._update_resampler(self.current_input_sample_rate)
         
-        if not new_samples:
-            # If no audio samples, return zero embedding or handle gracefully
-            # For now, just return zeros if buffer is empty, or use last embedding?
-            # Better to return None and let policy handle it (policy expects None or tensor)
-            # But policy expects 1024-d tensor if audio is provided.
-            # If we enabled use_audio, we should provide something.
-            pass
-        else:
+        if new_samples:
             new_samples = np.array(new_samples, dtype=np.float32)
-            
-            # Resample if necessary
+            new_samples_t = torch.from_numpy(new_samples)
+            if self.audio_device.type == 'cuda':
+                new_samples_t = new_samples_t.to(self.audio_device, non_blocking=True)
+
+            # Resample if necessary (prefer GPU when available)
             if self.current_input_sample_rate != self.target_sample_rate and hasattr(self, 'resampler') and self.resampler is not None:
-                # Torchaudio expects tensor [channel, time]
-                waveform = torch.from_numpy(new_samples).unsqueeze(0)
-                waveform = self.resampler(waveform)
-                new_samples = waveform.squeeze(0).numpy()
-        
-            # Append to buffer (ring buffer style)
-            # Shift buffer
-            num_new = len(new_samples)
+                try:
+                    waveform_t = new_samples_t.unsqueeze(0)  # [1, time]
+                    waveform_t = self.resampler(waveform_t)
+                    new_samples_t = waveform_t.squeeze(0)
+                except Exception as e:
+                    print(f"Warning: audio resample failed on {self.audio_device} ({e}). Falling back to CPU resampling.")
+                    try:
+                        waveform_cpu = torch.from_numpy(new_samples).unsqueeze(0)
+                        resampler_cpu = self.resampler
+                        try:
+                            resampler_cpu = resampler_cpu.to('cpu')
+                        except Exception:
+                            pass
+                        waveform_cpu = resampler_cpu(waveform_cpu)
+                        new_samples_t = waveform_cpu.squeeze(0).to(self.audio_device)
+                    except Exception as e2:
+                        print(f"Warning: audio resample CPU fallback also failed ({e2}). Using un-resampled audio.")
+                        new_samples_t = torch.from_numpy(new_samples).to(self.audio_device)
+
+            # Append to buffer (ring buffer style) on the chosen device
+            num_new = int(new_samples_t.numel())
             if num_new > 0:
-                self.audio_buffer = np.roll(self.audio_buffer, -num_new)
-                self.audio_buffer[-num_new:] = new_samples
+                if num_new >= self.audio_buffer_size:
+                    self.audio_buffer_t.copy_(new_samples_t[-self.audio_buffer_size:])
+                else:
+                    self.audio_buffer_t = torch.roll(self.audio_buffer_t, shifts=-num_new, dims=0)
+                    self.audio_buffer_t[-num_new:] = new_samples_t
+                # Maintain CPU mirror only if something else relies on it
+                # self.audio_buffer = self.audio_buffer_t.detach().to('cpu').numpy()
         
-        # Get the window for inference
-        waveform = self.audio_buffer
-        
-        # Run YAMNet inference
-        # YAMNet expects a batch of waveforms: [N, samples]
-        # We process a single window
-        # Note: YAMNet might output multiple scores for a long waveform.
-        # We want the embedding for the whole window (or the latest frame).
-        # TF Hub YAMNet returns (scores, embeddings, log_mel_spectrogram)
-        # scores: [N, 521]
-        # embeddings: [N, 1024]
-        
-        try:
-            scores, embeddings, spectrogram = self.yamnet_model(waveform)
-            # Take the mean embedding if multiple frames, or just the last one?
-            # YAMNet window is 0.96s, hop is 0.48s.
-            # If we provide exactly 0.96s, we get 1 frame.
-            embedding = embeddings[-1] # Take the latest frame
+        # Check if it is time to run YAMNet inference
+        current_time = time.time()
+        if current_time - self.last_yamnet_time >= self.yamnet_interval:
+            # Get the window for inference
+            waveform = self.audio_buffer_t.detach().to('cpu').numpy().astype(np.float32, copy=False)
             
-            # Convert to torch tensor
-            audio_emb = torch.from_numpy(embedding.numpy()).float().cuda()
-            return audio_emb.unsqueeze(0) # Add batch dimension [1, 1024]
-            
-        except Exception as e:
-            print(f"Error in YAMNet inference: {e}")
-            return torch.zeros(1, 1024).float().cuda()
+            try:
+                # YAMNet expects a batch of waveforms: [N, samples]
+                scores, embeddings, spectrogram = self.yamnet_model(waveform)
+                
+                # Take the latest frame
+                embedding = embeddings[-1] 
+                
+                # Convert to torch tensor and cache it
+                self.cached_audio_emb = torch.from_numpy(embedding.numpy()).to(device=self.audio_device, dtype=torch.float32).unsqueeze(0) # [1, 1024]
+                self.last_yamnet_time = current_time
+                
+            except Exception as e:
+                print(f"Error in YAMNet inference: {e}")
+                # Fallback: keep using existing cached embedding
+        
+        return self.cached_audio_emb
 
     def _process_image_data(self, state_data):
         """
