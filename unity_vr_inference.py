@@ -20,6 +20,7 @@ import threading
 import numpy as np
 import torch
 import pickle
+from collections import deque
 from PIL import Image
 import io
 import base64
@@ -96,7 +97,8 @@ class UnityVRInterface:
                  enable_dynamic_update_rate=True,
                  # Audio processing
                  use_audio=False,
-                 input_sample_rate=48000):
+                 input_sample_rate=48000,
+                 audio_history_len=1):
         """
         Initialize the interface.
         
@@ -144,6 +146,7 @@ class UnityVRInterface:
             update_rate_history_size: Number of recent target update rates to track
             use_audio: Whether to use audio features
             input_sample_rate: Default input sample rate if not provided by client
+            audio_history_len: Number of audio embeddings to stack
             """
         self.host = host
         self.port = port
@@ -159,11 +162,17 @@ class UnityVRInterface:
         # self.audio_buffer = np.zeros(self.audio_buffer_size, dtype=np.float32)
         self.audio_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.audio_buffer_t = torch.zeros(self.audio_buffer_size, dtype=torch.float32, device=self.audio_device)
+        self.audio_history_len = audio_history_len
         
         # YAMNet Caching
         self.yamnet_interval = 0.48
         self.last_yamnet_time = 0
-        self.cached_audio_emb = torch.zeros(1, 1024, device=self.audio_device, dtype=torch.float32)
+        
+        # Initialize audio history ring buffer
+        self.audio_history = deque(maxlen=self.audio_history_len)
+        # Pre-fill with zeros
+        for _ in range(self.audio_history_len):
+            self.audio_history.append(torch.zeros(1024, device=self.audio_device, dtype=torch.float32))
         
         if self.use_audio:
             print(f"Initializing Audio Processing (YAMNet)... Default Input SR: {self.current_input_sample_rate}, Target SR: {self.target_sample_rate}")
@@ -1261,15 +1270,21 @@ class UnityVRInterface:
                 # Take the latest frame
                 embedding = embeddings[-1] 
                 
-                # Convert to torch tensor and cache it
-                self.cached_audio_emb = torch.from_numpy(embedding.numpy()).to(device=self.audio_device, dtype=torch.float32).unsqueeze(0) # [1, 1024]
+                # Convert to torch tensor
+                new_emb = torch.from_numpy(embedding.numpy()).to(device=self.audio_device, dtype=torch.float32) # [1024]
+                
+                # Append to history ring buffer
+                self.audio_history.append(new_emb)
+                
                 self.last_yamnet_time = current_time
                 
             except Exception as e:
                 print(f"Error in YAMNet inference: {e}")
-                # Fallback: keep using existing cached embedding
+                # Fallback: keep using existing history
         
-        return self.cached_audio_emb
+        # Return stacked history [1, N, 1024]
+        # Stack list of [1024] -> [N, 1024] -> [1, N, 1024]
+        return torch.stack(list(self.audio_history)).unsqueeze(0)
 
     def _process_image_data(self, state_data):
         """
@@ -1434,6 +1449,7 @@ def main():
     # Audio arguments
     parser.add_argument('--use_audio', action='store_true', help='Use audio features')
     parser.add_argument('--input_sample_rate', type=int, default=48000, help='Input sample rate for audio from Unity')
+    parser.add_argument('--audio_history_len', type=int, default=1, help='Number of audio embeddings to stack')
 
     # Dynamic component toggle arguments
     # parser.add_argument('--enable_dynamic_window_size', action='store_true', help='Enable dynamic window size adjustment')
@@ -1489,10 +1505,8 @@ def main():
         adaptive_scale_beta_down=args.adaptive_scale_beta_down,
         adaptive_min_scale=args.adaptive_min_scale,
         use_audio=args.use_audio,
-        input_sample_rate=args.input_sample_rate
-        # enable_dynamic_window_size=args.enable_dynamic_window_size,
-        # enable_dynamic_decay_factor=args.enable_dynamic_decay_factor,
-        # enable_dynamic_update_rate=args.enable_dynamic_update_rate
+        input_sample_rate=args.input_sample_rate,
+        audio_history_len=args.audio_history_len
     )
     
     interface.start_server()

@@ -11,7 +11,7 @@ e = IPython.embed
 
 
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries, tail_clip: Optional[int] = None, temporal_jitter: float = 0.0):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries, tail_clip: Optional[int] = None, audio_history_len: int = 1):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
@@ -20,7 +20,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         self.num_queries = int(num_queries)
         # Optional: exclude last `tail_clip` timesteps of each episode from sampling
         self.tail_clip = int(tail_clip) if tail_clip is not None else 0
-        self.temporal_jitter = temporal_jitter
+        self.audio_history_len = int(audio_history_len)
         self.is_sim = None
         self.__getitem__(0)  # initialize self.is_sim
 
@@ -82,50 +82,70 @@ class EpisodicDataset(torch.utils.data.Dataset):
         all_cam_images = np.stack(all_cam_images, axis=0)
 
         # load audio if available
-        audio_data = torch.zeros(1024) # Default to zero if not found
-        if '/observations/audio_obs' in root:
-            # Load audio for the current timestep
-            # Assuming audio_obs is aligned with qpos at same index
-            # Check shape of audio_obs
-            if len(root['/observations/audio_obs'].shape) > 0:
-                # If it has same length as qpos, index it
-                # Otherwise, it might be a single embedding per episode? 
-                # Based on convert script, it's per timestep.
-                audio_idx = min(start_ts, root['/observations/audio_obs'].shape[0] - 1)
-                
-                # Apply temporal jitter if enabled and timestamp data is available
-                if self.temporal_jitter > 0 and '/observations/timestamp' in root:
-                    try:
-                        # Get current timestamp
-                        current_time = root['/observations/timestamp'][audio_idx]
-                        
-                        # Sample a lag from [0, temporal_jitter]
-                        lag = np.random.uniform(0, self.temporal_jitter)
-                        target_time = current_time - lag
-                        
-                        # Find index with timestamp closest to target_time
-                        # Timestamps are sorted, so we can use searchsorted
-                        timestamps = root['/observations/timestamp'][()]
-                        jittered_idx = np.searchsorted(timestamps, target_time)
-                        
-                        # Check closest: jittered_idx or jittered_idx - 1
-                        if jittered_idx >= len(timestamps):
-                            jittered_idx = len(timestamps) - 1
-                        elif jittered_idx > 0:
-                            # Compare distance to target_time
-                            dist_curr = abs(timestamps[jittered_idx] - target_time)
-                            dist_prev = abs(timestamps[jittered_idx-1] - target_time)
-                            if dist_prev < dist_curr:
-                                jittered_idx -= 1
-                        
-                        # Ensure we don't look into the future relative to the original index
-                        audio_idx = min(jittered_idx, audio_idx)
-                        
-                    except Exception:
-                        pass
-                
-                audio_np = root['/observations/audio_obs'][audio_idx]
-                audio_data = torch.from_numpy(audio_np).float()
+        # Default to zeros [N, 1024]
+        audio_data = torch.zeros((self.audio_history_len, 1024))
+
+        # New format: audio_u (timestamps) and audio_e (embeddings)
+        if '/observations/audio_u' in root and '/observations/audio_e' in root:
+            try:
+                # Get current frame timestamp
+                if '/observations/timestamp' in root:
+                    current_time = root['/observations/timestamp'][start_ts]
+                else:
+                    # Fallback if no timestamp: assume 30Hz
+                    current_time = start_ts / 30.0
+
+                # Find last audio embedding index k
+                audio_u = root['/observations/audio_u'][()]
+                # searchsorted(side='right') returns index i such that audio_u[i-1] <= target < audio_u[i]
+                # so k = i - 1 is the index of the embedding that started <= current_time
+                k = np.searchsorted(audio_u, current_time, side='right') - 1
+                k = max(0, k)
+
+                # Gather last N embeddings indices: [k-N+1, ..., k]
+                indices = np.arange(k - self.audio_history_len + 1, k + 1)
+
+                # Handle padding for negative indices
+                valid_mask = indices >= 0
+                valid_indices = indices[valid_mask]
+                pad_len = len(indices) - len(valid_indices)
+
+                audio_stack = []
+                if pad_len > 0:
+                    audio_stack.append(torch.zeros((pad_len, 1024)))
+
+                if len(valid_indices) > 0:
+                    # Load from HDF5
+                    # h5py supports list indexing if they are sorted, but better to do it carefully or usually valid_indices is a contiguous range
+                    # valid_indices is contiguous range
+                    start_idx = valid_indices[0]
+                    end_idx = valid_indices[-1] + 1
+                    # Double check range validity against dataset size
+                    audio_len = root['/observations/audio_e'].shape[0]
+
+                    if start_idx < audio_len:
+                        real_end_idx = min(end_idx, audio_len)
+                        chunk = root['/observations/audio_e'][start_idx:real_end_idx]
+                        chunk_tensor = torch.from_numpy(chunk).float()
+                        audio_stack.append(chunk_tensor)
+
+                        # Handle if we hit end of audio array (rare if k is valid)
+                        if real_end_idx < end_idx:
+                            remain = end_idx - real_end_idx
+                            audio_stack.append(torch.zeros((remain, 1024)))
+                    else:
+                        audio_stack.append(torch.zeros((len(valid_indices), 1024)))
+
+                if audio_stack:
+                    audio_data = torch.cat(audio_stack, dim=0)
+
+            except Exception as e:
+                print(f"Error loading audio_u/e: {e}")
+                pass
+
+        # Legacy format (fallback, just repeat one frame N times)
+        elif '/observations/audio_obs' in root:
+            print("Warning: Legacy audio format detected, audio embeddings will be zeros")
 
         # construct observations
         image_data = torch.from_numpy(all_cam_images)
@@ -287,7 +307,7 @@ class StepDataset(torch.utils.data.Dataset):
     This is designed for large-batch expert sampling in GAIL where batch size should depend on
     total timesteps, not number of episodes.
     """
-    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None, tail_clip: Optional[int] = None, temporal_jitter: float = 0.0):
+    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None, tail_clip: Optional[int] = None, audio_history_len: int = 1):
         super(StepDataset, self).__init__()
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
@@ -296,7 +316,7 @@ class StepDataset(torch.utils.data.Dataset):
         self.num_queries = int(num_queries) if num_queries is not None else 1
         # Optional: exclude last `tail_clip` timesteps of each episode from sampling
         self.tail_clip = int(tail_clip) if tail_clip is not None else 0
-        self.temporal_jitter = temporal_jitter
+        self.audio_history_len = int(audio_history_len)
         self.is_sim = None
 
         # Precompute episode lengths and cumulative index for O(log E) lookup
@@ -344,34 +364,60 @@ class StepDataset(torch.utils.data.Dataset):
             all_cam_images = np.stack(all_cam_images, axis=0)  # [K, H, W, C]
 
             # Audio at t
-            audio_data = torch.zeros(1024)
-            if '/observations/audio_obs' in root:
-                if len(root['/observations/audio_obs'].shape) > 0:
-                    audio_idx = min(t, root['/observations/audio_obs'].shape[0] - 1)
+            # Default to zeros [N, 1024]
+            audio_data = torch.zeros((self.audio_history_len, 1024))
+            
+            if '/observations/audio_u' in root and '/observations/audio_e' in root:
+                try:
+                    # Get current frame timestamp
+                    if '/observations/timestamp' in root:
+                        current_time = root['/observations/timestamp'][t]
+                    else:
+                        current_time = t / 30.0 
+
+                    # Find last audio embedding index k
+                    audio_u = root['/observations/audio_u'][()]
+                    k = np.searchsorted(audio_u, current_time, side='right') - 1
+                    k = max(0, k)
                     
-                    # Apply temporal jitter if enabled and timestamp data is available
-                    if self.temporal_jitter > 0 and '/observations/timestamp' in root:
-                        try:
-                            current_time = root['/observations/timestamp'][audio_idx]
-                            lag = np.random.uniform(0, self.temporal_jitter)
-                            target_time = current_time - lag
-                            timestamps = root['/observations/timestamp'][()]
-                            jittered_idx = np.searchsorted(timestamps, target_time)
+                    # Gather last N embeddings indices: [k-N+1, ..., k]
+                    indices = np.arange(k - self.audio_history_len + 1, k + 1)
+                    
+                    # Handle padding for negative indices
+                    valid_mask = indices >= 0
+                    valid_indices = indices[valid_mask]
+                    pad_len = len(indices) - len(valid_indices)
+                    
+                    audio_stack = []
+                    if pad_len > 0:
+                        audio_stack.append(torch.zeros((pad_len, 1024)))
+                    
+                    if len(valid_indices) > 0:
+                        start_idx = valid_indices[0]
+                        end_idx = valid_indices[-1] + 1
+                        audio_len = root['/observations/audio_e'].shape[0]
+                        
+                        if start_idx < audio_len:
+                            real_end_idx = min(end_idx, audio_len)
+                            chunk = root['/observations/audio_e'][start_idx:real_end_idx]
+                            chunk_tensor = torch.from_numpy(chunk).float()
+                            audio_stack.append(chunk_tensor)
                             
-                            if jittered_idx >= len(timestamps):
-                                jittered_idx = len(timestamps) - 1
-                            elif jittered_idx > 0:
-                                dist_curr = abs(timestamps[jittered_idx] - target_time)
-                                dist_prev = abs(timestamps[jittered_idx-1] - target_time)
-                                if dist_prev < dist_curr:
-                                    jittered_idx -= 1
-                                    
-                            audio_idx = min(jittered_idx, audio_idx)
-                        except Exception:
-                            pass
+                            if real_end_idx < end_idx:
+                                remain = end_idx - real_end_idx
+                                audio_stack.append(torch.zeros((remain, 1024)))
+                        else:
+                            audio_stack.append(torch.zeros((len(valid_indices), 1024)))
+
+                    if audio_stack:
+                        audio_data = torch.cat(audio_stack, dim=0)
                     
-                    audio_np = root['/observations/audio_obs'][audio_idx]
-                    audio_data = torch.from_numpy(audio_np).float()
+                except Exception as e:
+                    pass
+            
+            # Legacy format
+            elif '/observations/audio_obs' in root:
+                print("Warning: Legacy audio format detected, audio embeddings will be zeros")
 
             # Action alignment and chunking to mimic EpisodicDataset policy
             episode_len = self.episode_lengths[episode_pos]

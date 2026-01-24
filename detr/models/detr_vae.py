@@ -33,7 +33,7 @@ def get_sinusoid_encoding_table(n_position, d_hid):
 
 class DETRVAE(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbones, transformer, encoder, state_dim, num_queries, camera_names):
+    def __init__(self, backbones, transformer, encoder, state_dim, num_queries, camera_names, audio_history_len=1):
         """ Initializes the model.
         Parameters:
             backbones: torch module of the backbone to be used. See backbone.py
@@ -42,6 +42,7 @@ class DETRVAE(nn.Module):
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
                          DETR can detect in a single image. For COCO, we recommend 100 queries.
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
+            audio_history_len: Number of audio embeddings in history stack (default 1)
         """
         super().__init__()
         self.num_queries = num_queries
@@ -49,20 +50,23 @@ class DETRVAE(nn.Module):
         self.transformer = transformer
         self.encoder = encoder
         self.action_dim = state_dim  # Store action dimension for consistent use
+        self.audio_history_len = audio_history_len
         hidden_dim = transformer.d_model
         self.action_head = nn.Linear(hidden_dim, state_dim)
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        
+        # Audio input projection - handles stacked embeddings [B, N*1024]
+        self.input_proj_audio = nn.Linear(1024 * audio_history_len, hidden_dim)
+
         if backbones is not None:
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
             self.backbones = nn.ModuleList(backbones)
             self.input_proj_robot_state = nn.Linear(state_dim, hidden_dim)
-            self.input_proj_audio = nn.Linear(1024, hidden_dim) # Project 1024-d audio embedding
         else:
             # input_dim = 32 + 7 # robot_state + env_state
             self.input_proj_robot_state = nn.Linear(state_dim, hidden_dim)
             self.input_proj_env_state = nn.Linear(7, hidden_dim)
-            self.input_proj_audio = nn.Linear(1024, hidden_dim)
             self.pos = torch.nn.Embedding(2, hidden_dim)
             self.backbones = None
 
@@ -76,10 +80,14 @@ class DETRVAE(nn.Module):
 
         # Print state_dim for debugging purpose
         print(f"[PolicyVAE] State dimension: {state_dim}")
+        print(f"[PolicyVAE] Audio history length: {audio_history_len}")
 
         # decoder extra parameters
         self.latent_out_proj = nn.Linear(self.latent_dim, hidden_dim) # project latent sample to embedding
-        self.additional_pos_embed = nn.Embedding(3, hidden_dim) # learned position embedding for proprio, latent, and audio
+        self.additional_pos_embed = nn.Embedding(2, hidden_dim) # learned position embedding for proprio, latent
+
+        # Audio prior network
+        self.audio_prior_net = mlp(input_dim=hidden_dim, hidden_dim=hidden_dim, output_dim=self.latent_dim*2, hidden_depth=2)
 
     def forward(self, qpos, image, env_state, actions=None, is_pad=None, audio=None):
         """
@@ -87,10 +95,28 @@ class DETRVAE(nn.Module):
         image: batch, num_cam, channel, height, width
         env_state: None
         actions: batch, seq, action_dim
-        audio: batch, 1024
+        audio: batch, N, 1024  (or batch, 1024 if N=1 and flattened already? assume [B, N, 1024])
         """
         is_training = actions is not None # train or val
         bs, _ = qpos.shape
+
+        # Compute prior from audio
+        if audio is not None:
+            # Flatten audio history: [B, N, 1024] -> [B, N*1024]
+            if audio.dim() == 3:
+                audio_flat = audio.view(bs, -1)
+            else:
+                # Assume already flattened or N=1
+                audio_flat = audio
+                
+            audio_embed = self.input_proj_audio(audio_flat) # (bs, hidden_dim)
+            prior_latent_info = self.audio_prior_net(audio_embed)
+            prior_mu = prior_latent_info[:, :self.latent_dim]
+            prior_logvar = prior_latent_info[:, self.latent_dim:]
+        else:
+            prior_mu = torch.zeros((bs, self.latent_dim), device=qpos.device)
+            prior_logvar = torch.zeros((bs, self.latent_dim), device=qpos.device)
+
         ### Obtain latent z from action sequence
         if is_training:
             # project action sequence to embedding dim, and concat with a CLS token
@@ -117,9 +143,14 @@ class DETRVAE(nn.Module):
             latent_input = self.latent_out_proj(latent_sample)
         else:
             mu = logvar = None
-            latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
+            # Use prior mean for inference
+            latent_sample = prior_mu
             latent_input = self.latent_out_proj(latent_sample)
 
+        # Force audio input to transformer to be zero (bottleneck) - REMOVED
+        # We calculate it just for shape, but pass zeros
+        # Note: We need a zero tensor of correct shape.
+        
         if self.backbones is not None:
             # Image observation features and position embeddings
             all_cam_features = []
@@ -133,51 +164,26 @@ class DETRVAE(nn.Module):
             # proprioception features
             proprio_input = self.input_proj_robot_state(qpos)
             
-            # audio features
-            if audio is not None:
-                audio_input = self.input_proj_audio(audio)
-                # unsqueeze to match sequence dimension expectations if needed, 
-                # but transformer handles [B, C] or [B, 1, C]?
-                # The transformer implementation expects src to be [B, C, H, W] for images or flattened.
-                # Here we are constructing src by concatenating features.
-                # Image features are [B, C, H, W] (spatial).
-                # Proprio input is [B, C].
-                # Audio input is [B, C].
-                
-                # We need to make non-spatial inputs compatible with spatial concatenation or sequence logic.
-                # Transformer forward method handles this:
-                # if len(src.shape) == 4:
-                #    ...
-                #    addition_input = torch.stack([latent_input, proprio_input], axis=0)
-                #    src = torch.cat([addition_input, src], axis=0)
-                
-                # So we should group audio with proprio_input.
-                # Let's verify Transformer.forward in transformer.py.
-                # It stacks [latent_input, proprio_input]. We should add audio there.
-                pass 
-            else:
-                audio_input = torch.zeros_like(proprio_input)
+            # audio features (BLOCKED) - REMOVED
+            # audio_input_zeros = torch.zeros_like(proprio_input)
 
             # fold camera dimension into width dimension
             src = torch.cat(all_cam_features, axis=3)
             pos = torch.cat(all_cam_pos, axis=3)
-            # Pass audio_input to transformer. We need to update Transformer signature or pack it into proprio_input??
-            # Instead of modifying Transformer signature everywhere, let's pack it into a tuple or list for 'proprio_input' argument if possible,
-            # or better, modify the call here and update transformer.py
             
-            hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight, audio_input=audio_input)[0]
+            hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight)[0]
         else:
             qpos = self.input_proj_robot_state(qpos)
             env_state = self.input_proj_env_state(env_state)
-            if audio is not None:
-                audio_input = self.input_proj_audio(audio)
-                transformer_input = torch.cat([qpos, env_state, audio_input], axis=1) # seq length = 3
-            else:
-                transformer_input = torch.cat([qpos, env_state], axis=1) # seq length = 2
+            
+            # audio features (BLOCKED) - REMOVED
+            # audio_input_zeros = torch.zeros_like(qpos)
+            
+            transformer_input = torch.cat([qpos, env_state], axis=1) # seq length = 2
             hs = self.transformer(transformer_input, None, self.query_embed.weight, self.pos.weight)[0]
         a_hat = self.action_head(hs)
         is_pad_hat = self.is_pad_head(hs)
-        return a_hat, is_pad_hat, [mu, logvar]
+        return a_hat, is_pad_hat, [mu, logvar, prior_mu, prior_logvar]
 
 
 
@@ -269,6 +275,7 @@ def build_encoder(args):
 
 def build(args):
     state_dim = getattr(args, 'state_dim', 32)
+    audio_history_len = getattr(args, 'audio_history_len', 1)
 
     # From state
     # backbone = None # from state for now, no need for conv nets
@@ -288,6 +295,7 @@ def build(args):
         state_dim=state_dim,
         num_queries=args.num_queries,
         camera_names=args.camera_names,
+        audio_history_len=audio_history_len
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -476,14 +476,21 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                         image_data.append(blank_img)
                         print(f"Warning: No matching image found for timestamp {row['timestamp']}")
 
-                # Extract Audio Feature
-                if waveform is not None and yamnet_model is not None:
-                    # Current timestamp in seconds (relative to anchor)
-                    curr_time = float(row['timestamp'])
+            # Extract Audio Features at 2Hz for the whole episode
+            audio_u_list = []
+            audio_e_list = []
+            if waveform is not None and yamnet_model is not None:
+                start_ts = float(episode_df['timestamp'].iloc[0])
+                end_ts = float(episode_df['timestamp'].iloc[-1])
+                
+                # Generate 2Hz timestamps: start_ts, start_ts+0.5, ...
+                current_ts = start_ts
+                while current_ts <= end_ts:
+                    audio_u_list.append(current_ts)
                     
                     # Calculate sample indices
                     # Window is [curr_time - audio_window_len, curr_time]
-                    end_sample = int(anchor_sample_index + curr_time * sample_rate)
+                    end_sample = int(anchor_sample_index + current_ts * sample_rate)
                     start_sample = int(end_sample - audio_window_len * sample_rate)
                     
                     # Handle boundaries
@@ -514,14 +521,7 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                         chunk_np = chunk.squeeze(0).numpy()
                         
                         # Run inference
-                        # scores, embeddings, spectrogram = yamnet(waveform)
                         _, embeddings, _ = yamnet_model(chunk_np)
-                        
-                        # embeddings shape is [T, 1024]
-                        # For a 0.96s window, we expect 1 frame.
-                        # Take the mean if multiple frames, or just the last one?
-                        # Since we want a single vector for this timestep, let's take the mean.
-                        # If the window is perfectly aligned with YAMNet, it should be 1 frame.
                         
                         if len(embeddings.shape) > 1:
                             # Average across time dimension
@@ -529,11 +529,13 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                         else:
                             embedding_vec = embeddings.numpy()
                             
-                        audio_data.append(embedding_vec)
+                        audio_e_list.append(embedding_vec)
                     except Exception as e:
-                        print(f"Error extracting audio feature at {curr_time}s: {e}")
+                        print(f"Error extracting audio feature at {current_ts}s: {e}")
                         # Fallback to zeros
-                        audio_data.append(np.zeros(1024, dtype=np.float32))
+                        audio_e_list.append(np.zeros(1024, dtype=np.float32))
+                    
+                    current_ts += 0.5
             
             # Create action data (using next row values directly)
             for i in range(len(qpos_data) - 1):
@@ -561,10 +563,12 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
             # Store images
             images_group = f.create_group('/observations/images')
             
-            # Store audio
-            if audio_data:
-                audio_data = np.array(audio_data)
-                f.create_dataset('/observations/audio_obs', data=audio_data, compression='gzip', compression_opts=4)
+            # Store audio embeddings (2Hz)
+            if audio_e_list:
+                audio_u = np.array(audio_u_list, dtype=np.float64)
+                audio_e = np.array(audio_e_list, dtype=np.float32)
+                f.create_dataset('/observations/audio_u', data=audio_u, compression='gzip', compression_opts=4)
+                f.create_dataset('/observations/audio_e', data=audio_e, compression='gzip', compression_opts=4)
             
             if image_data:
                 # Process images in smaller batches to reduce peak memory usage
