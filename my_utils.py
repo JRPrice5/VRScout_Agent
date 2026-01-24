@@ -231,17 +231,17 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 
 
 def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, num_queries,
-              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic', tail_clip: Optional[int] = None, temporal_jitter: float = 0.0):
+              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic', tail_clip: Optional[int] = None, audio_history_len: int = 0):
     """Create train/val DataLoaders.
 
     - Default: EpisodicDataset for both splits (backward compatible).
     - Optionally: use StepDataset for training and/or validation via dataset_type args.
     - Normalization stats are computed on train episodes only and reused for val.
     - tail_clip: if provided, excludes the last N timesteps of each episode in both datasets.
-    - temporal_jitter: max seconds to jitter audio embeddings backwards (train only).
+    - audio_history_len: length of audio history in N timesteps
     """
     print(f'\nData from: {dataset_dir}\n')
-    print(f'\nTemporal jitter: {temporal_jitter}\n')
+    print(f'\nAudio history len: {audio_history_len}\n')
     # obtain train/val split at episode level
     train_ratio = 0.8
     shuffled_indices = np.random.permutation(num_episodes)
@@ -263,11 +263,11 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
                                     num_queries=num_queries,
                                     episode_ids=train_indices.tolist(),
                                     tail_clip=tail_clip,
-                                    temporal_jitter=temporal_jitter)
+                                    audio_history_len=audio_history_len)
     else:
         train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries,
                                         tail_clip=tail_clip,
-                                        temporal_jitter=temporal_jitter)
+                                        audio_history_len=audio_history_len)
 
     if val_dataset_type == 'step':
         val_dataset = StepDataset(dataset_dir=dataset_dir,
@@ -277,11 +277,11 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
                                   num_queries=num_queries,
                                   episode_ids=val_indices.tolist(),
                                   tail_clip=tail_clip,
-                                  temporal_jitter=0.0) # No jitter for validation
+                                  audio_history_len=audio_history_len)
     else:
         val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries,
                                       tail_clip=tail_clip,
-                                      temporal_jitter=0.0) # No jitter for validation
+                                      audio_history_len=audio_history_len)
 
     # DataLoader configuration
     num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many
