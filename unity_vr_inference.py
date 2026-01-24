@@ -391,6 +391,7 @@ class UnityVRInterface:
                 'num_epochs': self.num_epochs,
                 'camera_names': self.camera_names,
                 'activation': self.activation,
+                'audio_history_len': self.audio_history_len,
             }
             policy = ACTPolicy(policy_config)
         elif self.policy_class == 'CNNMLP':
