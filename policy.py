@@ -24,8 +24,13 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
         hidden_dim = self.model.transformer.d_model
         self.hidden_dim = hidden_dim
         # Infer action splits
-        self.cont_dim = len(ACTION_INDICES['continuous'])
-        self.bin_dim = len(ACTION_INDICES['boolean'])
+        action_dim = int(getattr(self.model, 'action_dim', 32))
+        if action_dim < 28:
+            raise ValueError(f"action_dim too small ({action_dim}); expected at least 28")
+        # continuous: 0..23 plus 28..(action_dim-1)
+        self.cont_dim = 24 + max(0, action_dim - 28)
+        # boolean: 24..27
+        self.bin_dim = 4
         # Stochastic heads
         self.cont_mu_head = nn.Linear(hidden_dim, self.cont_dim)
         self.cont_log_std_head = nn.Linear(hidden_dim, self.cont_dim)
@@ -33,7 +38,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
         # Value head
         self.value_head = nn.Linear(hidden_dim, 1)
 
-    def __call__(self, qpos, image, actions=None, is_pad=None):
+    def __call__(self, qpos, image, actions=None, is_pad=None, audio=None):
         env_state = None
         # Print image shape and info before normalization
         print(f"[Policy] Input image shape: {image.shape}, dtype: {image.dtype}")
@@ -49,12 +54,15 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             raise
         # Convert inputs to float32 to match model weights
         qpos = qpos.float()
+        if audio is not None:
+            audio = audio.float()
+            
         if actions is not None: # training time
             actions = actions[:, :self.model.num_queries].float()
             is_pad = is_pad[:, :self.model.num_queries]
 
-            a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, actions, is_pad)
-            total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
+            a_hat, is_pad_hat, (mu, logvar, prior_mu, prior_logvar) = self.model(qpos, image, env_state, actions, is_pad, audio=audio)
+            total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar, prior_mu, prior_logvar)
             
             # Compute mixed loss for continuous and boolean actions
             mixed_losses = compute_mixed_loss(a_hat, actions, is_pad, 
@@ -69,10 +77,10 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
             loss_dict['loss'] = mixed_losses['total_loss'] + loss_dict['kl'] * self.kl_weight
             return loss_dict
         else: # inference time
-            a_hat, _, (_, _) = self.model(qpos, image, env_state) # no action, sample from prior
+            a_hat, _, stats = self.model(qpos, image, env_state, audio=audio) # no action, sample from prior
             return a_hat
 
-    def forward(self, qpos, image, prev_actions=None, is_pad=None, out_mode: str = "dist"):
+    def forward(self, qpos, image, prev_actions=None, is_pad=None, audio=None, out_mode: str = "dist"):
         """
         Enhanced forward that exposes ACT features and adds stochastic/value heads.
         - out_mode="dist": return distributions for continuous and binary actions + value + hidden.
@@ -94,10 +102,12 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
         else:
             raise ValueError(f"Unsupported image dims {image.dim()}, expected 4D or 5D tensor")
         qpos = qpos.float()
+        if audio is not None:
+            audio = audio.float()
 
         # Compute hidden states h using the backbone/transformer
         # forward() already normalized image, so skip extra normalization inside encoder
-        h = self.encode_to_hidden(qpos, image, env_state, do_normalize=False)  # [B, T, H]
+        h = self.encode_to_hidden(qpos, image, env_state, audio=audio, do_normalize=False)  # [B, T, H]
         try:
             print('[DBG][FWD] h', tuple(h.shape))
         except Exception:
@@ -183,7 +193,7 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                 'value': value,
             }
 
-    def encode_to_hidden(self, qpos, image, env_state=None, do_normalize: bool = True, microbatch: Optional[int] = None):
+    def encode_to_hidden(self, qpos, image, env_state=None, audio=None, do_normalize: bool = True, microbatch: Optional[int] = None):
         """
         Expose per-step hidden features h_t without refactoring the backbone.
         - Optionally normalize images (ImageNet stats) if do_normalize=True.
@@ -202,8 +212,13 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                 e = min(B, s + mb)
                 q_mb = qpos[s:e]
                 img_mb = image[s:e]
+                audio_mb = audio[s:e] if audio is not None else None
+                
                 # Move to device lazily per chunk
                 q_mb = q_mb.to(device, non_blocking=True).float()
+                if audio_mb is not None:
+                    audio_mb = audio_mb.to(device, non_blocking=True).float()
+                    
                 # Support 5D [B,K,C,H,W] and 4D [B,C,H,W]
                 if img_mb.dim() == 5:
                     Bm, K, C, H, W = img_mb.shape
@@ -237,10 +252,26 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                             all_cam_features.append(self.model.input_proj(features))
                             all_cam_pos.append(pos)
                         proprio_input = self.model.input_proj_robot_state(q_mb)
+                        
+                        # Handle audio input and latent z
+                        if audio_mb is not None:
+                            # Flatten audio history: [B, N, 1024] -> [B, N*1024]
+                            if audio_mb.dim() == 3:
+                                audio_mb_flat = audio_mb.view(audio_mb.shape[0], -1)
+                            else:
+                                audio_mb_flat = audio_mb
+                            
+                            # Calculate z from audio prior
+                            audio_embed = self.model.input_proj_audio(audio_mb_flat)
+                            prior_latent_info = self.model.audio_prior_net(audio_embed)
+                            prior_mu = prior_latent_info[:, :self.model.latent_dim]
+                            latent = prior_mu
+                        else:
+                            latent = torch.zeros((q_mb.size(0), getattr(self.model, 'latent_dim', 32)), device=q_mb.device, dtype=q_mb.dtype)
+                            
                         src = torch.cat(all_cam_features, axis=3)
                         pos = torch.cat(all_cam_pos, axis=3)
-                        # Create zero latent and project to match model.forward
-                        latent = torch.zeros((q_mb.size(0), getattr(self.model, 'latent_dim', 32)), device=q_mb.device, dtype=q_mb.dtype)
+                        # Project latent to match model.forward
                         latent_input = self.model.latent_out_proj(latent) if hasattr(self.model, 'latent_out_proj') else None
                         try:
                             print("[DBG][ENC] src", tuple(src.shape), "pos", tuple(pos.shape),
@@ -268,7 +299,9 @@ class ACTPolicy(nn.Module): #TODO check whether image normalization (transforms.
                     with autocast(enabled=True):
                         qpos_proj = self.model.input_proj_robot_state(q_mb)
                         env_proj = self.model.input_proj_env_state(env_state)
+                        
                         transformer_input = torch.cat([qpos_proj, env_proj], axis=1)
+                            
                         hs_mb = self.model.transformer(transformer_input, None, self.model.query_embed.weight, self.model.pos.weight)[0]
 
                 outs.append(hs_mb)
@@ -320,7 +353,7 @@ class CNNMLPPolicy(nn.Module):
         self.model = model # decoder
         self.optimizer = optimizer
 
-    def __call__(self, qpos, image, actions=None, is_pad=None):
+    def __call__(self, qpos, image, actions=None, is_pad=None, audio=None):
         env_state = None # TODO
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
@@ -342,7 +375,7 @@ class CNNMLPPolicy(nn.Module):
     def configure_optimizers(self):
         return self.optimizer
 
-def kl_divergence(mu, logvar):
+def kl_divergence(mu, logvar, prior_mu=None, prior_logvar=None):
     batch_size = mu.size(0)
     assert batch_size != 0
     if mu.data.ndimension() == 4:
@@ -350,7 +383,22 @@ def kl_divergence(mu, logvar):
     if logvar.data.ndimension() == 4:
         logvar = logvar.view(logvar.size(0), logvar.size(1))
 
-    klds = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+    if prior_mu is None or prior_logvar is None:
+        # Standard Normal Prior N(0, I)
+        klds = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+    else:
+        # General Gaussian Prior N(prior_mu, exp(prior_logvar))
+        if prior_mu.data.ndimension() == 4:
+             prior_mu = prior_mu.view(prior_mu.size(0), prior_mu.size(1))
+        if prior_logvar.data.ndimension() == 4:
+             prior_logvar = prior_logvar.view(prior_logvar.size(0), prior_logvar.size(1))
+        
+        prior_var = prior_logvar.exp()
+        var = logvar.exp()
+        
+        # KL = 0.5 * (log(sigma_p^2) - log(sigma_q^2) + (sigma_q^2 + (mu_q - mu_p)^2)/sigma_p^2 - 1)
+        klds = 0.5 * (prior_logvar - logvar + (var + (mu - prior_mu).pow(2)) / prior_var - 1)
+
     total_kld = klds.sum(1).mean(0, True)
     dimension_wise_kld = klds.mean(0)
     mean_kld = klds.mean(1).mean(0, True)

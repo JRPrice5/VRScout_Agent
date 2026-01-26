@@ -11,7 +11,7 @@ e = IPython.embed
 
 
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries, tail_clip: Optional[int] = None):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries, tail_clip: Optional[int] = None, audio_history_len: int = 1):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
@@ -20,6 +20,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         self.num_queries = int(num_queries)
         # Optional: exclude last `tail_clip` timesteps of each episode from sampling
         self.tail_clip = int(tail_clip) if tail_clip is not None else 0
+        self.audio_history_len = int(audio_history_len)
         self.is_sim = None
         self.__getitem__(0)  # initialize self.is_sim
 
@@ -80,6 +81,72 @@ class EpisodicDataset(torch.utils.data.Dataset):
             all_cam_images.append(image_dict[cam_name])
         all_cam_images = np.stack(all_cam_images, axis=0)
 
+        # load audio if available
+        # Default to zeros [N, 1024]
+        audio_data = torch.zeros((self.audio_history_len, 1024))
+
+        # New format: audio_u (timestamps) and audio_e (embeddings)
+        if '/observations/audio_u' in root and '/observations/audio_e' in root:
+            try:
+                # Get current frame timestamp
+                if '/observations/timestamp' in root:
+                    current_time = root['/observations/timestamp'][start_ts]
+                else:
+                    # Fallback if no timestamp: assume 30Hz
+                    current_time = start_ts / 30.0
+
+                # Find last audio embedding index k
+                audio_u = root['/observations/audio_u'][()]
+                # searchsorted(side='right') returns index i such that audio_u[i-1] <= target < audio_u[i]
+                # so k = i - 1 is the index of the embedding that started <= current_time
+                k = np.searchsorted(audio_u, current_time, side='right') - 1
+                k = max(0, k)
+
+                # Gather last N embeddings indices: [k-N+1, ..., k]
+                indices = np.arange(k - self.audio_history_len + 1, k + 1)
+
+                # Handle padding for negative indices
+                valid_mask = indices >= 0
+                valid_indices = indices[valid_mask]
+                pad_len = len(indices) - len(valid_indices)
+
+                audio_stack = []
+                if pad_len > 0:
+                    audio_stack.append(torch.zeros((pad_len, 1024)))
+
+                if len(valid_indices) > 0:
+                    # Load from HDF5
+                    # h5py supports list indexing if they are sorted, but better to do it carefully or usually valid_indices is a contiguous range
+                    # valid_indices is contiguous range
+                    start_idx = valid_indices[0]
+                    end_idx = valid_indices[-1] + 1
+                    # Double check range validity against dataset size
+                    audio_len = root['/observations/audio_e'].shape[0]
+
+                    if start_idx < audio_len:
+                        real_end_idx = min(end_idx, audio_len)
+                        chunk = root['/observations/audio_e'][start_idx:real_end_idx]
+                        chunk_tensor = torch.from_numpy(chunk).float()
+                        audio_stack.append(chunk_tensor)
+
+                        # Handle if we hit end of audio array (rare if k is valid)
+                        if real_end_idx < end_idx:
+                            remain = end_idx - real_end_idx
+                            audio_stack.append(torch.zeros((remain, 1024)))
+                    else:
+                        audio_stack.append(torch.zeros((len(valid_indices), 1024)))
+
+                if audio_stack:
+                    audio_data = torch.cat(audio_stack, dim=0)
+
+            except Exception as e:
+                print(f"Error loading audio_u/e: {e}")
+                pass
+
+        # Legacy format (fallback, just repeat one frame N times)
+        elif '/observations/audio_obs' in root:
+            print("Warning: Legacy audio format detected, audio embeddings will be zeros")
+
         # construct observations
         image_data = torch.from_numpy(all_cam_images)
         qpos_data = torch.from_numpy(qpos).float()
@@ -92,11 +159,10 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # normalize image and change dtype to float
         image_data = image_data / 255.0
 
-        # Import action indices for splitting actions by type
-        from action_utils import ACTION_INDICES
-
-        # Get boolean indices for clamping after normalization
-        boolean_indices = ACTION_INDICES['boolean']
+        # Boolean indices are fixed in the action layout
+        if action_dim < 28:
+            raise ValueError(f"action_dim too small ({action_dim}); expected at least 28")
+        boolean_indices = list(range(24, 28))
 
         # Convert numpy arrays to torch tensors and ensure float32 dtype
         action_mean = torch.tensor(self.norm_stats["action_mean"], dtype=torch.float32)
@@ -113,7 +179,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
         qpos_data = (qpos_data - qpos_mean) / qpos_std
 
-        return image_data, qpos_data, action_data, is_pad
+        return image_data, qpos_data, action_data, is_pad, audio_data
 
 
 def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
@@ -165,15 +231,17 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 
 
 def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, num_queries,
-              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic', tail_clip: Optional[int] = None):
+              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic', tail_clip: Optional[int] = None, audio_history_len: int = 0):
     """Create train/val DataLoaders.
 
     - Default: EpisodicDataset for both splits (backward compatible).
     - Optionally: use StepDataset for training and/or validation via dataset_type args.
     - Normalization stats are computed on train episodes only and reused for val.
     - tail_clip: if provided, excludes the last N timesteps of each episode in both datasets.
+    - audio_history_len: length of audio history in N timesteps
     """
     print(f'\nData from: {dataset_dir}\n')
+    print(f'\nAudio history len: {audio_history_len}\n')
     # obtain train/val split at episode level
     train_ratio = 0.8
     shuffled_indices = np.random.permutation(num_episodes)
@@ -194,10 +262,12 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
                                     num_episodes=len(train_indices),
                                     num_queries=num_queries,
                                     episode_ids=train_indices.tolist(),
-                                    tail_clip=tail_clip)
+                                    tail_clip=tail_clip,
+                                    audio_history_len=audio_history_len)
     else:
         train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries,
-                                        tail_clip=tail_clip)
+                                        tail_clip=tail_clip,
+                                        audio_history_len=audio_history_len)
 
     if val_dataset_type == 'step':
         val_dataset = StepDataset(dataset_dir=dataset_dir,
@@ -206,10 +276,12 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
                                   num_episodes=len(val_indices),
                                   num_queries=num_queries,
                                   episode_ids=val_indices.tolist(),
-                                  tail_clip=tail_clip)
+                                  tail_clip=tail_clip,
+                                  audio_history_len=audio_history_len)
     else:
         val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries,
-                                      tail_clip=tail_clip)
+                                      tail_clip=tail_clip,
+                                      audio_history_len=audio_history_len)
 
     # DataLoader configuration
     num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many
@@ -235,7 +307,7 @@ class StepDataset(torch.utils.data.Dataset):
     This is designed for large-batch expert sampling in GAIL where batch size should depend on
     total timesteps, not number of episodes.
     """
-    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None, tail_clip: Optional[int] = None):
+    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None, tail_clip: Optional[int] = None, audio_history_len: int = 1):
         super(StepDataset, self).__init__()
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
@@ -244,6 +316,7 @@ class StepDataset(torch.utils.data.Dataset):
         self.num_queries = int(num_queries) if num_queries is not None else 1
         # Optional: exclude last `tail_clip` timesteps of each episode from sampling
         self.tail_clip = int(tail_clip) if tail_clip is not None else 0
+        self.audio_history_len = int(audio_history_len)
         self.is_sim = None
 
         # Precompute episode lengths and cumulative index for O(log E) lookup
@@ -290,6 +363,62 @@ class StepDataset(torch.utils.data.Dataset):
                 all_cam_images.append(root[f'/observations/images/{cam_name}'][t])
             all_cam_images = np.stack(all_cam_images, axis=0)  # [K, H, W, C]
 
+            # Audio at t
+            # Default to zeros [N, 1024]
+            audio_data = torch.zeros((self.audio_history_len, 1024))
+            
+            if '/observations/audio_u' in root and '/observations/audio_e' in root:
+                try:
+                    # Get current frame timestamp
+                    if '/observations/timestamp' in root:
+                        current_time = root['/observations/timestamp'][t]
+                    else:
+                        current_time = t / 30.0 
+
+                    # Find last audio embedding index k
+                    audio_u = root['/observations/audio_u'][()]
+                    k = np.searchsorted(audio_u, current_time, side='right') - 1
+                    k = max(0, k)
+                    
+                    # Gather last N embeddings indices: [k-N+1, ..., k]
+                    indices = np.arange(k - self.audio_history_len + 1, k + 1)
+                    
+                    # Handle padding for negative indices
+                    valid_mask = indices >= 0
+                    valid_indices = indices[valid_mask]
+                    pad_len = len(indices) - len(valid_indices)
+                    
+                    audio_stack = []
+                    if pad_len > 0:
+                        audio_stack.append(torch.zeros((pad_len, 1024)))
+                    
+                    if len(valid_indices) > 0:
+                        start_idx = valid_indices[0]
+                        end_idx = valid_indices[-1] + 1
+                        audio_len = root['/observations/audio_e'].shape[0]
+                        
+                        if start_idx < audio_len:
+                            real_end_idx = min(end_idx, audio_len)
+                            chunk = root['/observations/audio_e'][start_idx:real_end_idx]
+                            chunk_tensor = torch.from_numpy(chunk).float()
+                            audio_stack.append(chunk_tensor)
+                            
+                            if real_end_idx < end_idx:
+                                remain = end_idx - real_end_idx
+                                audio_stack.append(torch.zeros((remain, 1024)))
+                        else:
+                            audio_stack.append(torch.zeros((len(valid_indices), 1024)))
+
+                    if audio_stack:
+                        audio_data = torch.cat(audio_stack, dim=0)
+                    
+                except Exception as e:
+                    pass
+            
+            # Legacy format
+            elif '/observations/audio_obs' in root:
+                print("Warning: Legacy audio format detected, audio embeddings will be zeros")
+
             # Action alignment and chunking to mimic EpisodicDataset policy
             episode_len = self.episode_lengths[episode_pos]
             window_len = self.num_queries
@@ -330,7 +459,7 @@ class StepDataset(torch.utils.data.Dataset):
         if available_len < self.num_queries:
             is_pad[available_len:] = True
 
-        return image_data, qpos_data, action_data, is_pad
+        return image_data, qpos_data, action_data, is_pad, audio_data
 
 
 def load_expert_step_loader(dataset_dir, num_episodes, camera_names, batch_size,

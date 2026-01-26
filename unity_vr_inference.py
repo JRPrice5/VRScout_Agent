@@ -20,9 +20,13 @@ import threading
 import numpy as np
 import torch
 import pickle
+from collections import deque
 from PIL import Image
 import io
 import base64
+import torchaudio
+import tensorflow as tf
+import tensorflow_hub as hub
 
 # Add the current directory to path to import ACT modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -90,7 +94,11 @@ class UnityVRInterface:
                  # Dynamic component toggles
                  enable_dynamic_window_size=True,
                  enable_dynamic_decay_factor=True,
-                 enable_dynamic_update_rate=True):
+                 enable_dynamic_update_rate=True,
+                 # Audio processing
+                 use_audio=False,
+                 input_sample_rate=48000,
+                 audio_history_len=1):
         """
         Initialize the interface.
         
@@ -136,11 +144,48 @@ class UnityVRInterface:
             base_update_rate: Base update rate when not using dynamic adjustment
             update_rate_smoothing_factor: Smoothing factor for update rate adjustments (0-1)
             update_rate_history_size: Number of recent target update rates to track
+            use_audio: Whether to use audio features
+            input_sample_rate: Default input sample rate if not provided by client
+            audio_history_len: Number of audio embeddings to stack
             """
         self.host = host
         self.port = port
         self.camera_names = camera_names
         self.temporal_agg = temporal_agg
+        
+        # Audio configuration
+        self.use_audio = use_audio
+        self.current_input_sample_rate = input_sample_rate
+        self.target_sample_rate = 16000
+        self.audio_window_seconds = 0.96 # YAMNet expects ~0.96s
+        self.audio_buffer_size = int(self.target_sample_rate * self.audio_window_seconds)
+        # self.audio_buffer = np.zeros(self.audio_buffer_size, dtype=np.float32)
+        self.audio_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.audio_buffer_t = torch.zeros(self.audio_buffer_size, dtype=torch.float32, device=self.audio_device)
+        self.audio_history_len = audio_history_len
+        
+        # YAMNet Caching
+        self.yamnet_interval = 0.48
+        self.last_yamnet_time = 0
+        
+        # Initialize audio history ring buffer
+        self.audio_history = deque(maxlen=self.audio_history_len)
+        # Pre-fill with zeros
+        for _ in range(self.audio_history_len):
+            self.audio_history.append(torch.zeros(1024, device=self.audio_device, dtype=torch.float32))
+        
+        if self.use_audio:
+            print(f"Initializing Audio Processing (YAMNet)... Default Input SR: {self.current_input_sample_rate}, Target SR: {self.target_sample_rate}")
+            # Initialize resampler
+            self._update_resampler(self.current_input_sample_rate)
+                
+            # Load YAMNet model
+            try:
+                self.yamnet_model = hub.load('https://tfhub.dev/google/yamnet/1')
+                print("YAMNet model loaded successfully.")
+            except Exception as e:
+                print(f"Error loading YAMNet model: {e}")
+                self.use_audio = False # Disable if model load fails
         
         # Store DETR required parameters
         self.ckpt_dir = ckpt_dir
@@ -326,6 +371,7 @@ class UnityVRInterface:
         if self.policy_class == 'ACT':
             # ACT policy configuration with DETR required parameters
             policy_config = {
+                'state_dim': len(self.stats['qpos_mean']),
                 'num_queries': self.chunk_size,
                 'kl_weight': self.kl_weight,
                 'hidden_dim': self.hidden_dim,
@@ -345,6 +391,7 @@ class UnityVRInterface:
                 'num_epochs': self.num_epochs,
                 'camera_names': self.camera_names,
                 'activation': self.activation,
+                'audio_history_len': self.audio_history_len,
             }
             policy = ACTPolicy(policy_config)
         elif self.policy_class == 'CNNMLP':
@@ -970,18 +1017,21 @@ class UnityVRInterface:
             # Process image data
             curr_image = self._process_image_data(state_data)
             
+            # Process audio data
+            curr_audio = self._process_audio_data(state_data)
+            
             # Get action from policy
             if self.policy_class == 'ACT':
                 # Only query the policy when needed based on query_frequency
                 time_index = self.timestep % self.query_frequency
                 if time_index == 0:
-                    all_actions = self.policy(qpos, curr_image)
+                    all_actions = self.policy(qpos, curr_image, audio=curr_audio)
                     self.last_actions = all_actions  # Store for future timesteps
                 else:
                     # Use previously computed actions if not querying on this timestep
                     if self.last_actions is None:
                         # First timestep or in case there's no previous action
-                        all_actions = self.policy(qpos, curr_image)
+                        all_actions = self.policy(qpos, curr_image, audio=curr_audio)
                         self.last_actions = all_actions
                         time_index = 0
                     else:
@@ -1068,13 +1118,13 @@ class UnityVRInterface:
                                 weights = torch.exp(-current_decay * time_deltas.float())
                                 
                             weights = weights / weights.sum()
-                            
+
                             # Compute weighted average of past predictions (vectorized)
                             history_action = (actions_for_current * weights.unsqueeze(-1)).sum(dim=0)
-                            
+
                             # Blend current action with history using the current_weight parameter
-                            raw_action = (self.current_weight * current_action + 
-                                         (1 - self.current_weight) * history_action).unsqueeze(0)
+                            raw_action = (self.current_weight * current_action +
+                                          (1 - self.current_weight) * history_action).unsqueeze(0)
                         else:
                             # No valid predictions for current timestep
                             raw_action = current_action.unsqueeze(0)
@@ -1088,7 +1138,7 @@ class UnityVRInterface:
                     actions_for_current = None
             
             elif self.policy_class == 'CNNMLP':
-                raw_action = self.policy(qpos, curr_image)
+                raw_action = self.policy(qpos, curr_image) # CNNMLP doesn't support audio yet
                 actions_for_current = None
             
             # Update action history for dynamic window sizing
@@ -1135,6 +1185,108 @@ class UnityVRInterface:
                 'enable_dynamic_update_rate': self.enable_dynamic_update_rate
             }
     
+    def _update_resampler(self, input_sr):
+        """Update or create resampler if input sample rate changes"""
+        if input_sr != self.target_sample_rate:
+            print(f"Updating audio resampler: {input_sr} Hz -> {self.target_sample_rate} Hz")
+            self.resampler = torchaudio.transforms.Resample(input_sr, self.target_sample_rate)
+            try:
+                self.resampler = self.resampler.to(self.audio_device)
+            except Exception as e:
+                print(f"Warning: Could not move resampler to {self.audio_device} ({e}). Falling back to CPU resampling.")
+        else:
+            self.resampler = None
+            
+    def _process_audio_data(self, state_data):
+        """
+        Process audio data from Unity
+        
+        Args:
+            state_data: Dictionary containing state data from Unity
+            
+        Returns:
+            Processed audio embedding tensor (1024-d)
+        """
+        if not self.use_audio:
+            return None
+            
+        # Extract audio samples from state_data
+        # Expecting 'audio' key with list of float samples
+        new_samples = state_data.get('audio', [])
+        
+        # Check for dynamic sample rate update
+        incoming_sr = state_data.get('audioSampleRate', 0)
+        if incoming_sr > 0 and incoming_sr != self.current_input_sample_rate:
+            self.current_input_sample_rate = incoming_sr
+            self._update_resampler(self.current_input_sample_rate)
+        
+        if new_samples:
+            new_samples = np.array(new_samples, dtype=np.float32)
+            new_samples_t = torch.from_numpy(new_samples)
+            if self.audio_device.type == 'cuda':
+                new_samples_t = new_samples_t.to(self.audio_device, non_blocking=True)
+
+            # Resample if necessary (prefer GPU when available)
+            if self.current_input_sample_rate != self.target_sample_rate and hasattr(self, 'resampler') and self.resampler is not None:
+                try:
+                    waveform_t = new_samples_t.unsqueeze(0)  # [1, time]
+                    waveform_t = self.resampler(waveform_t)
+                    new_samples_t = waveform_t.squeeze(0)
+                except Exception as e:
+                    print(f"Warning: audio resample failed on {self.audio_device} ({e}). Falling back to CPU resampling.")
+                    try:
+                        waveform_cpu = torch.from_numpy(new_samples).unsqueeze(0)
+                        resampler_cpu = self.resampler
+                        try:
+                            resampler_cpu = resampler_cpu.to('cpu')
+                        except Exception:
+                            pass
+                        waveform_cpu = resampler_cpu(waveform_cpu)
+                        new_samples_t = waveform_cpu.squeeze(0).to(self.audio_device)
+                    except Exception as e2:
+                        print(f"Warning: audio resample CPU fallback also failed ({e2}). Using un-resampled audio.")
+                        new_samples_t = torch.from_numpy(new_samples).to(self.audio_device)
+
+            # Append to buffer (ring buffer style) on the chosen device
+            num_new = int(new_samples_t.numel())
+            if num_new > 0:
+                if num_new >= self.audio_buffer_size:
+                    self.audio_buffer_t.copy_(new_samples_t[-self.audio_buffer_size:])
+                else:
+                    self.audio_buffer_t = torch.roll(self.audio_buffer_t, shifts=-num_new, dims=0)
+                    self.audio_buffer_t[-num_new:] = new_samples_t
+                # Maintain CPU mirror only if something else relies on it
+                # self.audio_buffer = self.audio_buffer_t.detach().to('cpu').numpy()
+        
+        # Check if it is time to run YAMNet inference
+        current_time = time.time()
+        if current_time - self.last_yamnet_time >= self.yamnet_interval:
+            # Get the window for inference
+            waveform = self.audio_buffer_t.detach().to('cpu').numpy().astype(np.float32, copy=False)
+            
+            try:
+                # YAMNet expects a batch of waveforms: [N, samples]
+                scores, embeddings, spectrogram = self.yamnet_model(waveform)
+                
+                # Take the latest frame
+                embedding = embeddings[-1] 
+                
+                # Convert to torch tensor
+                new_emb = torch.from_numpy(embedding.numpy()).to(device=self.audio_device, dtype=torch.float32) # [1024]
+                
+                # Append to history ring buffer
+                self.audio_history.append(new_emb)
+                
+                self.last_yamnet_time = current_time
+                
+            except Exception as e:
+                print(f"Error in YAMNet inference: {e}")
+                # Fallback: keep using existing history
+        
+        # Return stacked history [1, N, 1024]
+        # Stack list of [1024] -> [N, 1024] -> [1, N, 1024]
+        return torch.stack(list(self.audio_history)).unsqueeze(0)
+
     def _process_image_data(self, state_data):
         """
         Process image data from Unity
@@ -1295,6 +1447,11 @@ def main():
     parser.add_argument('--adaptive_scale_beta_down', type=float, default=0.00005, help='EMA rate when metric is below current scale (slow decrease)')
     parser.add_argument('--adaptive_min_scale', type=float, default=1e-4, help='Minimum allowed scale to avoid division by zero')
     
+    # Audio arguments
+    parser.add_argument('--use_audio', action='store_true', help='Use audio features')
+    parser.add_argument('--input_sample_rate', type=int, default=48000, help='Input sample rate for audio from Unity')
+    parser.add_argument('--audio_history_len', type=int, default=1, help='Number of audio embeddings to stack')
+
     # Dynamic component toggle arguments
     # parser.add_argument('--enable_dynamic_window_size', action='store_true', help='Enable dynamic window size adjustment')
     # parser.add_argument('--enable_dynamic_decay_factor', action='store_true', help='Enable dynamic decay factor adjustment')
@@ -1348,9 +1505,9 @@ def main():
         adaptive_scale_beta_up=args.adaptive_scale_beta_up,
         adaptive_scale_beta_down=args.adaptive_scale_beta_down,
         adaptive_min_scale=args.adaptive_min_scale,
-        # enable_dynamic_window_size=args.enable_dynamic_window_size,
-        # enable_dynamic_decay_factor=args.enable_dynamic_decay_factor,
-        # enable_dynamic_update_rate=args.enable_dynamic_update_rate
+        use_audio=args.use_audio,
+        input_sample_rate=args.input_sample_rate,
+        audio_history_len=args.audio_history_len
     )
     
     interface.start_server()

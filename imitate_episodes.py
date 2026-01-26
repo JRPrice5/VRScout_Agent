@@ -51,7 +51,13 @@ def main(args):
     camera_names = task_config['camera_names']
 
     # fixed parameters
-    state_dim = 32  # Updated from 14 to match actual dimension
+    # Infer state/action dimension from dataset (supports extended layouts)
+    first_episode_path = os.path.join(dataset_dir, 'episode_0.hdf5')
+    if not os.path.isfile(first_episode_path):
+        raise FileNotFoundError(f"Could not find {first_episode_path} to infer state_dim")
+    import h5py
+    with h5py.File(first_episode_path, 'r') as f:
+        state_dim = int(f['/observations/qpos'].shape[1])
     lr_backbone = args.get('lr_backbone', 1e-6)
     # Use backbone from args if provided, otherwise default to resnet18
     backbone = args.get('backbone', 'resnet18')
@@ -72,10 +78,13 @@ def main(args):
                          'nheads': nheads,
                          'activation': activation,
                          'camera_names': camera_names,
+                         'state_dim': state_dim,
+                         'audio_history_len': args.get('audio_history_len', 1)
                          }
     elif policy_class == 'CNNMLP':
         policy_config = {'lr': args['lr'], 'lr_backbone': lr_backbone, 'backbone': backbone, 'num_queries': 1,
-                         'camera_names': camera_names, }
+                         'camera_names': camera_names,
+                         'state_dim': state_dim, }
     else:
         raise NotImplementedError
 
@@ -116,8 +125,9 @@ def main(args):
         batch_size_val,
         policy_config['num_queries'],
         dataset_type='episodic', # use StepDataset for training
-        val_dataset_type='episodic', # use EpisodicDataset for validation
+        val_dataset_type='episodic', # use StepDataset for validation
         tail_clip=150, # HARD CODED: exclude the last 150 timesteps of each episode in both datasets
+        audio_history_len=args.get('audio_history_len', 1)
     )
 
     # save dataset stats
@@ -420,8 +430,12 @@ def train_bc(train_dataloader, val_dataloader, config):
             policy.eval()
             epoch_dicts = []
             for batch_idx, data in enumerate(val_dataloader):
-                forward_dict = forward_pass(data, policy)
-                epoch_dicts.append(forward_dict)
+                image, qpos, action, is_pad, audio = data
+                image, qpos, action, is_pad = image.cuda(), qpos.cuda(), action.cuda(), is_pad.cuda()
+                audio = audio.cuda()
+                
+                loss_dict = policy(qpos, image, action, is_pad, audio)
+                epoch_dicts.append(loss_dict)
             epoch_summary = compute_dict_mean(epoch_dicts)
             validation_history.append(epoch_summary)
 
@@ -439,24 +453,21 @@ def train_bc(train_dataloader, val_dataloader, config):
         policy.train()
         optimizer.zero_grad()
         current_epoch_train = []
-        # Track sample visitation order using the DataLoader's sampler permutation
-        # try:
-        #     train_perm = list(iter(train_dataloader.sampler))
-        # except Exception:
-        #     train_perm = None
-        # if train_perm is not None:
-        #     # Basic sanity: expect permutation covering full dataset once
-        #     unique_count = len(set(train_perm))
-        #     expected = len(train_dataloader.dataset)
-        #     print(f"Train sampler order: {unique_count}/{expected} unique indices this epoch")
         for batch_idx, data in enumerate(train_dataloader):
-            forward_dict = forward_pass(data, policy)
-            # backward
-            loss = forward_dict['loss']
+            image, qpos, action, is_pad, audio = data
+            image, qpos, action, is_pad = image.cuda(), qpos.cuda(), action.cuda(), is_pad.cuda()
+            audio = audio.cuda()
+            
+            if batch_idx == 0:
+                print(f"[Train] Batch shapes - Image: {image.shape}, Qpos: {qpos.shape}, Action: {action.shape}, Audio: {audio.shape}")
+
+            optimizer.zero_grad()
+            loss_dict = policy(qpos, image, action, is_pad, audio)
+            loss = loss_dict['loss']
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            det = detach_dict(forward_dict)
+            det = detach_dict(loss_dict)
             train_history.append(det)
             current_epoch_train.append(det)
         epoch_summary = compute_dict_mean(current_epoch_train)
@@ -544,6 +555,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
+    parser.add_argument('--audio_history_len', action='store', type=int, help='History length for audio embeddings', default=1)
     
 
     # for transformer

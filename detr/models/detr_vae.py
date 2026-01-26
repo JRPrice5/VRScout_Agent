@@ -33,7 +33,7 @@ def get_sinusoid_encoding_table(n_position, d_hid):
 
 class DETRVAE(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbones, transformer, encoder, state_dim, num_queries, camera_names):
+    def __init__(self, backbones, transformer, encoder, state_dim, num_queries, camera_names, audio_history_len=1):
         """ Initializes the model.
         Parameters:
             backbones: torch module of the backbone to be used. See backbone.py
@@ -42,6 +42,7 @@ class DETRVAE(nn.Module):
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
                          DETR can detect in a single image. For COCO, we recommend 100 queries.
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
+            audio_history_len: Number of audio embeddings in history stack (default 1)
         """
         super().__init__()
         self.num_queries = num_queries
@@ -49,17 +50,22 @@ class DETRVAE(nn.Module):
         self.transformer = transformer
         self.encoder = encoder
         self.action_dim = state_dim  # Store action dimension for consistent use
+        self.audio_history_len = audio_history_len
         hidden_dim = transformer.d_model
         self.action_head = nn.Linear(hidden_dim, state_dim)
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        
+        # Audio input projection - handles stacked embeddings [B, N*1024]
+        self.input_proj_audio = nn.Linear(1024 * audio_history_len, hidden_dim)
+
         if backbones is not None:
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
             self.backbones = nn.ModuleList(backbones)
-            self.input_proj_robot_state = nn.Linear(32, hidden_dim)
+            self.input_proj_robot_state = nn.Linear(state_dim, hidden_dim)
         else:
             # input_dim = 32 + 7 # robot_state + env_state
-            self.input_proj_robot_state = nn.Linear(32, hidden_dim)
+            self.input_proj_robot_state = nn.Linear(state_dim, hidden_dim)
             self.input_proj_env_state = nn.Linear(7, hidden_dim)
             self.pos = torch.nn.Embedding(2, hidden_dim)
             self.backbones = None
@@ -67,24 +73,50 @@ class DETRVAE(nn.Module):
         # encoder extra parameters
         self.latent_dim = 32 # final size of latent z # TODO tune
         self.cls_embed = nn.Embedding(1, hidden_dim) # extra cls token embedding
-        self.encoder_action_proj = nn.Linear(32, hidden_dim) # project action to embedding
-        self.encoder_joint_proj = nn.Linear(32, hidden_dim)  # project qpos to embedding
+        self.encoder_action_proj = nn.Linear(state_dim, hidden_dim) # project action to embedding
+        self.encoder_joint_proj = nn.Linear(state_dim, hidden_dim)  # project qpos to embedding
         self.latent_proj = nn.Linear(hidden_dim, self.latent_dim*2) # project hidden state to latent std, var
         self.register_buffer('pos_table', get_sinusoid_encoding_table(1+1+num_queries, hidden_dim)) # [CLS], qpos, a_seq
 
+        # Print state_dim for debugging purpose
+        print(f"[PolicyVAE] State dimension: {state_dim}")
+        print(f"[PolicyVAE] Audio history length: {audio_history_len}")
+
         # decoder extra parameters
         self.latent_out_proj = nn.Linear(self.latent_dim, hidden_dim) # project latent sample to embedding
-        self.additional_pos_embed = nn.Embedding(2, hidden_dim) # learned position embedding for proprio and latent
+        self.additional_pos_embed = nn.Embedding(2, hidden_dim) # learned position embedding for proprio, latent
 
-    def forward(self, qpos, image, env_state, actions=None, is_pad=None):
+        # Audio prior network
+        self.audio_prior_net = mlp(input_dim=hidden_dim, hidden_dim=hidden_dim, output_dim=self.latent_dim*2, hidden_depth=2)
+
+    def forward(self, qpos, image, env_state, actions=None, is_pad=None, audio=None):
         """
         qpos: batch, qpos_dim
         image: batch, num_cam, channel, height, width
         env_state: None
         actions: batch, seq, action_dim
+        audio: batch, N, 1024  (or batch, 1024 if N=1 and flattened already? assume [B, N, 1024])
         """
         is_training = actions is not None # train or val
         bs, _ = qpos.shape
+
+        # Compute prior from audio
+        if audio is not None:
+            # Flatten audio history: [B, N, 1024] -> [B, N*1024]
+            if audio.dim() == 3:
+                audio_flat = audio.view(bs, -1)
+            else:
+                # Assume already flattened or N=1
+                audio_flat = audio
+                
+            audio_embed = self.input_proj_audio(audio_flat) # (bs, hidden_dim)
+            prior_latent_info = self.audio_prior_net(audio_embed)
+            prior_mu = prior_latent_info[:, :self.latent_dim]
+            prior_logvar = prior_latent_info[:, self.latent_dim:]
+        else:
+            prior_mu = torch.zeros((bs, self.latent_dim), device=qpos.device)
+            prior_logvar = torch.zeros((bs, self.latent_dim), device=qpos.device)
+
         ### Obtain latent z from action sequence
         if is_training:
             # project action sequence to embedding dim, and concat with a CLS token
@@ -111,9 +143,14 @@ class DETRVAE(nn.Module):
             latent_input = self.latent_out_proj(latent_sample)
         else:
             mu = logvar = None
-            latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
+            # Use prior mean for inference
+            latent_sample = prior_mu
             latent_input = self.latent_out_proj(latent_sample)
 
+        # Force audio input to transformer to be zero (bottleneck) - REMOVED
+        # We calculate it just for shape, but pass zeros
+        # Note: We need a zero tensor of correct shape.
+        
         if self.backbones is not None:
             # Image observation features and position embeddings
             all_cam_features = []
@@ -126,18 +163,27 @@ class DETRVAE(nn.Module):
                 all_cam_pos.append(pos)
             # proprioception features
             proprio_input = self.input_proj_robot_state(qpos)
+            
+            # audio features (BLOCKED) - REMOVED
+            # audio_input_zeros = torch.zeros_like(proprio_input)
+
             # fold camera dimension into width dimension
             src = torch.cat(all_cam_features, axis=3)
             pos = torch.cat(all_cam_pos, axis=3)
+            
             hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight)[0]
         else:
             qpos = self.input_proj_robot_state(qpos)
             env_state = self.input_proj_env_state(env_state)
+            
+            # audio features (BLOCKED) - REMOVED
+            # audio_input_zeros = torch.zeros_like(qpos)
+            
             transformer_input = torch.cat([qpos, env_state], axis=1) # seq length = 2
             hs = self.transformer(transformer_input, None, self.query_embed.weight, self.pos.weight)[0]
         a_hat = self.action_head(hs)
         is_pad_hat = self.is_pad_head(hs)
-        return a_hat, is_pad_hat, [mu, logvar]
+        return a_hat, is_pad_hat, [mu, logvar, prior_mu, prior_logvar]
 
 
 
@@ -228,7 +274,8 @@ def build_encoder(args):
 
 
 def build(args):
-    state_dim = 32 # Updated from 14 to match actual dimension
+    state_dim = getattr(args, 'state_dim', 32)
+    audio_history_len = getattr(args, 'audio_history_len', 1)
 
     # From state
     # backbone = None # from state for now, no need for conv nets
@@ -248,6 +295,7 @@ def build(args):
         state_dim=state_dim,
         num_queries=args.num_queries,
         camera_names=args.camera_names,
+        audio_history_len=audio_history_len
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -256,7 +304,7 @@ def build(args):
     return model
 
 def build_cnnmlp(args):
-    state_dim = 32 # Updated from 14 to match actual dimension
+    state_dim = getattr(args, 'state_dim', 32)
 
     # From state
     # backbone = None # from state for now, no need for conv nets

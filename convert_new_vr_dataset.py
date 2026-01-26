@@ -30,6 +30,10 @@ from pyquaternion import Quaternion
 from datetime import datetime
 import matplotlib.pyplot as plt
 import re
+import torch
+import torchaudio
+import tensorflow as tf
+import tensorflow_hub as hub
 
 
 def calculate_quaternion_delta(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
@@ -116,7 +120,7 @@ def find_closest_image(timestamp, image_timestamps):
     return image_timestamps[closest_ts]
 
 
-def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False):
+def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=None, start_episode_idx=0, flip_vertical=False, ignore_devices=None, audio_file=None, audio_csv=None, audio_window_len=0.96):
     """
     Convert VR dataset to HDF5 format for ACT training.
     
@@ -126,6 +130,12 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
         output_dir: Directory to save HDF5 files
         episode_length: Optional length to split episodes
         start_episode_idx: Starting index for episode numbering (for batch processing)
+        flip_vertical: Whether to flip images vertically
+        ignore_devices: List of devices to ignore (e.g., ['left_controller', 'right_controller', 'hmd'])
+        audio_file: Path to the .wav audio file
+        audio_csv: Path to the aligned audio timestamps CSV
+        audio_window_len: Length of audio window in seconds
+        audio_n_mels: Number of mel bins for spectrogram
         
     Returns:
         Number of episodes created
@@ -133,6 +143,80 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
+    # Process ignore_devices parameter
+    if ignore_devices is None:
+        ignore_devices = []
+    ignore_devices = [d.lower() for d in ignore_devices]
+    
+    # Validate device names
+    valid_devices = ['hmd', 'left_controller', 'right_controller']
+    for device in ignore_devices:
+        if device not in valid_devices:
+            print(f"Warning: Unknown device '{device}'. Valid devices are: {valid_devices}")
+    
+    if ignore_devices:
+        print(f"Ignoring devices: {ignore_devices}")
+    
+    # Load Audio Data if provided
+    waveform = None
+    sample_rate = None
+    anchor_sample_index = 0
+    yamnet_model = None
+    
+    if audio_file and audio_csv:
+        print(f"Loading audio from {audio_file}...")
+        try:
+            # Load with torchaudio
+            waveform, original_sr = torchaudio.load(audio_file)
+            
+            # Resample to 16k for YAMNet
+            target_sr = 16000
+            if original_sr != target_sr:
+                print(f"Resampling audio from {original_sr} to {target_sr} Hz...")
+                resampler = torchaudio.transforms.Resample(original_sr, target_sr)
+                waveform = resampler(waveform)
+                sample_rate = target_sr
+            else:
+                sample_rate = original_sr
+                
+            # Convert to mono if necessary
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0, keepdim=True)
+            
+            print(f"Audio ready: {waveform.shape}, SR: {sample_rate}")
+            
+            print(f"Loading audio alignment from {audio_csv}...")
+            audio_df = pd.read_csv(audio_csv)
+            
+            # Calculate the anchor sample index (where timestamp == 0.0)
+            # timestamp = (frame_index_end - anchor_sample_index) / original_sr
+            # => anchor_sample_index_original = frame_index_end - (timestamp * original_sr)
+            # We calculate this for all rows and take the median to be robust
+            
+            # Note: frame_index_end is based on the original sample rate.
+            # We need to find the anchor in the NEW sample rate domain.
+            
+            # First, calculate anchor in original domain
+            audio_df['calculated_anchor_original'] = audio_df['frame_index_end'] - (audio_df['timestamp'] * original_sr)
+            anchor_sample_index_original = audio_df['calculated_anchor_original'].median()
+            
+            # Convert anchor to new sample rate domain
+            # anchor_new = anchor_old * (target_sr / original_sr)
+            anchor_sample_index = int(anchor_sample_index_original * (sample_rate / original_sr))
+            
+            print(f"Calculated anchor sample index (original SR): {int(anchor_sample_index_original)}")
+            print(f"Calculated anchor sample index (target SR): {anchor_sample_index}")
+            
+            # Initialize YAMNet from TensorFlow Hub
+            print("Loading YAMNet model from TensorFlow Hub...")
+            yamnet_model = hub.load("https://tfhub.dev/google/yamnet/1")
+            print("YAMNet model loaded successfully.")
+            
+        except Exception as e:
+            print(f"Error loading audio or initializing YAMNet: {e}")
+            print("Continuing without audio data...")
+            waveform = None
+
     # Load CSV data
     print(f"Loading data from {csv_file}...")
     
@@ -157,6 +241,14 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
     
     # We'll process the CSV in chunks by episode to save memory
     header_fields = header.split(',')
+
+    def _get_float(row, key, default=0.0):
+        if key not in row:
+            return default
+        v = row[key]
+        if v == "" or pd.isna(v):
+            return default
+        return float(v)
     
     # Get column indices for required fields to avoid loading entire dataframe
     required_cols = [
@@ -169,6 +261,13 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
         'controller_righthand_rotation_x', 'controller_righthand_rotation_y', 'controller_righthand_rotation_z', 'controller_righthand_rotation_w',
         'lefthand_trigger_state_changed', 'lefthand_grip_state_changed',
         'righthand_trigger_state_changed', 'righthand_grip_state_changed'
+        ,
+        'generictracker_1_position_x', 'generictracker_1_position_y', 'generictracker_1_position_z',
+        'generictracker_1_rotation_x', 'generictracker_1_rotation_y', 'generictracker_1_rotation_z', 'generictracker_1_rotation_w',
+        'generictracker_2_position_x', 'generictracker_2_position_y', 'generictracker_2_position_z',
+        'generictracker_2_rotation_x', 'generictracker_2_rotation_y', 'generictracker_2_rotation_z', 'generictracker_2_rotation_w',
+        'generictracker_3_position_x', 'generictracker_3_position_y', 'generictracker_3_position_z',
+        'generictracker_3_rotation_x', 'generictracker_3_rotation_y', 'generictracker_3_rotation_z', 'generictracker_3_rotation_w'
     ]
     
     # Process image directory - map timestamps to file paths
@@ -257,6 +356,7 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
             qpos_data = []
             action_data = []
             image_data = []
+            audio_data = []
             
             # Reset state tracking at the beginning of each episode
             lefthand_trigger_state = 0
@@ -280,27 +380,66 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                     righthand_grip_state = 1.0 if row['righthand_grip_state_changed'].lower() == 'true' else 0.0
                         
                 # Map new CSV columns to qpos format
+                # Apply device ignoring logic
+                if 'hmd' in ignore_devices:
+                    hmd_pos = [0.0, 0.0, 0.0]
+                    hmd_rot = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
+                else:
+                    hmd_pos = [_get_float(row, 'hmd_position_x'), _get_float(row, 'hmd_position_y'), _get_float(row, 'hmd_position_z')]
+                    hmd_rot = [_get_float(row, 'hmd_rotation_x'), _get_float(row, 'hmd_rotation_y'), _get_float(row, 'hmd_rotation_z'), _get_float(row, 'hmd_rotation_w', 1.0)]
+                
+                if 'left_controller' in ignore_devices:
+                    left_pos = [0.0, 0.0, 0.0]
+                    left_rot = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
+                    left_trigger = 0.0
+                    left_grip = 0.0
+                else:
+                    left_pos = [_get_float(row, 'controller_lefthand_position_x'), _get_float(row, 'controller_lefthand_position_y'), _get_float(row, 'controller_lefthand_position_z')]
+                    left_rot = [_get_float(row, 'controller_lefthand_rotation_x'), _get_float(row, 'controller_lefthand_rotation_y'), _get_float(row, 'controller_lefthand_rotation_z'), _get_float(row, 'controller_lefthand_rotation_w', 1.0)]
+                    left_trigger = lefthand_trigger_state
+                    left_grip = lefthand_grip_state
+                
+                if 'right_controller' in ignore_devices:
+                    right_pos = [0.0, 0.0, 0.0]
+                    right_rot = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
+                    right_trigger = 0.0
+                    right_grip = 0.0
+                else:
+                    right_pos = [_get_float(row, 'controller_righthand_position_x'), _get_float(row, 'controller_righthand_position_y'), _get_float(row, 'controller_righthand_position_z')]
+                    right_rot = [_get_float(row, 'controller_righthand_rotation_x'), _get_float(row, 'controller_righthand_rotation_y'), _get_float(row, 'controller_righthand_rotation_z'), _get_float(row, 'controller_righthand_rotation_w', 1.0)]
+                    right_trigger = righthand_trigger_state
+                    right_grip = righthand_grip_state
+
+                tracker_1_pos = [_get_float(row, 'generictracker_1_position_x'), _get_float(row, 'generictracker_1_position_y'), _get_float(row, 'generictracker_1_position_z')]
+                tracker_1_rot = [_get_float(row, 'generictracker_1_rotation_x'), _get_float(row, 'generictracker_1_rotation_y'), _get_float(row, 'generictracker_1_rotation_z'), _get_float(row, 'generictracker_1_rotation_w', 1.0)]
+                tracker_2_pos = [_get_float(row, 'generictracker_2_position_x'), _get_float(row, 'generictracker_2_position_y'), _get_float(row, 'generictracker_2_position_z')]
+                tracker_2_rot = [_get_float(row, 'generictracker_2_rotation_x'), _get_float(row, 'generictracker_2_rotation_y'), _get_float(row, 'generictracker_2_rotation_z'), _get_float(row, 'generictracker_2_rotation_w', 1.0)]
+                tracker_3_pos = [_get_float(row, 'generictracker_3_position_x'), _get_float(row, 'generictracker_3_position_y'), _get_float(row, 'generictracker_3_position_z')]
+                tracker_3_rot = [_get_float(row, 'generictracker_3_rotation_x'), _get_float(row, 'generictracker_3_rotation_y'), _get_float(row, 'generictracker_3_rotation_z'), _get_float(row, 'generictracker_3_rotation_w', 1.0)]
+                
                 qpos_row = [
                     # Head (local position)
-                    float(row['hmd_position_x']), float(row['hmd_position_y']), float(row['hmd_position_z']),
-                    float(row['hmd_rotation_x']), float(row['hmd_rotation_y']), float(row['hmd_rotation_z']), float(row['hmd_rotation_w']),
+                    *hmd_pos, *hmd_rot,
                     
                     # Left controller (local position)
-                    float(row['controller_lefthand_position_x']), float(row['controller_lefthand_position_y']), float(row['controller_lefthand_position_z']),
-                    float(row['controller_lefthand_rotation_x']), float(row['controller_lefthand_rotation_y']), float(row['controller_lefthand_rotation_z']), float(row['controller_lefthand_rotation_w']),
+                    *left_pos, *left_rot,
                     
                     # Right controller (local position)
-                    float(row['controller_righthand_position_x']), float(row['controller_righthand_position_y']), float(row['controller_righthand_position_z']),
-                    float(row['controller_righthand_rotation_x']), float(row['controller_righthand_rotation_y']), float(row['controller_righthand_rotation_z']), float(row['controller_righthand_rotation_w']),
+                    *right_pos, *right_rot,
                     
                     # XR Origin (world position) - assuming 0 for now as it's not in the new CSV
                     0.0, 0.0, 0.0,
                     
                     # Controller inputs - map trigger and grip states to expected format
-                    lefthand_trigger_state, righthand_trigger_state,
-                    lefthand_grip_state, righthand_grip_state,
+                    left_trigger, right_trigger,
+                    left_grip, right_grip,
                     0.0, 0.0,  # Thumbstick_0_x/y - assuming 0 as not in new CSV
-                    0.0, 0.0   # Thumbstick_1_x/y - assuming 0 as not in new CSV
+                    0.0, 0.0,  # Thumbstick_1_x/y - assuming 0 as not in new CSV
+                    
+                    # Generic trackers
+                    *tracker_1_pos, *tracker_1_rot,
+                    *tracker_2_pos, *tracker_2_rot,
+                    *tracker_3_pos, *tracker_3_rot
                 ]
                 
                 qpos_data.append(qpos_row)
@@ -336,6 +475,67 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
                             blank_img = np.zeros((224, 224, 3), dtype=np.uint8)
                         image_data.append(blank_img)
                         print(f"Warning: No matching image found for timestamp {row['timestamp']}")
+
+            # Extract Audio Features at 2Hz for the whole episode
+            audio_u_list = []
+            audio_e_list = []
+            if waveform is not None and yamnet_model is not None:
+                start_ts = float(episode_df['timestamp'].iloc[0])
+                end_ts = float(episode_df['timestamp'].iloc[-1])
+                
+                # Generate 2Hz timestamps: start_ts, start_ts+0.5, ...
+                current_ts = start_ts
+                while current_ts <= end_ts:
+                    audio_u_list.append(current_ts)
+                    
+                    # Calculate sample indices
+                    # Window is [curr_time - audio_window_len, curr_time]
+                    end_sample = int(anchor_sample_index + current_ts * sample_rate)
+                    start_sample = int(end_sample - audio_window_len * sample_rate)
+                    
+                    # Handle boundaries
+                    waveform_len = waveform.shape[1]
+                    
+                    if end_sample > 0 and start_sample < waveform_len:
+                        # Calculate valid extraction range
+                        valid_start = max(0, start_sample)
+                        valid_end = min(waveform_len, end_sample)
+                        
+                        # Extract valid chunk
+                        chunk = waveform[:, valid_start:valid_end]
+                        
+                        # Pad if necessary
+                        pad_left = valid_start - start_sample
+                        pad_right = end_sample - valid_end
+                        
+                        if pad_left > 0 or pad_right > 0:
+                            chunk = torch.nn.functional.pad(chunk, (pad_left, pad_right))
+                    else:
+                        # Completely out of bounds, return silence
+                        chunk = torch.zeros((1, int(audio_window_len * sample_rate)))
+
+                    # Compute YAMNet Embedding using TF Hub model
+                    try:
+                        # Convert PyTorch tensor to 1D numpy array for TensorFlow
+                        # chunk is (1, samples), we need (samples,)
+                        chunk_np = chunk.squeeze(0).numpy()
+                        
+                        # Run inference
+                        _, embeddings, _ = yamnet_model(chunk_np)
+                        
+                        if len(embeddings.shape) > 1:
+                            # Average across time dimension
+                            embedding_vec = tf.reduce_mean(embeddings, axis=0).numpy()
+                        else:
+                            embedding_vec = embeddings.numpy()
+                            
+                        audio_e_list.append(embedding_vec)
+                    except Exception as e:
+                        print(f"Error extracting audio feature at {current_ts}s: {e}")
+                        # Fallback to zeros
+                        audio_e_list.append(np.zeros(1024, dtype=np.float32))
+                    
+                    current_ts += 0.5
             
             # Create action data (using next row values directly)
             for i in range(len(qpos_data) - 1):
@@ -355,8 +555,20 @@ def convert_vr_dataset_to_hdf5(csv_file, image_dir, output_dir, episode_length=N
             # Store action data with compression
             f.create_dataset('/action', data=action_data, compression='gzip', compression_opts=4)
             
+            # Store timestamps for temporal augmentation
+            if 'timestamp' in episode_df.columns:
+                timestamps = episode_df['timestamp'].values.astype(np.float64)
+                f.create_dataset('/observations/timestamp', data=timestamps, compression='gzip', compression_opts=4)
+            
             # Store images
             images_group = f.create_group('/observations/images')
+            
+            # Store audio embeddings (2Hz)
+            if audio_e_list:
+                audio_u = np.array(audio_u_list, dtype=np.float64)
+                audio_e = np.array(audio_e_list, dtype=np.float32)
+                f.create_dataset('/observations/audio_u', data=audio_u, compression='gzip', compression_opts=4)
+                f.create_dataset('/observations/audio_e', data=audio_e, compression='gzip', compression_opts=4)
             
             if image_data:
                 # Process images in smaller batches to reduce peak memory usage
@@ -485,6 +697,13 @@ def main():
     parser.add_argument('--task_name', type=str, default='new_vr_dataset', help='Name for the task in constants.py')
     parser.add_argument('--update_constants', action='store_true', help='Update constants.py with new task')
     parser.add_argument('--constants_file', type=str, default=None, help='Path to constants.py file (optional)')
+    parser.add_argument('--ignore_devices', type=str, nargs='+', default=None, 
+                        help='Devices to ignore (zero out). Options: hmd, left_controller, right_controller. Example: --ignore_devices left_controller')
+    
+    # Audio arguments
+    parser.add_argument('--audio_file', type=str, default=None, help='Path to .wav file')
+    parser.add_argument('--audio_csv', type=str, default=None, help='Path to audio timestamps CSV')
+    parser.add_argument('--audio_window_len', type=float, default=0.96, help='Audio window duration in seconds')
     
     args = parser.parse_args()
     
@@ -493,7 +712,11 @@ def main():
         args.csv_file, 
         args.image_dir, 
         args.output_dir, 
-        args.episode_length
+        args.episode_length,
+        ignore_devices=args.ignore_devices,
+        audio_file=args.audio_file,
+        audio_csv=args.audio_csv,
+        audio_window_len=args.audio_window_len
     )
     
     # Count number of episodes

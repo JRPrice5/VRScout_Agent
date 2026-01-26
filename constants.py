@@ -90,6 +90,60 @@ SIM_TASK_CONFIGS = {
         'episode_len': 7890,
         'camera_names': ['camera1']
     },
+    'sim_vr_task_pw_6': {
+        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_6\HDF5',
+        'num_episodes': 16,
+        'episode_len': 7866,
+        'camera_names': ['camera1']
+    },
+    'sim_vr_task_pw_7': {
+        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_6\HDF5',
+        'num_episodes': 21,
+        'episode_len': 8988,
+        'camera_names': ['camera1']
+    },
+    'sim_vr_task_pw_8': {
+        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_7\HDF5',
+        'num_episodes': 38,
+        'episode_len': 2499,
+        'camera_names': ['camera1']
+    },
+    'sim_vr_task_pw_9': {
+        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_7\HDF5',
+        'num_episodes': 21,
+        'episode_len': 8858,
+        'camera_names': ['camera1']
+    },
+    'sim_vr_task_bs_fb_2': {
+        'dataset_dir': r'D:\CLOVR_Output\BS_FB_DATA_1\HDF5',
+        'num_episodes': 31,
+        'episode_len': 7669,
+        'camera_names': ['camera1']
+    },
+    'sim_vr_task_bs_fb_3': {
+        'dataset_dir': r'D:\CLOVR_Output\BS_FB_DATA_1\HDF5',
+        'num_episodes': 50,
+        'episode_len': 8218,
+        'camera_names': ['camera1']
+    },
+    'sim_vr_task_temp_audio_test': {
+        'dataset_dir': r'D:\CLOVR_Output\TEMP\HDF5',
+        'num_episodes': 2,
+        'episode_len': 3071,
+        'camera_names': ['camera1']
+    },
+    'sim_vr_task_temp_audio_test': {
+        'dataset_dir': r'D:\CLOVR_Output\TEMP\HDF5',
+        'num_episodes': 10,
+        'episode_len': 3071,
+        'camera_names': ['camera1']
+    },
+    'sim_vr_task_bs_audio_fb_1': {
+        'dataset_dir': r'D:\CLOVR_Output\BS_Audio\HDF5',
+        'num_episodes': 30,
+        'episode_len': 6240,
+        'camera_names': ['camera1']
+    },
 }
 
 ### Simulation envs fixed constants
