@@ -1,0 +1,17 @@
+ACT-based Policy Implementation for VRScout Agent
+Copyright © 2025-2026 Rain Wu
+
+This product includes software and concepts derived from the following
+third-party works:
+
+------------------------------------------------------------
+ACT: Action Chunking with Transformers
+Copyright (c) 2023 Tony Z. Zhao
+Licensed under the MIT License
+------------------------------------------------------------
+
+------------------------------------------------------------
+DETR (DEtection TRansformer)
+Copyright (c) Facebook, Inc. and its affiliates
+Licensed under the Apache License, Version 2.0
+------------------------------------------------------------

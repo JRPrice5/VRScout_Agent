@@ -2,11 +2,21 @@
 
 This repository provides the **VR-side policy stack** for the **VR Agent** system (this is **one of the three repos** that together make up the VR Agent).
 
+You can find the data collection and Agent_Orchestration_Unity_Project here:
+https://github.com/wrainw/VRScout_Agent_Orchestration_Unity_Project
+
+And you can find the virtual devices driver code here:
+https://github.com/wrainw/VRScout_openvr_virtualdriver
+
+You can also find the WASAPI audio capture wrapper code here:
+https://github.com/wrainw/WASAPI_AudioCaptureWrapper
+
 At a high level, this repo contains:
 
 - A Python **inference server** (`unity_vr_inference.py`) that loads an ACT-style policy and serves actions to Unity over TCP.
-- Unity C# **IPC clients** (`unity/InferencePoseClient.cs`, etc.) that capture VR state (poses / images / optional audio), send it to Python, and apply returned actions.
-- Training/evaluation utilities have been extended based on **ACT (Action Chunking with Transformers)**.
+- It enables a Unity C# **IPC clients** (`unity/InferencePoseClient.cs`, etc.) that capture VR state (poses / images / optional audio), to apply returned actions to OpenVR Applications (via the virtual driver).
+- A data preprocessing pipeline (`batch_convert_new_vr_datasets.py`) that prepares the collected VR record data for training.
+- And Training utilities (`imitate_episodes.py`) extended based on **ACT (Action Chunking with Transformers)** for vr settings and performance.
 
 ## Major Features
 
@@ -94,7 +104,7 @@ python unity_vr_inference.py \
 
  The legacy Unity-side scripts under `unity/` are **deprecated**.
  
- Please refer to the **Unity Component Repo** for the current Unity integration.
+ Please refer to the **Agent_Orchestration_Unity_Project** for the current Unity integration.
 
 ## Notes
 
@@ -103,4 +113,71 @@ python unity_vr_inference.py \
 
 ***
 
-Based on Action Chunking with Transformers and extended for VR runtime inference and Unity integration.
+## Attribution
+
+This project builds upon and is inspired by the following prior works and systems:
+
+  ACT: Action Chunking with Transformers
+
+    This implementation is ACT-based, drawing on the ideas and methodology introduced in:
+
+    Tony Z. Zhao et al., Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware, 2023.
+    Licensed under the MIT License.
+
+    ACT provides the foundational approach for temporally chunked action prediction used in this policy implementation.
+
+  DETR: DEtection TRansformer
+
+    This project incorporates architectural concepts and components derived from:
+
+    DETR (DEtection TRansformer),
+    Copyright © Facebook, Inc. and its affiliates.
+    Licensed under the Apache License, Version 2.0.
+
+    DETR-inspired transformer structures are used for perception and sequence modeling.
+
+  VRScout: VR Testing and Gameplay Agent
+
+    This work is developed as part of the VRScout Agent system, an autonomous VR interaction and testing agent designed for embodied policy learning and evaluation in virtual reality environments.
+
+## License Notes
+
+This repository is licensed under the Apache License, Version 2.0.
+
+Third-party components retain their original licenses:
+
+ACT — MIT License
+
+DETR — Apache License 2.0
+
+See LICENSE, NOTICE, and THIRD_PARTY_NOTICES.txt for details.
+
+## Citations
+
+If you use this code, please consider citing:
+
+```bibtex
+@article{carion2020endtoend,
+  title={End-to-End Object Detection with Transformers},
+  author={Carion, N. and Massa, F. and Synnaeve, G. and Usunier, N. and Kirillov, A. and Zagoruyko, S.},
+  journal={arXiv preprint arXiv:2005.12872},
+  year={2020},
+  url={https://arxiv.org/abs/2005.12872}
+}
+
+@article{zhao2023learning,
+  title={Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware},
+  author={Zhao, T. Z.},
+  journal={arXiv preprint arXiv:2304.13705},
+  year={2023},
+  url={https://arxiv.org/abs/2304.13705}
+}
+
+@article{wu2025vrscout,
+  title={VRScout: Towards Real-Time, Autonomous Testing of Virtual Reality Games},
+  author={Wu, Y. and Sun, Y. and Wunsche, B. and Wang, J. and Wen, E.},
+  journal={arXiv preprint arXiv:2511.00002},
+  year={2025},
+  url={https://arxiv.org/abs/2511.00002}
+}
+```
