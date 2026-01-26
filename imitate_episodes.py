@@ -16,7 +16,6 @@ from my_utils import StepDataset  # to detect step-based training
 from my_utils import sample_box_pose, sample_insertion_pose  # robot functions
 from my_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
 from policy import ACTPolicy, CNNMLPPolicy
-from visualize_episodes import save_videos
 
 from sim_env import BOX_POSE
 
@@ -319,8 +318,6 @@ def eval_bc(config, ckpt_name, save_episode=True):
         print(
             f'Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward == env_max_reward}')
 
-        if save_episode:
-            save_videos(image_list, DT, video_path=os.path.join(ckpt_dir, f'video{rollout_id}.mp4'))
 
     success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
     avg_return = np.mean(episode_returns)

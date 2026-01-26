@@ -3,143 +3,116 @@ import pathlib
 ### Task parameters
 DATA_DIR = '.'
 SIM_TASK_CONFIGS = {
-    'sim_transfer_cube_scripted':{
-        'dataset_dir': DATA_DIR + '/sim_transfer_cube_scripted',
-        'num_episodes': 50,
-        'episode_len': 400,
-        'camera_names': ['top']
-    },
-
-    'sim_transfer_cube_human':{
-        'dataset_dir': DATA_DIR + '/sim_transfer_cube_human',
-        'num_episodes': 50,
-        'episode_len': 400,
-        'camera_names': ['top']
-    },
-
-    'sim_insertion_scripted': {
-        'dataset_dir': DATA_DIR + '/sim_insertion_scripted',
-        'num_episodes': 50,
-        'episode_len': 400,
-        'camera_names': ['top']
-    },
-
-    'sim_insertion_human': {
-        'dataset_dir': DATA_DIR + '/sim_insertion_human',
-        'num_episodes': 50,
-        'episode_len': 500,
-        'camera_names': ['top']
-    },
     'sim_vr_task': {
-        'dataset_dir': r'E:\vr-data\q3_data\HDF5',
+        'dataset_dir': r'',
         'num_episodes': 16,
         'episode_len': 600,
         'camera_names': ['camera1']
     },
     'sim_vr_task_2': {
-        'dataset_dir': r'E:\vr-data\q3_data_2\HDF5_abs',
+        'dataset_dir': r'',
         'num_episodes': 20,
         'episode_len': 565,
         'camera_names': ['camera1']
     },
     'sim_vr_task_3': {
-        'dataset_dir': r'E:\vr-data\BS_DATA\HDF5',
+        'dataset_dir': r'',
         'num_episodes': 21,
         'episode_len': 8638,
         'camera_names': ['camera1']
     },
     'sim_vr_task_sh_1': {
-        'dataset_dir': r'D:\CLOVR_Output\SH_DATA_1\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 60,
         'episode_len': 1999,
         'camera_names': ['camera1']
     },
     'sim_vr_task_6': {
-        'dataset_dir': r'D:\CLOVR_Output\BS_DATA\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 69,
         'episode_len': 11850,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_1': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_FB_DATA_1\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 20,
         'episode_len': 9083,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_2': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_FB_DATA_2\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 25,
         'episode_len': 7512,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_3': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_3\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 24,
         'episode_len': 6958,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_4': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_3\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 34,
         'episode_len': 7692,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_5': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_3\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 55,
         'episode_len': 7890,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_6': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_6\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 16,
         'episode_len': 7866,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_7': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_6\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 21,
         'episode_len': 8988,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_8': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_7\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 38,
         'episode_len': 2499,
         'camera_names': ['camera1']
     },
     'sim_vr_task_pw_9': {
-        'dataset_dir': r'D:\CLOVR_Output\PW_DATA_7\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 21,
         'episode_len': 8858,
         'camera_names': ['camera1']
     },
     'sim_vr_task_bs_fb_2': {
-        'dataset_dir': r'D:\CLOVR_Output\BS_FB_DATA_1\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 31,
         'episode_len': 7669,
         'camera_names': ['camera1']
     },
     'sim_vr_task_bs_fb_3': {
-        'dataset_dir': r'D:\CLOVR_Output\BS_FB_DATA_1\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 50,
         'episode_len': 8218,
         'camera_names': ['camera1']
     },
     'sim_vr_task_temp_audio_test': {
-        'dataset_dir': r'D:\CLOVR_Output\TEMP\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 2,
         'episode_len': 3071,
         'camera_names': ['camera1']
     },
     'sim_vr_task_temp_audio_test': {
-        'dataset_dir': r'D:\CLOVR_Output\TEMP\HDF5',
+        'dataset_dir': r'D:',
         'num_episodes': 10,
         'episode_len': 3071,
         'camera_names': ['camera1']
     },
     'sim_vr_task_bs_audio_fb_1': {
-        'dataset_dir': r'D:\CLOVR_Output\BS_Audio\HDF5',
+        'dataset_dir': r'D:\HDF5',
         'num_episodes': 30,
         'episode_len': 6240,
         'camera_names': ['camera1']
