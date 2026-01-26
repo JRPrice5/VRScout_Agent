@@ -1,89 +1,106 @@
-# ACT: Action Chunking with Transformers
+# VRScout - an ACT Style VR Testing & Gameplay Agent
 
-### *New*: [ACT tuning tips](https://docs.google.com/document/d/1FVIZfoALXg_ZkYKaYVh-qOlaXveq5CtvJHXkY25eYhs/edit?usp=sharing)
-TL;DR: if your ACT policy is jerky or pauses in the middle of an episode, just train for longer! Success rate and smoothness can improve way after loss plateaus.
+This repository provides the **VR-side policy stack** for the **VR Agent** system (this is **one of the three repos** that together make up the VR Agent).
 
-#### Project Website: https://tonyzhaozh.github.io/aloha/
+At a high level, this repo contains:
 
-This repo contains the implementation of ACT, together with 2 simulated environments:
-Transfer Cube and Bimanual Insertion. You can train and evaluate ACT in sim or real.
-For real, you would also need to install [ALOHA](https://github.com/tonyzhaozh/aloha).
+- A Python **inference server** (`unity_vr_inference.py`) that loads an ACT-style policy and serves actions to Unity over TCP.
+- Unity C# **IPC clients** (`unity/InferencePoseClient.cs`, etc.) that capture VR state (poses / images / optional audio), send it to Python, and apply returned actions.
+- Training/evaluation utilities have been extended based on **ACT (Action Chunking with Transformers)**.
 
-### Updates:
-You can find all scripted/human demo for simulated environments [here](https://drive.google.com/drive/folders/1gPR03v05S1xiInoVJn7G7VJ9pDCnxq9O?usp=share_link).
+## Major Features
 
+- **Unity ↔ Python realtime inference (TCP)**
+  - Unity streams observations (poses + camera images, optional audio) to Python.
+  - Python runs policy inference and streams back actions.
 
-### Repo Structure
-- ``imitate_episodes.py`` Train and Evaluate ACT
-- ``policy.py`` An adaptor for ACT policy
-- ``detr`` Model definitions of ACT, modified from DETR
-- ``sim_env.py`` Mujoco + DM_Control environments with joint space control
-- ``ee_sim_env.py`` Mujoco + DM_Control environments with EE space control
-- ``scripted_policy.py`` Scripted policies for sim environments
-- ``constants.py`` Constants shared across files
-- ``utils.py`` Utils such as data loading and helper functions
-- ``visualize_episodes.py`` Save videos from a .hdf5 dataset
+- **Temporal aggregation / ensembling**
+  - Optional temporal aggregation of action chunks for smoother control (`--temporal_agg`).
 
+- **Dynamic temporal aggregation (adaptive smoothing vs responsiveness)**
+  - Optional **dynamic window sizing** (`--use_dynamic_window`) to adjust smoothing online.
+  - Note: A model with a longer chunk size is recommended to be used with dynamic window sizing.
 
-### Installation
+- **Runtime toggles from Unity UI**
+  - Unity can toggle dynamic components live (window size / decay factor / update rate).
+  - Python sends current toggle states back in the response for bidirectional sync.
 
-    conda create -n aloha python=3.8.10
-    conda activate aloha
-    pip install torchvision
-    pip install torch
-    pip install pyquaternion
-    pip install pyyaml
-    pip install rospkg
-    pip install pexpect
-    pip install mujoco==2.3.7
-    pip install dm_control==1.0.14
-    pip install opencv-python
-    pip install matplotlib
-    pip install einops
-    pip install packaging
-    pip install h5py
-    pip install ipython
-    cd act/detr && pip install -e .
+- **Persistent adaptive normalization stats**
+  - Dynamic-window normalization stats are persisted to `normalization_stats.pkl` under `--ckpt_dir` so tuning carries across runs.
 
-### Example Usages
+- **Optional audio features (YAMNet)**
+  - When enabled, the server extracts audio embeddings via TensorFlow Hub YAMNet and includes them in inference.
 
-To set up a new terminal, run:
+## Repo Entry Points
 
-    conda activate aloha
-    cd <path to act repo>
+- `unity_vr_inference.py`
+  - Main Python inference server used during VR runtime.
+- `unity/InferencePoseClient.cs`
+  - Main Unity client for pose + image capture, networking, UI toggles, and applying actions.
+- `imitate_episodes.py`, `evaluate_episodes.py`
+  - Training/evaluation scripts for ACT-style policies.
+- `detr/`, `policy.py`
+  - Model implementation and policy adapter.
 
-### Simulated experiments
+## Setup
 
-We use ``sim_transfer_cube_scripted`` task in the examples below. Another option is ``sim_insertion_scripted``.
-To generated 50 episodes of scripted data, run:
+Create a Python 3.10 environment:
 
-    python3 record_sim_episodes.py \
-    --task_name sim_transfer_cube_scripted \
-    --dataset_dir <data save dir> \
-    --num_episodes 50
+```bash
+conda create -n py310 python=3.10
+conda activate py310
+```
 
-To can add the flag ``--onscreen_render`` to see real-time rendering.
-To visualize the episode after it is collected, run
+Install dependencies:
 
-    python3 visualize_episodes.py --dataset_dir <data save dir> --episode_idx 0
+```bash
+pip install -r requirements.txt
+```
 
-To train ACT:
-    
-    # Transfer Cube task
-    python3 imitate_episodes.py \
-    --task_name sim_transfer_cube_scripted \
-    --ckpt_dir <ckpt dir> \
-    --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512 --batch_size 8 --dim_feedforward 3200 \
-    --num_epochs 2000  --lr 1e-5 \
-    --seed 0
+If you hit install/runtime issues, the most common cause is **incompatible `torch` / `triton` / CUDA** combinations.
+Make sure you pick a `torch` build that matches your CUDA version, and ensure the corresponding `triton` version is compatible with that `torch` build.
 
+## Running the VR Inference Server
 
-To evaluate the policy, run the same command but add ``--eval``. This loads the best validation checkpoint.
-The success rate should be around 90% for transfer cube, and around 50% for insertion.
-To enable temporal ensembling, add flag ``--temporal_agg``.
-Videos will be saved to ``<ckpt_dir>`` for each rollout.
-You can also add ``--onscreen_render`` to see real-time rendering during evaluation.
+Start the server (defaults to `127.0.0.1:5556`):
 
-For real-world data where things can be harder to model, train for at least 5000 epochs or 3-4 times the length after the loss has plateaued.
-Please refer to [tuning tips](https://docs.google.com/document/d/1FVIZfoALXg_ZkYKaYVh-qOlaXveq5CtvJHXkY25eYhs/edit?usp=sharing) for more info.
+```bash
+python unity_vr_inference.py \
+  --ckpt_dir <path-to-checkpoint-dir> \
+  --policy_class ACT \
+  --chunk_size 8 \
+  --temporal_agg
+```
 
+Dynamic temporal aggregation example:
+
+```bash
+python unity_vr_inference.py \
+  --ckpt_dir <path-to-checkpoint-dir> \
+  --temporal_agg \
+  --use_dynamic_window
+```
+
+Optional audio:
+
+```bash
+python unity_vr_inference.py \
+  --ckpt_dir <path-to-checkpoint-dir> \
+  --use_audio \
+  --input_sample_rate 48000
+```
+
+## Unity Integration
+
+ The legacy Unity-side scripts under `unity/` are **deprecated**.
+ 
+ Please refer to the **Unity Component Repo** for the current Unity integration.
+
+## Notes
+
+- The inference server expects a checkpoint in `--ckpt_dir` named `policy_best.ckpt`.
+- If you run into mismatch issues, ensure `--chunk_size` matches the model’s training config.
+
+***
+
+Based on Action Chunking with Transformers and extended for VR runtime inference and Unity integration.
