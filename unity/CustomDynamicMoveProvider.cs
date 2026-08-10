@@ -1,6 +1,7 @@
 using Unity.XR.CoreUtils;
 using UnityEngine.Assertions;
 
+// TODO: discard boolean input detection
 namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
 {
     /// <summary>

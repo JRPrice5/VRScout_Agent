@@ -2,16 +2,24 @@ import numpy as np
 import torch
 import os
 import h5py
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import DataLoader
 from typing import Optional
 
-import IPython
 
-e = IPython.embed
-
-
+# TODO: Convert to game state
+## Ensure each item is (horizon_length, 93)
+## Convert HDF5 to simpler format
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, num_queries, tail_clip: Optional[int] = None, audio_history_len: int = 1):
+    def __init__(
+        self,
+        episode_ids,
+        dataset_dir,
+        camera_names,
+        norm_stats,
+        num_queries,
+        tail_clip: Optional[int] = None,
+        audio_history_len: int = 1,
+    ):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
@@ -31,10 +39,10 @@ class EpisodicDataset(torch.utils.data.Dataset):
         sample_full_episode = False  # hardcode
 
         episode_id = self.episode_ids[index]
-        dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
-        with h5py.File(dataset_path, 'r') as root:
-            is_sim = root.attrs['sim']
-            original_action_shape = root['/action'].shape
+        dataset_path = os.path.join(self.dataset_dir, f"episode_{episode_id}.hdf5")
+        with h5py.File(dataset_path, "r") as root:
+            is_sim = root.attrs["sim"]
+            original_action_shape = root["/action"].shape
             episode_len = original_action_shape[0]
             # Effective episode length after tail clipping for action/valid start indices
             effective_len = max(0, episode_len - self.tail_clip)
@@ -47,11 +55,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 start_pool = max(1, effective_len)
                 start_ts = int(np.random.choice(start_pool))
             # get observation at start_ts only
-            qpos = root['/observations/qpos'][start_ts]
-            qvel = root['/observations/qvel'][start_ts]
-            image_dict = dict()
-            for cam_name in self.camera_names:
-                image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
+            qpos = root["/observations/qpos"][start_ts]
             # compute minimal action slice bounds and read only needed rows
             window_len = self.num_queries
             if is_sim:
@@ -60,7 +64,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 start = max(0, start_ts - 1)  # hack, to make timesteps more aligned
             # Do not cross into the clipped tail
             end = min(start + window_len, effective_len)
-            action = root['/action'][start:end]
+            action = root["/action"][start:end]
             available_len = end - start
 
         self.is_sim = is_sim
@@ -75,31 +79,25 @@ class EpisodicDataset(torch.utils.data.Dataset):
         is_pad = np.ones((window_len,), dtype=np.bool_)
         is_pad[:slice_len] = 0
 
-        # new axis for different cameras
-        all_cam_images = []
-        for cam_name in self.camera_names:
-            all_cam_images.append(image_dict[cam_name])
-        all_cam_images = np.stack(all_cam_images, axis=0)
-
         # load audio if available
         # Default to zeros [N, 1024]
         audio_data = torch.zeros((self.audio_history_len, 1024))
 
         # New format: audio_u (timestamps) and audio_e (embeddings)
-        if '/observations/audio_u' in root and '/observations/audio_e' in root:
+        if "/observations/audio_u" in root and "/observations/audio_e" in root:
             try:
                 # Get current frame timestamp
-                if '/observations/timestamp' in root:
-                    current_time = root['/observations/timestamp'][start_ts]
+                if "/observations/timestamp" in root:
+                    current_time = root["/observations/timestamp"][start_ts]
                 else:
                     # Fallback if no timestamp: assume 30Hz
                     current_time = start_ts / 30.0
 
                 # Find last audio embedding index k
-                audio_u = root['/observations/audio_u'][()]
+                audio_u = root["/observations/audio_u"][()]
                 # searchsorted(side='right') returns index i such that audio_u[i-1] <= target < audio_u[i]
                 # so k = i - 1 is the index of the embedding that started <= current_time
-                k = np.searchsorted(audio_u, current_time, side='right') - 1
+                k = np.searchsorted(audio_u, current_time, side="right") - 1
                 k = max(0, k)
 
                 # Gather last N embeddings indices: [k-N+1, ..., k]
@@ -121,11 +119,11 @@ class EpisodicDataset(torch.utils.data.Dataset):
                     start_idx = valid_indices[0]
                     end_idx = valid_indices[-1] + 1
                     # Double check range validity against dataset size
-                    audio_len = root['/observations/audio_e'].shape[0]
+                    audio_len = root["/observations/audio_e"].shape[0]
 
                     if start_idx < audio_len:
                         real_end_idx = min(end_idx, audio_len)
-                        chunk = root['/observations/audio_e'][start_idx:real_end_idx]
+                        chunk = root["/observations/audio_e"][start_idx:real_end_idx]
                         chunk_tensor = torch.from_numpy(chunk).float()
                         audio_stack.append(chunk_tensor)
 
@@ -144,25 +142,17 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 pass
 
         # Legacy format (fallback, just repeat one frame N times)
-        elif '/observations/audio_obs' in root:
-            print("Warning: Legacy audio format detected, audio embeddings will be zeros")
+        elif "/observations/audio_obs" in root:
+            print(
+                "Warning: Legacy audio format detected, audio embeddings will be zeros"
+            )
 
+        # TODO: fetch game state data from folder
         # construct observations
-        image_data = torch.from_numpy(all_cam_images)
+        # game_data = torch.from_numpy(load from folder).float()
         qpos_data = torch.from_numpy(qpos).float()
         action_data = torch.from_numpy(action_window).float()
         is_pad = torch.from_numpy(is_pad).bool()
-
-        # channel last
-        image_data = torch.einsum('k h w c -> k c h w', image_data)
-
-        # normalize image and change dtype to float
-        image_data = image_data / 255.0
-
-        # Boolean indices are fixed in the action layout
-        if action_dim < 28:
-            raise ValueError(f"action_dim too small ({action_dim}); expected at least 28")
-        boolean_indices = list(range(24, 28))
 
         # Convert numpy arrays to torch tensors and ensure float32 dtype
         action_mean = torch.tensor(self.norm_stats["action_mean"], dtype=torch.float32)
@@ -171,15 +161,12 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # Normalize all actions as in the original implementation
         action_data = (action_data - action_mean) / action_std
 
-        # After normalization, clamp boolean actions to [0,1] range
-        action_data[:, boolean_indices] = torch.clamp(action_data[:, boolean_indices], 0.0, 1.0)
-
         # Normalize qpos as before with explicit dtype control
         qpos_mean = torch.tensor(self.norm_stats["qpos_mean"], dtype=torch.float32)
         qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
         qpos_data = (qpos_data - qpos_mean) / qpos_std
 
-        return image_data, qpos_data, action_data, is_pad, audio_data
+        return game_data, qpos_data, action_data, is_pad, audio_data
 
 
 def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
@@ -188,7 +175,9 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     Backward compatible: if episode_ids is None, falls back to range(num_episodes).
     """
     if episode_ids is None:
-        assert num_episodes is not None, "Either num_episodes or episode_ids must be provided"
+        assert num_episodes is not None, (
+            "Either num_episodes or episode_ids must be provided"
+        )
         ids = list(range(num_episodes))
     else:
         ids = list(episode_ids)
@@ -196,11 +185,11 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     all_qpos_data = []
     all_action_data = []
     for episode_idx in ids:
-        dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
-        with h5py.File(dataset_path, 'r') as root:
-            qpos = root['/observations/qpos'][()]
-            qvel = root['/observations/qvel'][()]
-            action = root['/action'][()]
+        dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
+        with h5py.File(dataset_path, "r") as root:
+            qpos = root["/observations/qpos"][()]
+            qvel = root["/observations/qvel"][()]
+            action = root["/action"][()]
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))
 
@@ -220,18 +209,36 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 
     # Get example qpos from the first selected episode
     example_ep = ids[0]
-    with h5py.File(os.path.join(dataset_dir, f'episode_{example_ep}.hdf5'), 'r') as root:
-        example_qpos = root['/observations/qpos'][()]
+    with h5py.File(
+        os.path.join(dataset_dir, f"episode_{example_ep}.hdf5"), "r"
+    ) as root:
+        example_qpos = root["/observations/qpos"][()]
 
-    stats = {"action_mean": action_mean.numpy().squeeze(), "action_std": action_std.numpy().squeeze(),
-             "qpos_mean": qpos_mean.numpy().squeeze(), "qpos_std": qpos_std.numpy().squeeze(),
-             "example_qpos": example_qpos}
+    stats = {
+        "action_mean": action_mean.numpy().squeeze(),
+        "action_std": action_std.numpy().squeeze(),
+        "qpos_mean": qpos_mean.numpy().squeeze(),
+        "qpos_std": qpos_std.numpy().squeeze(),
+        "example_qpos": example_qpos,
+    }
 
     return stats
 
 
-def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, num_queries,
-              dataset_type: str = 'episodic', val_dataset_type: str = 'episodic', tail_clip: Optional[int] = None, audio_history_len: int = 0):
+# TODO: convert data loaders to game state shards
+## Determine the size of data point to train/eval on
+def load_data(
+    dataset_dir,
+    num_episodes,
+    camera_names,
+    batch_size_train,
+    batch_size_val,
+    num_queries,
+    dataset_type: str = "episodic",
+    val_dataset_type: str = "episodic",
+    tail_clip: Optional[int] = None,
+    audio_history_len: int = 0,
+):
     """Create train/val DataLoaders.
 
     - Default: EpisodicDataset for both splits (backward compatible).
@@ -240,13 +247,13 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     - tail_clip: if provided, excludes the last N timesteps of each episode in both datasets.
     - audio_history_len: length of audio history in N timesteps
     """
-    print(f'\nData from: {dataset_dir}\n')
-    print(f'\nAudio history len: {audio_history_len}\n')
+    print(f"\nData from: {dataset_dir}\n")
+    print(f"\nAudio history len: {audio_history_len}\n")
     # obtain train/val split at episode level
     train_ratio = 0.8
     shuffled_indices = np.random.permutation(num_episodes)
-    train_indices = shuffled_indices[:int(train_ratio * num_episodes)]
-    val_indices = shuffled_indices[int(train_ratio * num_episodes):]
+    train_indices = shuffled_indices[: int(train_ratio * num_episodes)]
+    val_indices = shuffled_indices[int(train_ratio * num_episodes) :]
 
     # obtain normalization stats from TRAIN EPISODES ONLY
     norm_stats = get_norm_stats(dataset_dir, episode_ids=train_indices.tolist())
@@ -255,49 +262,84 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     from custom_collate import custom_collate_fn
 
     # construct datasets (fixed window length = num_queries)
-    if dataset_type == 'step':
-        train_dataset = StepDataset(dataset_dir=dataset_dir,
-                                    camera_names=camera_names,
-                                    norm_stats=norm_stats,
-                                    num_episodes=len(train_indices),
-                                    num_queries=num_queries,
-                                    episode_ids=train_indices.tolist(),
-                                    tail_clip=tail_clip,
-                                    audio_history_len=audio_history_len)
+    if dataset_type == "step":
+        train_dataset = StepDataset(
+            dataset_dir=dataset_dir,
+            camera_names=camera_names,
+            norm_stats=norm_stats,
+            num_episodes=len(train_indices),
+            num_queries=num_queries,
+            episode_ids=train_indices.tolist(),
+            tail_clip=tail_clip,
+            audio_history_len=audio_history_len,
+        )
     else:
-        train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, num_queries,
-                                        tail_clip=tail_clip,
-                                        audio_history_len=audio_history_len)
+        train_dataset = EpisodicDataset(
+            train_indices,
+            dataset_dir,
+            camera_names,
+            norm_stats,
+            num_queries,
+            tail_clip=tail_clip,
+            audio_history_len=audio_history_len,
+        )
 
-    if val_dataset_type == 'step':
-        val_dataset = StepDataset(dataset_dir=dataset_dir,
-                                  camera_names=camera_names,
-                                  norm_stats=norm_stats,
-                                  num_episodes=len(val_indices),
-                                  num_queries=num_queries,
-                                  episode_ids=val_indices.tolist(),
-                                  tail_clip=tail_clip,
-                                  audio_history_len=audio_history_len)
+    if val_dataset_type == "step":
+        val_dataset = StepDataset(
+            dataset_dir=dataset_dir,
+            camera_names=camera_names,
+            norm_stats=norm_stats,
+            num_episodes=len(val_indices),
+            num_queries=num_queries,
+            episode_ids=val_indices.tolist(),
+            tail_clip=tail_clip,
+            audio_history_len=audio_history_len,
+        )
     else:
-        val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, num_queries,
-                                      tail_clip=tail_clip,
-                                      audio_history_len=audio_history_len)
+        val_dataset = EpisodicDataset(
+            val_indices,
+            dataset_dir,
+            camera_names,
+            norm_stats,
+            num_queries,
+            tail_clip=tail_clip,
+            audio_history_len=audio_history_len,
+        )
 
     # DataLoader configuration
     num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many
     prefetch_factor = 4  # Prefetch more batches to keep GPU busy
-    print(f"DataLoader config: num_workers={num_workers}, prefetch_factor={prefetch_factor}")
+    print(
+        f"DataLoader config: num_workers={num_workers}, prefetch_factor={prefetch_factor}"
+    )
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True,
-                                  num_workers=num_workers, prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn,
-                                  persistent_workers=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True,
-                                num_workers=num_workers, prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn,
-                                persistent_workers=True)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size_train,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        collate_fn=custom_collate_fn,
+        persistent_workers=True,
+    )
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size_val,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        collate_fn=custom_collate_fn,
+        persistent_workers=True,
+    )
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
 
 
+# TODO: Determine viability of per-timestep dataset
+## Yield state_t instead of image_t
+## Ensure each item is (horizon_length, 93)
 class StepDataset(torch.utils.data.Dataset):
     """Per-step dataset over all timesteps across episodes.
 
@@ -307,7 +349,18 @@ class StepDataset(torch.utils.data.Dataset):
     This is designed for large-batch expert sampling in GAIL where batch size should depend on
     total timesteps, not number of episodes.
     """
-    def __init__(self, dataset_dir, camera_names, norm_stats, num_episodes, num_queries: int = 1, episode_ids=None, tail_clip: Optional[int] = None, audio_history_len: int = 1):
+
+    def __init__(
+        self,
+        dataset_dir,
+        camera_names,
+        norm_stats,
+        num_episodes,
+        num_queries: int = 1,
+        episode_ids=None,
+        tail_clip: Optional[int] = None,
+        audio_history_len: int = 1,
+    ):
         super(StepDataset, self).__init__()
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
@@ -320,23 +373,28 @@ class StepDataset(torch.utils.data.Dataset):
         self.is_sim = None
 
         # Precompute episode lengths and cumulative index for O(log E) lookup
-        self.episode_ids = list(range(num_episodes)) if episode_ids is None else list(episode_ids)
+        self.episode_ids = (
+            list(range(num_episodes)) if episode_ids is None else list(episode_ids)
+        )
         self.episode_lengths = []
         for eid in self.episode_ids:
-            ep_path = os.path.join(dataset_dir, f'episode_{eid}.hdf5')
-            with h5py.File(ep_path, 'r') as root:
+            ep_path = os.path.join(dataset_dir, f"episode_{eid}.hdf5")
+            with h5py.File(ep_path, "r") as root:
                 if self.is_sim is None:
-                    self.is_sim = bool(root.attrs['sim'])
-                ep_len = int(root['/action'].shape[0])
+                    self.is_sim = bool(root.attrs["sim"])
+                ep_len = int(root["/action"].shape[0])
                 ep_eff = max(0, ep_len - self.tail_clip)
                 self.episode_lengths.append(ep_eff)
-        self.cum_lengths = np.cumsum([0] + self.episode_lengths)  # length num_episodes+1
+        self.cum_lengths = np.cumsum(
+            [0] + self.episode_lengths
+        )  # length num_episodes+1
 
-        # Precompute normalization tensors
-        from action_utils import ACTION_INDICES
-        self.boolean_indices = ACTION_INDICES['boolean']
-        self.action_mean = torch.tensor(self.norm_stats["action_mean"], dtype=torch.float32)
-        self.action_std = torch.tensor(self.norm_stats["action_std"], dtype=torch.float32)
+        self.action_mean = torch.tensor(
+            self.norm_stats["action_mean"], dtype=torch.float32
+        )
+        self.action_std = torch.tensor(
+            self.norm_stats["action_std"], dtype=torch.float32
+        )
         self.qpos_mean = torch.tensor(self.norm_stats["qpos_mean"], dtype=torch.float32)
         self.qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
 
@@ -345,64 +403,61 @@ class StepDataset(torch.utils.data.Dataset):
 
     def _index_to_episode(self, idx):
         # Find episode e s.t. cum[e] <= idx < cum[e+1]
-        e = int(np.searchsorted(self.cum_lengths, idx, side='right') - 1)
+        e = int(np.searchsorted(self.cum_lengths, idx, side="right") - 1)
         t = int(idx - self.cum_lengths[e])
         return e, t
 
     def __getitem__(self, index):
         episode_pos, t = self._index_to_episode(index)
         episode_id = self.episode_ids[episode_pos]
-        dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
-        with h5py.File(dataset_path, 'r') as root:
-            is_sim = bool(root.attrs['sim'])
+        dataset_path = os.path.join(self.dataset_dir, f"episode_{episode_id}.hdf5")
+        with h5py.File(dataset_path, "r") as root:
+            is_sim = bool(root.attrs["sim"])
             # Observations at t
-            qpos = root['/observations/qpos'][t]
-            # Images at t for all cameras
-            all_cam_images = []
-            for cam_name in self.camera_names:
-                all_cam_images.append(root[f'/observations/images/{cam_name}'][t])
-            all_cam_images = np.stack(all_cam_images, axis=0)  # [K, H, W, C]
+            qpos = root["/observations/qpos"][t]
 
             # Audio at t
             # Default to zeros [N, 1024]
             audio_data = torch.zeros((self.audio_history_len, 1024))
-            
-            if '/observations/audio_u' in root and '/observations/audio_e' in root:
+
+            if "/observations/audio_u" in root and "/observations/audio_e" in root:
                 try:
                     # Get current frame timestamp
-                    if '/observations/timestamp' in root:
-                        current_time = root['/observations/timestamp'][t]
+                    if "/observations/timestamp" in root:
+                        current_time = root["/observations/timestamp"][t]
                     else:
-                        current_time = t / 30.0 
+                        current_time = t / 30.0
 
                     # Find last audio embedding index k
-                    audio_u = root['/observations/audio_u'][()]
-                    k = np.searchsorted(audio_u, current_time, side='right') - 1
+                    audio_u = root["/observations/audio_u"][()]
+                    k = np.searchsorted(audio_u, current_time, side="right") - 1
                     k = max(0, k)
-                    
+
                     # Gather last N embeddings indices: [k-N+1, ..., k]
                     indices = np.arange(k - self.audio_history_len + 1, k + 1)
-                    
+
                     # Handle padding for negative indices
                     valid_mask = indices >= 0
                     valid_indices = indices[valid_mask]
                     pad_len = len(indices) - len(valid_indices)
-                    
+
                     audio_stack = []
                     if pad_len > 0:
                         audio_stack.append(torch.zeros((pad_len, 1024)))
-                    
+
                     if len(valid_indices) > 0:
                         start_idx = valid_indices[0]
                         end_idx = valid_indices[-1] + 1
-                        audio_len = root['/observations/audio_e'].shape[0]
-                        
+                        audio_len = root["/observations/audio_e"].shape[0]
+
                         if start_idx < audio_len:
                             real_end_idx = min(end_idx, audio_len)
-                            chunk = root['/observations/audio_e'][start_idx:real_end_idx]
+                            chunk = root["/observations/audio_e"][
+                                start_idx:real_end_idx
+                            ]
                             chunk_tensor = torch.from_numpy(chunk).float()
                             audio_stack.append(chunk_tensor)
-                            
+
                             if real_end_idx < end_idx:
                                 remain = end_idx - real_end_idx
                                 audio_stack.append(torch.zeros((remain, 1024)))
@@ -411,13 +466,15 @@ class StepDataset(torch.utils.data.Dataset):
 
                     if audio_stack:
                         audio_data = torch.cat(audio_stack, dim=0)
-                    
+
                 except Exception as e:
                     pass
-            
+
             # Legacy format
-            elif '/observations/audio_obs' in root:
-                print("Warning: Legacy audio format detected, audio embeddings will be zeros")
+            elif "/observations/audio_obs" in root:
+                print(
+                    "Warning: Legacy audio format detected, audio embeddings will be zeros"
+                )
 
             # Action alignment and chunking to mimic EpisodicDataset policy
             episode_len = self.episode_lengths[episode_pos]
@@ -429,11 +486,10 @@ class StepDataset(torch.utils.data.Dataset):
                 start = max(0, t - 1)
             # Do not cross into the clipped tail
             end = min(start + window_len, episode_len)
-            action_slice = root['/action'][start:end]
+            action_slice = root["/action"][start:end]
             available_len = end - start
 
         # torch tensors
-        image_data = torch.from_numpy(all_cam_images)
         qpos_data = torch.from_numpy(qpos).float()
         # Build fixed-size window [T, A] with padding if needed
         action_dim = int(self.action_mean.numel())
@@ -442,14 +498,10 @@ class StepDataset(torch.utils.data.Dataset):
             action_window[:available_len] = action_slice[:available_len]
         action_data = torch.from_numpy(action_window).float()
 
-        # Channel-last -> channel-first: [K, C, H, W]
-        image_data = torch.einsum('k h w c -> k c h w', image_data)
-        image_data = image_data / 255.0
-
         # Normalize
-        action_data = (action_data - self.action_mean.squeeze(0)) / self.action_std.squeeze(0)
-        # Clamp boolean action dims post-normalization over time dimension
-        action_data[:, self.boolean_indices] = torch.clamp(action_data[:, self.boolean_indices], 0.0, 1.0)
+        action_data = (
+            action_data - self.action_mean.squeeze(0)
+        ) / self.action_std.squeeze(0)
 
         qpos_data = (qpos_data - self.qpos_mean.squeeze(0)) / self.qpos_std.squeeze(0)
 
@@ -462,8 +514,15 @@ class StepDataset(torch.utils.data.Dataset):
         return image_data, qpos_data, action_data, is_pad, audio_data
 
 
-def load_expert_step_loader(dataset_dir, num_episodes, camera_names, batch_size,
-                            num_workers=None, prefetch_factor=2, shuffle=True):
+def load_expert_step_loader(
+    dataset_dir,
+    num_episodes,
+    camera_names,
+    batch_size,
+    num_workers=None,
+    prefetch_factor=2,
+    shuffle=True,
+):
     """Create a DataLoader over per-step expert samples for GAIL.
 
     - Allows large batch sizes (e.g., 256/512/1024) since sampling is over all timesteps.
@@ -481,26 +540,33 @@ def load_expert_step_loader(dataset_dir, num_episodes, camera_names, batch_size,
     if num_workers is None:
         num_workers = min(1, os.cpu_count()) if os.cpu_count() is not None else 1
 
-    print(f"Expert Step DataLoader config: batch_size={batch_size}, num_workers={num_workers}, prefetch_factor={prefetch_factor}, shuffle={shuffle}")
+    print(
+        f"Expert Step DataLoader config: batch_size={batch_size}, num_workers={num_workers}, prefetch_factor={prefetch_factor}, shuffle={shuffle}"
+    )
 
-    dataset = StepDataset(dataset_dir=dataset_dir,
-                          camera_names=camera_names,
-                          norm_stats=norm_stats,
-                          num_episodes=num_episodes)
+    dataset = StepDataset(
+        dataset_dir=dataset_dir,
+        camera_names=camera_names,
+        norm_stats=norm_stats,
+        num_episodes=num_episodes,
+    )
 
     # Default collate works (fixed-size tensors per item)
-    loader = DataLoader(dataset,
-                        batch_size=batch_size,
-                        shuffle=shuffle,
-                        pin_memory=True,
-                        num_workers=num_workers,
-                        prefetch_factor=prefetch_factor,
-                        persistent_workers=True)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        pin_memory=True,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=True,
+    )
 
     return loader, norm_stats, dataset.is_sim
 
 
 ### env utils
+
 
 def sample_box_pose():
     x_range = [0.0, 0.2]
@@ -541,6 +607,7 @@ def sample_insertion_pose():
 
 
 ### helper functions
+
 
 def compute_dict_mean(epoch_dicts):
     result = {k: None for k in epoch_dicts[0]}
