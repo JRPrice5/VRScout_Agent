@@ -162,13 +162,13 @@ class DETRVAE(nn.Module):
         return a_hat, is_pad_hat, [mean, logvar, prior_mean, prior_logvar]
 
 
-def build_encoder(args):
-    d_model = args.hidden_dim  # 256
-    dropout = args.dropout  # 0.1
-    nhead = args.nheads  # 8
-    dim_feedforward = args.dim_feedforward  # 2048
-    num_encoder_layers = args.enc_layers  # 4 # TODO: share with VAE decoder
-    normalize_before = args.pre_norm  # False
+def build_encoder(cfg):
+    d_model = cfg.model.hidden_dim  # 256
+    dropout = cfg.model.dropout  # 0.1
+    nhead = cfg.model.nheads  # 8
+    dim_feedforward = cfg.model.dim_feedforward  # 2048
+    num_encoder_layers = cfg.model.enc_layers  # 4 # TODO: share with VAE decoder
+    normalize_before = cfg.model.pre_norm  # False
     activation = "relu"
 
     encoder_layer = TransformerEncoderLayer(
@@ -180,18 +180,16 @@ def build_encoder(args):
     return encoder
 
 
-def build(args):
-    action_dim = getattr(args, "action_dim", 32)
+def build(cfg):
+    decoder = build_transformer(cfg)
 
-    decoder = build_transformer(args)
-
-    encoder = build_encoder(args)
+    encoder = build_encoder(cfg)
 
     model = DETRVAE(
         decoder,
         encoder,
-        action_dim=action_dim,
-        num_queries=args.num_queries,
+        action_dim=cfg.model.action_dim,
+        num_queries=cfg.model.chunk_size,
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -9,19 +9,19 @@ from distributions import TanhDiagNormal
 
 
 class ACTPolicy(nn.Module):
-    def __init__(self, args_override):
+    def __init__(self, cfg):
         super().__init__()
-        model, optimizer = build_ACT_model_and_optimizer(args_override)
+        model, optimizer = build_ACT_model_and_optimizer(cfg)
         self.model = model  # CVAE decoder
         self.optimizer = optimizer
-        self.kl_weight = args_override["kl_weight"]
+        self.kl_weight = cfg.model.kl_weight
         print(f"KL Weight {self.kl_weight}")
 
         # Feature dims and heads (do not modify backbone/decoder/CVAE)
         hidden_dim = self.model.decoder.d_model
         self.hidden_dim = hidden_dim
         # Infer action splits
-        self.action_dim = int(getattr(self.model, "action_dim", 21))
+        self.action_dim = int(getattr(self.model, "action_dim", 22))
         # Stochastic heads
         self.mu_head = nn.Linear(hidden_dim, self.action_dim)
         self.log_std_head = nn.Linear(hidden_dim, self.action_dim)
@@ -66,8 +66,6 @@ class ACTPolicy(nn.Module):
         self,
         qpos,
         game_state=None,
-        prev_actions=None,
-        is_pad=None,
         audio=None,
         out_mode: str = "dist",
     ):
@@ -84,9 +82,7 @@ class ACTPolicy(nn.Module):
 
         # Compute hidden states h using the backbone/transformer
         # TODO: Adjust for image->game_state
-        h = self.encode_to_hidden(
-            qpos, game_state, audio=audio, do_normalize=False
-        )  # [B, T, H]
+        h = self.encode_to_hidden(qpos, game_state, audio=audio)  # [B, T, H]
         try:
             print("[DBG][FWD] h", tuple(h.shape))
         except Exception:
@@ -175,7 +171,7 @@ class ACTPolicy(nn.Module):
         Returns h of shape [B, T, H].
         """
         self.model.eval()  # feature extraction is inference-like
-        device = next(self.parameters()).device
+        device = "cuda"
         B = qpos.shape[0]
         mb = int(microbatch) if (microbatch is not None and microbatch > 0) else B
         outs = []

@@ -14,81 +14,25 @@ from my_utils import compute_dict_mean, set_seed, detach_dict  # helper function
 from policy import ACTPolicy
 from visualize_episodes import save_videos
 
-from sim_env import BOX_POSE
 
-
-def main(args):
-    set_seed(1)
-    # command line parameters
-    ckpt_dir = args["ckpt_dir"]
-    policy_class = args["policy_class"]
-    task_name = args["task_name"]
-    batch_size_train = args["batch_size"]
-    batch_size_val = args["batch_size"]
-    num_epochs = args["num_epochs"]
-
-    # get task parameters
-    is_sim = task_name[:4] == "sim_"
-    if is_sim:
-        from constants import SIM_TASK_CONFIGS
-
-        task_config = SIM_TASK_CONFIGS[task_name]
-    else:
-        from aloha_scripts.constants import TASK_CONFIGS
-
-        task_config = TASK_CONFIGS[task_name]
-    dataset_dir = task_config["dataset_dir"]
-    num_episodes = task_config["num_episodes"]
-    episode_len = task_config["episode_len"]
-    camera_names = task_config["camera_names"]
-
-    # fixed parameters
-    # TODO: confirm whether action_dim is used as the prediction dimension
-    action_dim = 21
-    lr_backbone = args.get("lr_backbone", 1e-6)
-    # Use backbone from args if provided, otherwise default to resnet18
-    if policy_class == "ACT":
-        enc_layers = 4
-        dec_layers = 7
-        nheads = 8
-        activation = args.get("activation", "relu")
-        policy_config = {
-            "lr": args["lr"],
-            "num_queries": args["chunk_size"],
-            "kl_weight": args["kl_weight"],
-            "hidden_dim": args["hidden_dim"],
-            "dim_feedforward": args["dim_feedforward"],
-            "lr_backbone": lr_backbone,
-            "enc_layers": enc_layers,
-            "dec_layers": dec_layers,
-            "nheads": nheads,
-            "activation": activation,
-            "camera_names": camera_names,
-        }
-    else:
-        raise NotImplementedError
-
-    config = {
-        "num_epochs": num_epochs,
-        "ckpt_dir": ckpt_dir,
-        "episode_len": episode_len,
-        "action_dim": action_dim,
-        "lr": args["lr"],
-        "policy_class": policy_class,
-        "policy_config": policy_config,
-        "task_name": task_name,
-        "seed": args["seed"],
-        "temporal_agg": args["temporal_agg"],
-        "real_robot": not is_sim,
-    }
+def main(cfg):
+    set_seed(cfg.evaluation.seed)
+    ckpt_dir = cfg.evaluation.checkpoint_dir
+    batch_size_train = cfg.evaluation.batch_size
+    batch_size_val = cfg.evaluation.batch_size
+    dataset_dir = cfg.data.hdf5.dataset_dir
+    num_episodes = (
+        cfg.evaluation.num_episodes
+        if cfg.evaluation.num_episodes != -1
+        else len(os.listdir(dataset_dir))
+    )
 
     train_dataloader, val_dataloader, stats, _ = load_data(
         dataset_dir,
         num_episodes,
-        camera_names,
         batch_size_train,
         batch_size_val,
-        policy_config["num_queries"],
+        cfg.model.chunk_size,
     )
 
     # save dataset stats
@@ -99,26 +43,24 @@ def main(args):
         pickle.dump(stats, f)
 
     # Define checkpoint path for pretrained policy
-    pretrained_ckpt_path = args.get("pretrained_ckpt_path", None)
+    pretrained_ckpt_path = cfg.evaluation.pretrained_ckpt_path
 
     # Evaluate loss on train dataset
     print("\nEvaluating on training dataset:")
-    train_loss_summary = evaluate_bc_loss(
-        train_dataloader, config, pretrained_ckpt_path
-    )
+    train_loss_summary = evaluate_bc_loss(train_dataloader, cfg, pretrained_ckpt_path)
 
     # Evaluate loss on validation dataset
     print("\nEvaluating on validation dataset:")
-    val_loss_summary = evaluate_bc_loss(val_dataloader, config, pretrained_ckpt_path)
+    val_loss_summary = evaluate_bc_loss(val_dataloader, cfg, pretrained_ckpt_path)
 
     print(f"\nEvaluation complete.")
     print(f"Train loss: {train_loss_summary['loss']:.6f}")
     print(f"Validation loss: {val_loss_summary['loss']:.6f}")
 
 
-def make_policy(policy_class, policy_config):
+def make_policy(policy_class, cfg):
     if policy_class == "ACT":
-        policy = ACTPolicy(policy_config)
+        policy = ACTPolicy(cfg)
     else:
         raise NotImplementedError
     return policy
@@ -132,16 +74,15 @@ def make_optimizer(policy_class, policy):
     return optimizer
 
 
-# TODO: swap image_data for game_data
 def forward_pass(data, policy):
-    image_data, qpos_data, action_data, is_pad = data
-    image_data, qpos_data, action_data, is_pad = (
-        image_data.cuda(),
+    state_data, qpos_data, action_data, is_pad = data
+    state_data, qpos_data, action_data, is_pad = (
+        state_data.cuda(),
         qpos_data.cuda(),
         action_data.cuda(),
         is_pad.cuda(),
     )
-    return policy(qpos_data, image_data, action_data, is_pad)  # TODO remove None
+    return policy(qpos_data, state_data, action_data, is_pad)
 
 
 def evaluate_bc_loss(dataloader, config, ckpt_path=None):

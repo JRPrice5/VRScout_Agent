@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from tqdm import tqdm
 from einops import rearrange
+from omegaconf import OmegaConf
+from act_bs.config.root import RootConfig
 
 from constants import DT
 from my_utils import load_data  # data functions
@@ -15,35 +17,25 @@ from my_utils import StepDataset  # to detect step-based training
 from my_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
 from policy import ACTPolicy
 
-from sim_env import BOX_POSE
 
-
-def main(args):
+def main(cfg):
     set_seed(1)
     # command line parameters
-    is_eval = args["eval"]
-    ckpt_dir = args["ckpt_dir"]
-    policy_class = args["policy_class"]
-    onscreen_render = args["onscreen_render"]
-    task_name = args["task_name"]
-    batch_size_train = args["batch_size"]
-    batch_size_val = args["batch_size"]
-    num_epochs = args["num_epochs"]
+    # is_eval = args["eval"]
+    ckpt_dir = cfg.training.checkpoint_dir
+    batch_size_train = cfg.training.batch_size
+    batch_size_val = cfg.validation.batch_size
+    num_epochs = cfg.training.num_epochs
+    policy_class = cfg.model.policy_class
 
-    # get task parameters
-    is_sim = task_name[:4] == "sim_"
-    if is_sim:
-        from constants import SIM_TASK_CONFIGS
-
-        task_config = SIM_TASK_CONFIGS[task_name]
-    else:
-        from aloha_scripts.constants import TASK_CONFIGS
-
-        task_config = TASK_CONFIGS[task_name]
-    dataset_dir = task_config["dataset_dir"]
-    num_episodes = task_config["num_episodes"]
-    episode_len = task_config["episode_len"]
-    camera_names = task_config["camera_names"]
+    # task_config = TASK_CONFIGS[task_name]
+    dataset_dir = cfg.data.hdf5_dir
+    num_episodes = (
+        cfg.training.num_episodes
+        if cfg.training.num_episodes != -1
+        else len(os.listdir(dataset_dir))
+    )
+    episode_len = cfg.data.episode_length
 
     # fixed parameters
     # Infer state/action dimension from dataset (supports extended layouts)
@@ -246,13 +238,12 @@ def eval_bc(config, ckpt_name, save_episode=True):
                 qpos = pre_process(qpos_numpy)
                 qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
                 qpos_history[:, t] = qpos
-                curr_image = get_image(ts, camera_names)
 
                 ### query policy
                 if config["policy_class"] == "ACT":
                     if t % query_frequency == 0:
                         # TODO: replace curr_image with curr_game_state
-                        all_actions = policy(qpos, curr_image)
+                        all_actions = policy(qpos, curr_state)
                     if temporal_agg:
                         all_time_actions[[t], t : t + num_queries] = all_actions
                         actions_for_curr_step = all_time_actions[:, t]
@@ -290,13 +281,6 @@ def eval_bc(config, ckpt_name, save_episode=True):
                 rewards.append(ts.reward)
 
             plt.close()
-        if real_robot:
-            move_grippers(
-                [env.puppet_bot_left, env.puppet_bot_right],
-                [PUPPET_GRIPPER_JOINT_OPEN] * 2,
-                move_time=0.5,
-            )  # open
-            pass
 
         rewards = np.array(rewards)
         episode_return = np.sum(rewards[rewards != None])
@@ -330,14 +314,14 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
 # TODO: replace image_data with game_data
 def forward_pass(data, policy):
-    image_data, qpos_data, action_data, is_pad = data
-    image_data, qpos_data, action_data, is_pad = (
-        image_data.cuda(),
+    state_data, qpos_data, action_data, is_pad = data
+    state_data, qpos_data, action_data, is_pad = (
+        state_data.cuda(),
         qpos_data.cuda(),
         action_data.cuda(),
         is_pad.cuda(),
     )
-    return policy(qpos_data, image_data, action_data, is_pad)  # TODO remove None
+    return policy(qpos_data, state_data, action_data, is_pad)  # TODO remove None
 
 
 def train_bc(train_dataloader, val_dataloader, config):
@@ -558,103 +542,5 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
     print(f"Saved plots to {ckpt_dir}")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--eval", action="store_true")
-    parser.add_argument("--onscreen_render", action="store_true")
-    parser.add_argument(
-        "--ckpt_dir", action="store", type=str, help="ckpt_dir", required=True
-    )
-    parser.add_argument(
-        "--policy_class",
-        action="store",
-        type=str,
-        help="policy_class, capitalize",
-        required=True,
-    )
-    parser.add_argument(
-        "--task_name", action="store", type=str, help="task_name", required=True
-    )
-    parser.add_argument(
-        "--batch_size", action="store", type=int, help="batch_size", required=True
-    )
-    parser.add_argument("--seed", action="store", type=int, help="seed", required=True)
-    parser.add_argument(
-        "--num_epochs", action="store", type=int, help="num_epochs", required=True
-    )
-    parser.add_argument("--lr", action="store", type=float, help="lr", required=True)
-    parser.add_argument(
-        "--backbone",
-        action="store",
-        type=str,
-        help="Backbone model (resnet18, resnet34, resnet50, dino_vits16, dino_vitb16)",
-        default="resnet18",
-    )
-    parser.add_argument(
-        "--lr_backbone", action="store", type=float, help="lr_backbone", required=False
-    )
-    parser.add_argument(
-        "--resume",
-        action="store",
-        type=str,
-        help="path to checkpoint file or directory to resume from",
-        required=False,
-        default=None,
-    )
-
-    # for ACT
-    parser.add_argument(
-        "--kl_weight", action="store", type=int, help="KL Weight", required=False
-    )
-    parser.add_argument(
-        "--chunk_size", action="store", type=int, help="chunk_size", required=False
-    )
-    parser.add_argument(
-        "--hidden_dim", action="store", type=int, help="hidden_dim", required=False
-    )
-    parser.add_argument(
-        "--dim_feedforward",
-        action="store",
-        type=int,
-        help="dim_feedforward",
-        required=False,
-    )
-    parser.add_argument("--temporal_agg", action="store_true")
-    parser.add_argument(
-        "--audio_history_len",
-        action="store",
-        type=int,
-        help="History length for audio embeddings",
-        default=1,
-    )
-
-    # for transformer
-    parser.add_argument(
-        "--enc_layers",
-        action="store",
-        default=4,
-        type=int,
-        help="enc_layers",
-        required=False,
-    )
-    parser.add_argument(
-        "--dec_layers",
-        action="store",
-        default=7,
-        type=int,
-        help="dec_layers",
-        required=False,
-    )
-    parser.add_argument(
-        "--nheads", action="store", default=8, type=int, help="nheads", required=False
-    )
-    parser.add_argument(
-        "--activation",
-        action="store",
-        default="relu",
-        type=str,
-        help="activation for transformer",
-        required=False,
-    )
-
-    main(vars(parser.parse_args()))
+cfg = OmegaConf.structured(RootConfig)
+main(cfg)

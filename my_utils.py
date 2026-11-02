@@ -1,151 +1,58 @@
 import numpy as np
+import re
 import torch
 import os
 import h5py
 from torch.utils.data import DataLoader
 from typing import Optional
+from omegaconf import OmegaConf
+from act_bs.config.root import RootConfig
 
 
 # TODO: Convert to game state
-## Ensure each item is (horizon_length, 93)
-## Convert HDF5 to simpler format
 class EpisodicDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         episode_ids,
         dataset_dir,
-        camera_names,
         norm_stats,
         num_queries,
         tail_clip: Optional[int] = None,
         audio_history_len: int = 1,
     ):
         super(EpisodicDataset).__init__()
+        self.cfg = OmegaConf.structured(RootConfig)
         self.episode_ids = episode_ids
+        pattern = re.compile(r"\.hdf5$")
+        self.episodes = [
+            file for file in os.listdir(self.dataset_dir) if pattern.search(file)
+        ]
         self.dataset_dir = dataset_dir
-        self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.num_queries = int(num_queries)
-        # Optional: exclude last `tail_clip` timesteps of each episode from sampling
-        self.tail_clip = int(tail_clip) if tail_clip is not None else 0
-        self.audio_history_len = int(audio_history_len)
-        self.is_sim = None
         self.__getitem__(0)  # initialize self.is_sim
 
     def __len__(self):
         return len(self.episode_ids)
 
     def __getitem__(self, index):
-        sample_full_episode = False  # hardcode
-
         episode_id = self.episode_ids[index]
-        dataset_path = os.path.join(self.dataset_dir, f"episode_{episode_id}.hdf5")
+        dataset_path = os.path.join(self.dataset_dir, self.episodes[episode_id])
         with h5py.File(dataset_path, "r") as root:
-            is_sim = root.attrs["sim"]
-            original_action_shape = root["/action"].shape
-            episode_len = original_action_shape[0]
-            # Effective episode length after tail clipping for action/valid start indices
-            effective_len = max(0, episode_len - self.tail_clip)
-            if sample_full_episode:
-                # When sampling the whole episode, align start to 0 but ensure it is within the
-                # non-clipped portion when possible
-                start_ts = 0
-            else:
-                # Choose a start within the non-clipped region. If effective_len == 0, fallback to 0
-                start_pool = max(1, effective_len)
-                start_ts = int(np.random.choice(start_pool))
-            # get observation at start_ts only
-            qpos = root["/observations/qpos"][start_ts]
-            # compute minimal action slice bounds and read only needed rows
+            qpos = root["/action"][0:]
             window_len = self.num_queries
-            if is_sim:
-                start = start_ts
-            else:
-                start = max(0, start_ts - 1)  # hack, to make timesteps more aligned
-            # Do not cross into the clipped tail
-            end = min(start + window_len, effective_len)
-            action = root["/action"][start:end]
-            available_len = end - start
+            action = root["/action"][1:]
 
-        self.is_sim = is_sim
         # Restrict to fixed window length = num_queries to match policy needs
-        action_dim = original_action_shape[1]
+        action_dim = root["/action"].shape[1]
         # Slice available part and pad to window_len if needed
-        slice_len = min(available_len, window_len)
+        slice_len = min(self.cfg.episode_len, window_len)
         action_window = np.zeros((window_len, action_dim), dtype=np.float32)
         if slice_len > 0:
             action_window[:slice_len] = action[:slice_len]
         # is_pad marks padded timesteps within this fixed window
         is_pad = np.ones((window_len,), dtype=np.bool_)
         is_pad[:slice_len] = 0
-
-        # load audio if available
-        # Default to zeros [N, 1024]
-        audio_data = torch.zeros((self.audio_history_len, 1024))
-
-        # New format: audio_u (timestamps) and audio_e (embeddings)
-        if "/observations/audio_u" in root and "/observations/audio_e" in root:
-            try:
-                # Get current frame timestamp
-                if "/observations/timestamp" in root:
-                    current_time = root["/observations/timestamp"][start_ts]
-                else:
-                    # Fallback if no timestamp: assume 30Hz
-                    current_time = start_ts / 30.0
-
-                # Find last audio embedding index k
-                audio_u = root["/observations/audio_u"][()]
-                # searchsorted(side='right') returns index i such that audio_u[i-1] <= target < audio_u[i]
-                # so k = i - 1 is the index of the embedding that started <= current_time
-                k = np.searchsorted(audio_u, current_time, side="right") - 1
-                k = max(0, k)
-
-                # Gather last N embeddings indices: [k-N+1, ..., k]
-                indices = np.arange(k - self.audio_history_len + 1, k + 1)
-
-                # Handle padding for negative indices
-                valid_mask = indices >= 0
-                valid_indices = indices[valid_mask]
-                pad_len = len(indices) - len(valid_indices)
-
-                audio_stack = []
-                if pad_len > 0:
-                    audio_stack.append(torch.zeros((pad_len, 1024)))
-
-                if len(valid_indices) > 0:
-                    # Load from HDF5
-                    # h5py supports list indexing if they are sorted, but better to do it carefully or usually valid_indices is a contiguous range
-                    # valid_indices is contiguous range
-                    start_idx = valid_indices[0]
-                    end_idx = valid_indices[-1] + 1
-                    # Double check range validity against dataset size
-                    audio_len = root["/observations/audio_e"].shape[0]
-
-                    if start_idx < audio_len:
-                        real_end_idx = min(end_idx, audio_len)
-                        chunk = root["/observations/audio_e"][start_idx:real_end_idx]
-                        chunk_tensor = torch.from_numpy(chunk).float()
-                        audio_stack.append(chunk_tensor)
-
-                        # Handle if we hit end of audio array (rare if k is valid)
-                        if real_end_idx < end_idx:
-                            remain = end_idx - real_end_idx
-                            audio_stack.append(torch.zeros((remain, 1024)))
-                    else:
-                        audio_stack.append(torch.zeros((len(valid_indices), 1024)))
-
-                if audio_stack:
-                    audio_data = torch.cat(audio_stack, dim=0)
-
-            except Exception as e:
-                print(f"Error loading audio_u/e: {e}")
-                pass
-
-        # Legacy format (fallback, just repeat one frame N times)
-        elif "/observations/audio_obs" in root:
-            print(
-                "Warning: Legacy audio format detected, audio embeddings will be zeros"
-            )
 
         # TODO: fetch game state data from folder
         # construct observations
@@ -166,7 +73,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
         qpos_data = (qpos_data - qpos_mean) / qpos_std
 
-        return game_data, qpos_data, action_data, is_pad, audio_data
+        return state_data, qpos_data, action_data, is_pad
 
 
 def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
@@ -187,9 +94,10 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     for episode_idx in ids:
         dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
         with h5py.File(dataset_path, "r") as root:
-            qpos = root["/observations/qpos"][()]
-            qvel = root["/observations/qvel"][()]
-            action = root["/action"][()]
+            # TODO: get qpos from action
+            action_shape = root["/action"].shape[1:]
+            qpos = root["/action"][1:].append(np.zeros((action_shape)))
+            action = root["/action"][0:]
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))
 
@@ -230,25 +138,17 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 def load_data(
     dataset_dir,
     num_episodes,
-    camera_names,
     batch_size_train,
     batch_size_val,
     num_queries,
-    dataset_type: str = "episodic",
-    val_dataset_type: str = "episodic",
-    tail_clip: Optional[int] = None,
-    audio_history_len: int = 0,
 ):
     """Create train/val DataLoaders.
 
     - Default: EpisodicDataset for both splits (backward compatible).
-    - Optionally: use StepDataset for training and/or validation via dataset_type args.
     - Normalization stats are computed on train episodes only and reused for val.
     - tail_clip: if provided, excludes the last N timesteps of each episode in both datasets.
-    - audio_history_len: length of audio history in N timesteps
     """
     print(f"\nData from: {dataset_dir}\n")
-    print(f"\nAudio history len: {audio_history_len}\n")
     # obtain train/val split at episode level
     train_ratio = 0.8
     shuffled_indices = np.random.permutation(num_episodes)
@@ -262,49 +162,18 @@ def load_data(
     from custom_collate import custom_collate_fn
 
     # construct datasets (fixed window length = num_queries)
-    if dataset_type == "step":
-        train_dataset = StepDataset(
-            dataset_dir=dataset_dir,
-            camera_names=camera_names,
-            norm_stats=norm_stats,
-            num_episodes=len(train_indices),
-            num_queries=num_queries,
-            episode_ids=train_indices.tolist(),
-            tail_clip=tail_clip,
-            audio_history_len=audio_history_len,
-        )
-    else:
-        train_dataset = EpisodicDataset(
-            train_indices,
-            dataset_dir,
-            camera_names,
-            norm_stats,
-            num_queries,
-            tail_clip=tail_clip,
-            audio_history_len=audio_history_len,
-        )
-
-    if val_dataset_type == "step":
-        val_dataset = StepDataset(
-            dataset_dir=dataset_dir,
-            camera_names=camera_names,
-            norm_stats=norm_stats,
-            num_episodes=len(val_indices),
-            num_queries=num_queries,
-            episode_ids=val_indices.tolist(),
-            tail_clip=tail_clip,
-            audio_history_len=audio_history_len,
-        )
-    else:
-        val_dataset = EpisodicDataset(
-            val_indices,
-            dataset_dir,
-            camera_names,
-            norm_stats,
-            num_queries,
-            tail_clip=tail_clip,
-            audio_history_len=audio_history_len,
-        )
+    train_dataset = EpisodicDataset(
+        train_indices,
+        dataset_dir,
+        norm_stats,
+        num_queries,
+    )
+    val_dataset = EpisodicDataset(
+        val_indices,
+        dataset_dir,
+        norm_stats,
+        num_queries,
+    )
 
     # DataLoader configuration
     num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many
@@ -335,234 +204,6 @@ def load_data(
     )
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
-
-
-# TODO: Determine viability of per-timestep dataset
-## Yield state_t instead of image_t
-## Ensure each item is (horizon_length, 93)
-class StepDataset(torch.utils.data.Dataset):
-    """Per-step dataset over all timesteps across episodes.
-
-    Yields (image_t, qpos_t, action_window, is_pad_window) at a timestep t from an episode.
-    action_window is a chunk of length T=num_queries (default 1), starting at t (or t-1 on real
-    data to align), padded as needed at the end if the episode runs out.
-    This is designed for large-batch expert sampling in GAIL where batch size should depend on
-    total timesteps, not number of episodes.
-    """
-
-    def __init__(
-        self,
-        dataset_dir,
-        camera_names,
-        norm_stats,
-        num_episodes,
-        num_queries: int = 1,
-        episode_ids=None,
-        tail_clip: Optional[int] = None,
-        audio_history_len: int = 1,
-    ):
-        super(StepDataset, self).__init__()
-        self.dataset_dir = dataset_dir
-        self.camera_names = camera_names
-        self.norm_stats = norm_stats
-        self.num_episodes = num_episodes
-        self.num_queries = int(num_queries) if num_queries is not None else 1
-        # Optional: exclude last `tail_clip` timesteps of each episode from sampling
-        self.tail_clip = int(tail_clip) if tail_clip is not None else 0
-        self.audio_history_len = int(audio_history_len)
-        self.is_sim = None
-
-        # Precompute episode lengths and cumulative index for O(log E) lookup
-        self.episode_ids = (
-            list(range(num_episodes)) if episode_ids is None else list(episode_ids)
-        )
-        self.episode_lengths = []
-        for eid in self.episode_ids:
-            ep_path = os.path.join(dataset_dir, f"episode_{eid}.hdf5")
-            with h5py.File(ep_path, "r") as root:
-                if self.is_sim is None:
-                    self.is_sim = bool(root.attrs["sim"])
-                ep_len = int(root["/action"].shape[0])
-                ep_eff = max(0, ep_len - self.tail_clip)
-                self.episode_lengths.append(ep_eff)
-        self.cum_lengths = np.cumsum(
-            [0] + self.episode_lengths
-        )  # length num_episodes+1
-
-        self.action_mean = torch.tensor(
-            self.norm_stats["action_mean"], dtype=torch.float32
-        )
-        self.action_std = torch.tensor(
-            self.norm_stats["action_std"], dtype=torch.float32
-        )
-        self.qpos_mean = torch.tensor(self.norm_stats["qpos_mean"], dtype=torch.float32)
-        self.qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
-
-    def __len__(self):
-        return int(self.cum_lengths[-1])
-
-    def _index_to_episode(self, idx):
-        # Find episode e s.t. cum[e] <= idx < cum[e+1]
-        e = int(np.searchsorted(self.cum_lengths, idx, side="right") - 1)
-        t = int(idx - self.cum_lengths[e])
-        return e, t
-
-    def __getitem__(self, index):
-        episode_pos, t = self._index_to_episode(index)
-        episode_id = self.episode_ids[episode_pos]
-        dataset_path = os.path.join(self.dataset_dir, f"episode_{episode_id}.hdf5")
-        with h5py.File(dataset_path, "r") as root:
-            is_sim = bool(root.attrs["sim"])
-            # Observations at t
-            qpos = root["/observations/qpos"][t]
-
-            # Audio at t
-            # Default to zeros [N, 1024]
-            audio_data = torch.zeros((self.audio_history_len, 1024))
-
-            if "/observations/audio_u" in root and "/observations/audio_e" in root:
-                try:
-                    # Get current frame timestamp
-                    if "/observations/timestamp" in root:
-                        current_time = root["/observations/timestamp"][t]
-                    else:
-                        current_time = t / 30.0
-
-                    # Find last audio embedding index k
-                    audio_u = root["/observations/audio_u"][()]
-                    k = np.searchsorted(audio_u, current_time, side="right") - 1
-                    k = max(0, k)
-
-                    # Gather last N embeddings indices: [k-N+1, ..., k]
-                    indices = np.arange(k - self.audio_history_len + 1, k + 1)
-
-                    # Handle padding for negative indices
-                    valid_mask = indices >= 0
-                    valid_indices = indices[valid_mask]
-                    pad_len = len(indices) - len(valid_indices)
-
-                    audio_stack = []
-                    if pad_len > 0:
-                        audio_stack.append(torch.zeros((pad_len, 1024)))
-
-                    if len(valid_indices) > 0:
-                        start_idx = valid_indices[0]
-                        end_idx = valid_indices[-1] + 1
-                        audio_len = root["/observations/audio_e"].shape[0]
-
-                        if start_idx < audio_len:
-                            real_end_idx = min(end_idx, audio_len)
-                            chunk = root["/observations/audio_e"][
-                                start_idx:real_end_idx
-                            ]
-                            chunk_tensor = torch.from_numpy(chunk).float()
-                            audio_stack.append(chunk_tensor)
-
-                            if real_end_idx < end_idx:
-                                remain = end_idx - real_end_idx
-                                audio_stack.append(torch.zeros((remain, 1024)))
-                        else:
-                            audio_stack.append(torch.zeros((len(valid_indices), 1024)))
-
-                    if audio_stack:
-                        audio_data = torch.cat(audio_stack, dim=0)
-
-                except Exception as e:
-                    pass
-
-            # Legacy format
-            elif "/observations/audio_obs" in root:
-                print(
-                    "Warning: Legacy audio format detected, audio embeddings will be zeros"
-                )
-
-            # Action alignment and chunking to mimic EpisodicDataset policy
-            episode_len = self.episode_lengths[episode_pos]
-            window_len = self.num_queries
-            if is_sim:
-                start = t
-            else:
-                # hack to better align for real data
-                start = max(0, t - 1)
-            # Do not cross into the clipped tail
-            end = min(start + window_len, episode_len)
-            action_slice = root["/action"][start:end]
-            available_len = end - start
-
-        # torch tensors
-        qpos_data = torch.from_numpy(qpos).float()
-        # Build fixed-size window [T, A] with padding if needed
-        action_dim = int(self.action_mean.numel())
-        action_window = np.zeros((self.num_queries, action_dim), dtype=np.float32)
-        if available_len > 0:
-            action_window[:available_len] = action_slice[:available_len]
-        action_data = torch.from_numpy(action_window).float()
-
-        # Normalize
-        action_data = (
-            action_data - self.action_mean.squeeze(0)
-        ) / self.action_std.squeeze(0)
-
-        qpos_data = (qpos_data - self.qpos_mean.squeeze(0)) / self.qpos_std.squeeze(0)
-
-        # Match EpisodicDataset API shape expectations used downstream in GAIL code:
-        # action -> [T, A]; is_pad -> [T]
-        is_pad = torch.zeros((self.num_queries,), dtype=torch.bool)
-        if available_len < self.num_queries:
-            is_pad[available_len:] = True
-
-        return image_data, qpos_data, action_data, is_pad, audio_data
-
-
-def load_expert_step_loader(
-    dataset_dir,
-    num_episodes,
-    camera_names,
-    batch_size,
-    num_workers=None,
-    prefetch_factor=2,
-    shuffle=True,
-):
-    """Create a DataLoader over per-step expert samples for GAIL.
-
-    - Allows large batch sizes (e.g., 256/512/1024) since sampling is over all timesteps.
-    - Uses same normalization stats as episodic loader.
-    - Returns batches of:
-        image:  [B, K, C, H, W]
-        qpos:   [B, Dq]
-        action: [B, T, A]
-        is_pad: [B, T]
-    """
-    # Reuse normalization computation over the specified episodes
-    norm_stats = get_norm_stats(dataset_dir, num_episodes)
-
-    # Sensible defaults for workers
-    if num_workers is None:
-        num_workers = min(1, os.cpu_count()) if os.cpu_count() is not None else 1
-
-    print(
-        f"Expert Step DataLoader config: batch_size={batch_size}, num_workers={num_workers}, prefetch_factor={prefetch_factor}, shuffle={shuffle}"
-    )
-
-    dataset = StepDataset(
-        dataset_dir=dataset_dir,
-        camera_names=camera_names,
-        norm_stats=norm_stats,
-        num_episodes=num_episodes,
-    )
-
-    # Default collate works (fixed-size tensors per item)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        pin_memory=True,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
-        persistent_workers=True,
-    )
-
-    return loader, norm_stats, dataset.is_sim
 
 
 ### env utils
