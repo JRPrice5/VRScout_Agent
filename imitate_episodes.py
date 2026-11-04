@@ -13,7 +13,6 @@ from act_bs.config.root import RootConfig
 
 from constants import DT
 from my_utils import load_data  # data functions
-from my_utils import StepDataset  # to detect step-based training
 from my_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
 from policy import ACTPolicy
 
@@ -35,7 +34,6 @@ def main(cfg):
         if cfg.training.num_episodes != -1
         else len(os.listdir(dataset_dir))
     )
-    episode_len = cfg.data.episode_length
 
     # fixed parameters
     # Infer state/action dimension from dataset (supports extended layouts)
@@ -44,77 +42,13 @@ def main(cfg):
         raise FileNotFoundError(
             f"Could not find {first_episode_path} to infer action_dim"
         )
-    import h5py
-
-    with h5py.File(first_episode_path, "r") as f:
-        action_dim = int(f["/observations/qpos"].shape[1])
-    lr_backbone = args.get("lr_backbone", 1e-6)
-    # Use backbone from args if provided, otherwise default to resnet18
-    backbone = args.get("backbone", "resnet18")
-    if policy_class == "ACT":
-        enc_layers = args.get("enc_layers", 4)
-        dec_layers = args.get("dec_layers", 7)
-        nheads = args.get("nheads", 8)
-        activation = args.get("activation", "relu")
-        policy_config = {
-            "lr": args["lr"],
-            "num_queries": args["chunk_size"],
-            "kl_weight": args["kl_weight"],
-            "hidden_dim": args["hidden_dim"],
-            "dim_feedforward": args["dim_feedforward"],
-            "lr_backbone": lr_backbone,
-            "backbone": backbone,
-            "enc_layers": enc_layers,
-            "dec_layers": dec_layers,
-            "nheads": nheads,
-            "activation": activation,
-            "camera_names": camera_names,
-            "action_dim": action_dim,
-            "audio_history_len": args.get("audio_history_len", 1),
-        }
-    else:
-        raise NotImplementedError
-
-    config = {
-        "num_epochs": num_epochs,
-        "ckpt_dir": ckpt_dir,
-        "episode_len": episode_len,
-        "action_dim": action_dim,
-        "lr": args["lr"],
-        "policy_class": policy_class,
-        "onscreen_render": onscreen_render,
-        "policy_config": policy_config,
-        "task_name": task_name,
-        "seed": args["seed"],
-        "temporal_agg": args["temporal_agg"],
-        "camera_names": camera_names,
-        "real_robot": not is_sim,
-        "resume": args.get("resume", None),
-    }
-
-    if is_eval:
-        ckpt_names = [f"policy_best.ckpt"]
-        results = []
-        for ckpt_name in ckpt_names:
-            success_rate, avg_return = eval_bc(config, ckpt_name, save_episode=True)
-            results.append([ckpt_name, success_rate, avg_return])
-
-        for ckpt_name, success_rate, avg_return in results:
-            print(f"{ckpt_name}: {success_rate=} {avg_return=}")
-        print()
-        exit()
 
     train_dataloader, val_dataloader, stats, _ = load_data(
         dataset_dir,
         num_episodes,
-        camera_names,
         batch_size_train,
         batch_size_val,
-        policy_config["num_queries"],
-        dataset_type="episodic",  # use StepDataset for training
-        val_dataset_type="episodic",  # use StepDataset for validation
-        tail_clip=150,  # HARD CODED: exclude the last 150 timesteps of each episode in both datasets
-        audio_history_len=args.get("audio_history_len", 1),
+        cfg.model.chunk_size,
     )
 
     # save dataset stats
@@ -124,7 +58,7 @@ def main(cfg):
     with open(stats_path, "wb") as f:
         pickle.dump(stats, f)
 
-    best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
+    best_ckpt_info = train_bc(train_dataloader, val_dataloader, cfg)
     best_epoch, min_val_loss, best_state_dict = best_ckpt_info
 
     # save best checkpoint

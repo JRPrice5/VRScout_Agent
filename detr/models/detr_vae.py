@@ -38,7 +38,7 @@ def get_sinusoid_encoding_table(n_position, d_hid):
 class DETRVAE(nn.Module):
     """This is the DETR module that performs object detection"""
 
-    def __init__(self, decoder, encoder, action_dim, num_queries):
+    def __init__(self, decoder, encoder, action_dim, state_dim, num_queries):
         """Initializes the model.
         Parameters:
             game_state_mlp: game_state_encoder.
@@ -60,7 +60,7 @@ class DETRVAE(nn.Module):
 
         self.input_proj = nn.LazyLinear(self.hidden_dim)
         self.input_proj_robot_state = nn.Linear(action_dim, self.hidden_dim)
-        self.input_proj_game_state = nn.Linear(7, self.hidden_dim)
+        self.input_proj_game_state = nn.Linear(state_dim, self.hidden_dim)
         self.pos = torch.nn.Embedding(2, self.hidden_dim)
 
         # encoder extra parameters
@@ -189,6 +189,7 @@ def build(cfg):
         decoder,
         encoder,
         action_dim=cfg.model.action_dim,
+        state_dim=cfg.model.state_dim,
         num_queries=cfg.model.chunk_size,
     )
 
