@@ -2,16 +2,13 @@ import torch
 import numpy as np
 import os
 import pickle
-import argparse
 import re
 import matplotlib.pyplot as plt
 from copy import deepcopy
 from tqdm import tqdm
-from einops import rearrange
 from omegaconf import OmegaConf
 from act_bs.config.root import RootConfig
 
-from constants import DT
 from my_utils import load_data  # data functions
 from my_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
 from policy import ACTPolicy
@@ -21,15 +18,15 @@ def main(cfg):
     set_seed(1)
     # command line parameters
     # is_eval = args["eval"]
-    ckpt_dir = cfg.imitation.checkpoint_dir
-    batch_size_train = cfg.imitation.batch_size
+    ckpt_dir = cfg.training.checkpoint_dir
+    batch_size_train = cfg.training.batch_size
     batch_size_val = cfg.validation.batch_size
 
     # task_config = TASK_CONFIGS[task_name]
     dataset_dir = cfg.data.hdf5_dir
     num_episodes = (
-        cfg.imitation.num_episodes
-        if cfg.imitation.num_episodes != -1
+        cfg.training.num_episodes
+        if cfg.training.num_episodes != -1
         else len(os.listdir(dataset_dir))
     )
 
@@ -85,17 +82,17 @@ def forward_pass(data, policy):
 
 
 def train_bc(train_dataloader, val_dataloader, cfg):
-    num_epochs = cfg.imitation.num_epochs
-    ckpt_dir = cfg.imitation.ckpt_dir
-    seed = cfg.imitation.seed
+    num_epochs = cfg.training.num_epochs
+    ckpt_dir = cfg.training.ckpt_dir
+    seed = cfg.training.seed
     policy_class = cfg.model.policy_class
-    resume_path = cfg.imitation.resume_path
+    resume_path = cfg.training.resume_path
     if not resume_path:
         resume_path = None
 
     set_seed(seed)
 
-    policy = make_policy(policy_class, cfg.imitation)
+    policy = make_policy(policy_class, cfg)
     policy.cuda()
     optimizer = make_optimizer(policy_class, policy)
 

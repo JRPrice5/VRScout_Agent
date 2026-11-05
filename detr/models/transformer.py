@@ -400,15 +400,15 @@ def _get_clones(module, N):
 
 def build_transformer(cfg):
     return Transformer(
-        d_model=cfg.hidden_dim,
-        dropout=cfg.dropout,
-        nhead=cfg.nheads,
-        dim_feedforward=cfg.dim_feedforward,
-        num_encoder_layers=cfg.enc_layers,
-        num_decoder_layers=cfg.dec_layers,
-        normalize_before=cfg.pre_norm,
+        d_model=cfg.model.hidden_dim,
+        dropout=cfg.model.dropout,
+        nhead=cfg.model.nheads,
+        dim_feedforward=cfg.model.dim_feedforward,
+        num_encoder_layers=cfg.model.enc_layers,
+        num_decoder_layers=cfg.model.dec_layers,
+        normalize_before=cfg.model.pre_norm,
         return_intermediate_dec=True,
-        activation=cfg.activation,
+        activation=cfg.model.activation,
     )
 
 

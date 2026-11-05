@@ -164,12 +164,12 @@ class DETRVAE(nn.Module):
 
 
 def build_encoder(cfg):
-    d_model = cfg.hidden_dim  # 256
-    dropout = cfg.dropout  # 0.1
-    nhead = cfg.nheads  # 8
-    dim_feedforward = cfg.dim_feedforward  # 2048
-    num_encoder_layers = cfg.enc_layers  # 4 # TODO: share with VAE decoder
-    normalize_before = cfg.pre_norm  # False
+    d_model = cfg.model.hidden_dim  # 256
+    dropout = cfg.model.dropout  # 0.1
+    nhead = cfg.model.nheads  # 8
+    dim_feedforward = cfg.model.dim_feedforward  # 2048
+    num_encoder_layers = cfg.model.enc_layers  # 4 # TODO: share with VAE decoder
+    normalize_before = cfg.model.pre_norm  # False
     activation = "relu"
 
     encoder_layer = TransformerEncoderLayer(
@@ -186,13 +186,12 @@ def build(cfg):
 
     encoder = build_encoder(cfg)
 
-    modelcfg = OmegaConf.structured(ModelConfig)
     model = DETRVAE(
         decoder,
         encoder,
-        action_dim=modelcfg.action_length,
-        state_dim=modelcfg.episode_length + modelcfg.metadata_length,
-        num_queries=cfg.chunk_size,
+        action_dim=cfg.data.action_length,
+        state_dim=cfg.data.episode_length + cfg.data.metadata_length,
+        num_queries=cfg.model.chunk_size,
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
