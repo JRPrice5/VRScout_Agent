@@ -9,7 +9,9 @@ from omegaconf import OmegaConf
 from act_bs.config.root import RootConfig
 
 
-# TODO: Convert to game state
+cfg = OmegaConf.structured(RootConfig)
+
+
 class EpisodicDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -37,7 +39,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         episode_id = self.episode_ids[index]
         dataset_path = os.path.join(self.dataset_dir, self.episodes[episode_id])
-        qpos, action, state = read_replay(dataset_path)
+        metadata, obstacles, qpos, action = read_replay(dataset_path)
 
         # Restrict to fixed window length = num_queries to match policy needs
         # Slice available part and pad to window_len if needed
@@ -53,7 +55,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
         qpos_data = torch.from_numpy(qpos).float()
         action_data = torch.from_numpy(action_window).float()
-        state_data = torch.from_numpy(state).float()
+        obstacle_data = torch.from_numpy(obstacles).float()
         is_pad = torch.from_numpy(is_pad).bool()
 
         # Convert numpy arrays to torch tensors and ensure float32 dtype
@@ -69,15 +71,18 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_data = (qpos_data - qpos_mean) / qpos_std
 
         # TODO: Don't normalise one hot dims:
-        state_mean = torch.tensor(self.norm_stats["state_mean"], dtype=torch.float32)
-        state_std = torch.tensor(self.norm_stats["state_std"], dtype=torch.float32)
-        state_data = (state_data - state_mean) / state_std
+        obstacle_mean = torch.tensor(
+            self.norm_stats["obstacle_mean"], dtype=torch.float32
+        )
+        obstacle_std = torch.tensor(
+            self.norm_stats["obstacle_std"], dtype=torch.float32
+        )
+        obstacle_data = (obstacle_data - obstacle_mean) / obstacle_std
 
-        return state_data, qpos_data, action_data, is_pad
+        return metadata, obstacle_data, qpos_data, action_data, is_pad
 
 
-# TODO: Ensure state reflects metadata + obstacles
-def read_replay(cfg, replay_path):
+def read_replay(replay_path):
     with h5py.File(replay_path, "r") as root:
         num_frames = cfg.data.episode_length * len(root["/action"])
         qpos = np.zeros((num_frames, cfg.data.action_length))
@@ -86,9 +91,9 @@ def read_replay(cfg, replay_path):
             if i != len(root) - 1:
                 qpos[i + 1] = episode[:][1:]
             action[i] = episode[:]
-        obstacles = root["/observations/obstacles"][:]
-    state = obstacles
-    return qpos, action, state
+        obstacles = root["/obstacles"][:]
+        metadata = root["metadata"][:]
+    return metadata, obstacles, qpos, action
 
 
 def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
@@ -106,18 +111,18 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 
     all_qpos_data = []
     all_action_data = []
-    all_state_data = []
+    all_obstacle_data = []
     for episode_idx in ids:
         dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
-        qpos, action, state = read_replay(dataset_path)
-        all_state_data.append(torch.from_numpy(state))
+        _, obstacles, qpos, action = read_replay(dataset_path)
+        all_obstacle_data.append(torch.from_numpy(obstacles))
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))
 
     # Concatenate instead of stack to handle different episode lengths
     all_qpos_data = torch.cat(all_qpos_data, dim=0)
     all_action_data = torch.cat(all_action_data, dim=0)
-    all_state_data = torch.cat(all_state_data, dim=0)
+    all_obstacle_data = torch.cat(all_obstacle_data, dim=0)
 
     # normalize action data
     action_mean = all_action_data.mean(dim=0, keepdim=True)
@@ -129,18 +134,18 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     qpos_std = all_qpos_data.std(dim=0, keepdim=True)
     qpos_std = torch.clip(qpos_std, 1e-2, np.inf)  # clipping
 
-    # normalize state data
-    state_mean = all_state_data.mean(dim=0, keepdim=True)
-    state_std = all_state_data.std(dim=0, keepdim=True)
-    state_std = torch.clip(state_std, 1e-2, np.inf)  # clipping
+    # normalize obstacle data
+    obstacle_mean = all_obstacle_data.mean(dim=0, keepdim=True)
+    obstacle_std = all_obstacle_data.std(dim=0, keepdim=True)
+    obstacle_std = torch.clip(obstacle_std, 1e-2, np.inf)  # clipping
 
     stats = {
         "action_mean": action_mean.numpy().squeeze(),
         "action_std": action_std.numpy().squeeze(),
         "qpos_mean": qpos_mean.numpy().squeeze(),
         "qpos_std": qpos_std.numpy().squeeze(),
-        "state_mean": state_mean.numpy().squeeze(),
-        "state_std": state_std.numpy().squeeze(),
+        "obstacle_mean": obstacle_mean.numpy().squeeze(),
+        "obstacle_std": obstacle_std.numpy().squeeze(),
     }
 
     return stats
