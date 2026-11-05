@@ -24,13 +24,14 @@ def main(cfg):
 
     # task_config = TASK_CONFIGS[task_name]
     dataset_dir = cfg.data.hdf5_dir
+    pattern = re.compile(r"\.hdf5$")
     num_episodes = (
         cfg.training.num_episodes
         if cfg.training.num_episodes != -1
-        else len(os.listdir(dataset_dir))
+        else len([file for file in os.listdir(dataset_dir) if pattern.search(file)])
     )
 
-    train_dataloader, val_dataloader, stats, _ = load_data(
+    train_dataloader, val_dataloader, stats = load_data(
         dataset_dir,
         num_episodes,
         batch_size_train,

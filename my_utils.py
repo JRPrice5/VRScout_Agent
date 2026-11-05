@@ -84,15 +84,19 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
 def read_replay(replay_path):
     with h5py.File(replay_path, "r") as root:
-        num_frames = cfg.data.episode_length * len(root["/action"])
-        qpos = np.zeros((num_frames, cfg.data.action_length))
-        action = np.zeros((num_frames, cfg.data.action_length))
-        for i, episode in enumerate(root["/action"].values()):
-            if i != len(root) - 1:
-                qpos[i + 1] = episode[:][1:]
-            action[i] = episode[:]
+        replay_dset = root["/actions"]
+        qpos = np.zeros(
+            (len(replay_dset), cfg.data.episode_length, cfg.data.action_length)
+        )
+        action = np.zeros(
+            (len(replay_dset), cfg.data.episode_length, cfg.data.action_length)
+        )
+        for i, episode in enumerate(replay_dset.values()):
+            if i != len(replay_dset) - 1:
+                qpos[i, :, :] = episode[:, :1]
+            action[i, :, :] = episode[:, :]
         obstacles = root["/obstacles"][:]
-        metadata = root["metadata"][:]
+        metadata = root["/metadata"][:]
     return metadata, obstacles, qpos, action
 
 
@@ -113,8 +117,9 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     all_action_data = []
     all_obstacle_data = []
     for episode_idx in ids:
-        dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
-        _, obstacles, qpos, action = read_replay(dataset_path)
+        replay_name = os.listdir(dataset_dir)[episode_idx]
+        replay_path = os.path.join(dataset_dir, replay_name)
+        _, obstacles, qpos, action = read_replay(replay_path)
         all_obstacle_data.append(torch.from_numpy(obstacles))
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))

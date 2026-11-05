@@ -152,11 +152,15 @@ class DETRVAE(nn.Module):
 
         hidden_state = self.decoder(
             game_state,
+            mask,
             self.query_embed.weight,
+            self.pos.weight,
             latent_input,
             proprio_input,
             self.additional_pos_embed.weight,
-        )[0]
+        )[
+            0
+        ]  # src,mask,query_embed,pos_embed,latent_input,proprio_input,additional_pos_embed
 
         a_hat = self.action_head(hidden_state)
         is_pad_hat = self.is_pad_head(hidden_state)
