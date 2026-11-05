@@ -97,7 +97,7 @@ class DETRVAE(nn.Module):
         """
         qpos: batch, qpos_dim
         game_state: batch, frames, state
-        actions: batch, seq, action_dim
+        actions: batch, window, action_dim
         """
         is_training = actions is not None  # train or val
         batch_size, _ = qpos.shape

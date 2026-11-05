@@ -25,7 +25,7 @@ def main(cfg):
         else len(os.listdir(dataset_dir))
     )
 
-    train_dataloader, val_dataloader, stats, _ = load_data(
+    train_dataloader, val_dataloader, stats = load_data(
         dataset_dir,
         num_episodes,
         batch_size_train,
