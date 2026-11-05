@@ -2,17 +2,15 @@ import torch
 import numpy as np
 import os
 import pickle
-import argparse
 import matplotlib.pyplot as plt
-from copy import deepcopy
 from tqdm import tqdm
-from einops import rearrange
+from omegaconf import OmegaConf
+from act_bs.config.root import RootConfig
 
 from constants import DT
 from my_utils import load_data  # data functions
 from my_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
 from policy import ACTPolicy
-from visualize_episodes import save_videos
 
 
 def main(cfg):
@@ -47,11 +45,15 @@ def main(cfg):
 
     # Evaluate loss on train dataset
     print("\nEvaluating on training dataset:")
-    train_loss_summary = evaluate_bc_loss(train_dataloader, cfg, pretrained_ckpt_path)
+    train_loss_summary = evaluate_bc_loss(
+        train_dataloader, cfg.imitation, pretrained_ckpt_path
+    )
 
     # Evaluate loss on validation dataset
     print("\nEvaluating on validation dataset:")
-    val_loss_summary = evaluate_bc_loss(val_dataloader, cfg, pretrained_ckpt_path)
+    val_loss_summary = evaluate_bc_loss(
+        val_dataloader, cfg.imitation, pretrained_ckpt_path
+    )
 
     print(f"\nEvaluation complete.")
     print(f"Train loss: {train_loss_summary['loss']:.6f}")
@@ -97,11 +99,8 @@ def evaluate_bc_loss(dataloader, config, ckpt_path=None):
     Returns:
         loss_summary: Dictionary with mean loss values
     """
-    policy_class = config["policy_class"]
-    policy_config = config["policy_config"]
-
     # Create policy
-    policy = make_policy(policy_class, policy_config)
+    policy = make_policy("ACT", config)
     policy.cuda()
 
     # Load pretrained weights if provided
@@ -162,70 +161,5 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--ckpt_dir", action="store", type=str, help="ckpt_dir", required=True
-    )
-    parser.add_argument(
-        "--policy_class",
-        action="store",
-        type=str,
-        help="policy_class, capitalize",
-        required=True,
-    )
-    parser.add_argument(
-        "--task_name", action="store", type=str, help="task_name", required=True
-    )
-    parser.add_argument(
-        "--batch_size", action="store", type=int, help="batch_size", required=True
-    )
-    parser.add_argument("--seed", action="store", type=int, help="seed", required=True)
-    parser.add_argument(
-        "--num_epochs", action="store", type=int, help="num_epochs", required=True
-    )
-    parser.add_argument("--lr", action="store", type=float, help="lr", required=True)
-    parser.add_argument(
-        "--backbone",
-        action="store",
-        type=str,
-        help="Backbone model (resnet18, resnet34, resnet50, dino_vits16, dino_vitb16)",
-        default="resnet18",
-    )
-    parser.add_argument(
-        "--lr_backbone", action="store", type=float, help="lr_backbone", required=False
-    )
-    parser.add_argument(
-        "--pretrained_ckpt_path",
-        action="store",
-        type=str,
-        help="Path to pretrained policy checkpoint",
-        required=False,
-    )
-
-    # for ACT
-    parser.add_argument(
-        "--kl_weight", action="store", type=int, help="KL Weight", required=False
-    )
-    parser.add_argument(
-        "--chunk_size", action="store", type=int, help="chunk_size", required=False
-    )
-    parser.add_argument(
-        "--hidden_dim", action="store", type=int, help="hidden_dim", required=False
-    )
-    parser.add_argument(
-        "--dim_feedforward",
-        action="store",
-        type=int,
-        help="dim_feedforward",
-        required=False,
-    )
-    parser.add_argument("--temporal_agg", action="store_true")
-    parser.add_argument(
-        "--activation",
-        action="store",
-        type=str,
-        help="activation for transformer",
-        required=False,
-    )
-
-    main(vars(parser.parse_args()))
+    cfg = OmegaConf.structured(RootConfig)
+    main(cfg)

@@ -14,7 +14,7 @@ class ACTPolicy(nn.Module):
         model, optimizer = build_ACT_model_and_optimizer(cfg)
         self.model = model  # CVAE decoder
         self.optimizer = optimizer
-        self.kl_weight = cfg.model.kl_weight
+        self.kl_weight = cfg.kl_weight
         print(f"KL Weight {self.kl_weight}")
 
         # Feature dims and heads (do not modify backbone/decoder/CVAE)

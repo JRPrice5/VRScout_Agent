@@ -21,27 +21,17 @@ def main(cfg):
     set_seed(1)
     # command line parameters
     # is_eval = args["eval"]
-    ckpt_dir = cfg.training.checkpoint_dir
-    batch_size_train = cfg.training.batch_size
+    ckpt_dir = cfg.imitation.checkpoint_dir
+    batch_size_train = cfg.imitation.batch_size
     batch_size_val = cfg.validation.batch_size
-    num_epochs = cfg.training.num_epochs
-    policy_class = cfg.model.policy_class
 
     # task_config = TASK_CONFIGS[task_name]
     dataset_dir = cfg.data.hdf5_dir
     num_episodes = (
-        cfg.training.num_episodes
-        if cfg.training.num_episodes != -1
+        cfg.imitation.num_episodes
+        if cfg.imitation.num_episodes != -1
         else len(os.listdir(dataset_dir))
     )
-
-    # fixed parameters
-    # Infer state/action dimension from dataset (supports extended layouts)
-    first_episode_path = os.path.join(dataset_dir, "episode_0.hdf5")
-    if not os.path.isfile(first_episode_path):
-        raise FileNotFoundError(
-            f"Could not find {first_episode_path} to infer action_dim"
-        )
 
     train_dataloader, val_dataloader, stats, _ = load_data(
         dataset_dir,
@@ -83,170 +73,6 @@ def make_optimizer(policy_class, policy):
     return optimizer
 
 
-def eval_bc(config, ckpt_name, save_episode=True):
-    set_seed(1000)
-    ckpt_dir = config["ckpt_dir"]
-    action_dim = config["action_dim"]
-    real_robot = config["real_robot"]
-    policy_class = config["policy_class"]
-    onscreen_render = config["onscreen_render"]
-    policy_config = config["policy_config"]
-    camera_names = config["camera_names"]
-    max_timesteps = config["episode_len"]
-    task_name = config["task_name"]
-    temporal_agg = config["temporal_agg"]
-    onscreen_cam = "angle"
-
-    # load policy and stats
-    ckpt_path = os.path.join(ckpt_dir, ckpt_name)
-    policy = make_policy(policy_class, policy_config)
-    loading_status = policy.load_state_dict(torch.load(ckpt_path))
-    print(loading_status)
-    policy.cuda()
-    policy.eval()
-    print(f"Loaded: {ckpt_path}")
-    stats_path = os.path.join(ckpt_dir, f"dataset_stats.pkl")
-    with open(stats_path, "rb") as f:
-        stats = pickle.load(f)
-
-    pre_process = lambda s_qpos: (s_qpos - stats["qpos_mean"]) / stats["qpos_std"]
-    post_process = lambda a: a * stats["action_std"] + stats["action_mean"]
-
-    # load environment
-    from sim_env import make_sim_env
-
-    env = make_sim_env(task_name)
-    env_max_reward = env.task.max_reward
-
-    query_frequency = policy_config["num_queries"]
-    if temporal_agg:
-        query_frequency = 1
-        num_queries = policy_config["num_queries"]
-
-    max_timesteps = int(max_timesteps * 1)  # may increase for real-world tasks
-
-    num_rollouts = 50
-    episode_returns = []
-    highest_rewards = []
-    for rollout_id in range(num_rollouts):
-        rollout_id += 0
-        ### set task
-        ts = env.reset()
-
-        ### onscreen render
-        if onscreen_render:
-            ax = plt.subplot()
-            plt_img = ax.imshow(
-                env._physics.render(height=480, width=640, camera_id=onscreen_cam)
-            )
-            plt.ion()
-
-        ### evaluation loop
-        if temporal_agg:
-            all_time_actions = torch.zeros(
-                [max_timesteps, max_timesteps + num_queries, action_dim]
-            ).cuda()
-
-        qpos_history = torch.zeros((1, max_timesteps, action_dim)).cuda()
-        image_list = []  # for visualization
-        qpos_list = []
-        target_qpos_list = []
-        rewards = []
-        with torch.inference_mode():
-            for t in range(max_timesteps):
-                ### update onscreen render and wait for DT
-                if onscreen_render:
-                    image = env._physics.render(
-                        height=480, width=640, camera_id=onscreen_cam
-                    )
-                    plt_img.set_data(image)
-                    plt.pause(DT)
-
-                ### process previous timestep to get qpos and image_list
-                obs = ts.observation
-                if "images" in obs:
-                    image_list.append(obs["images"])
-                else:
-                    image_list.append({"main": obs["image"]})
-                qpos_numpy = np.array(obs["qpos"])
-                qpos = pre_process(qpos_numpy)
-                qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
-                qpos_history[:, t] = qpos
-
-                ### query policy
-                if config["policy_class"] == "ACT":
-                    if t % query_frequency == 0:
-                        # TODO: replace curr_image with curr_game_state
-                        all_actions = policy(qpos, curr_state)
-                    if temporal_agg:
-                        all_time_actions[[t], t : t + num_queries] = all_actions
-                        actions_for_curr_step = all_time_actions[:, t]
-                        actions_populated = torch.all(
-                            actions_for_curr_step != 0, axis=1
-                        )
-                        actions_for_curr_step = actions_for_curr_step[actions_populated]
-                        k = 0.01
-                        exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
-                        exp_weights = exp_weights / exp_weights.sum()
-                        exp_weights = (
-                            torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
-                        )
-                        raw_action = (actions_for_curr_step * exp_weights).sum(
-                            dim=0, keepdim=True
-                        )
-                    else:
-                        raw_action = all_actions[:, t % query_frequency]
-                elif config["policy_class"] == "CNNMLP":
-                    raw_action = policy(qpos, curr_image)
-                else:
-                    raise NotImplementedError
-
-                ### post-process actions
-                raw_action = raw_action.squeeze(0).cpu().numpy()
-                action = post_process(raw_action)
-                target_qpos = action
-
-                ### step the environment
-                ts = env.step(target_qpos)
-
-                ### for visualization
-                qpos_list.append(qpos_numpy)
-                target_qpos_list.append(target_qpos)
-                rewards.append(ts.reward)
-
-            plt.close()
-
-        rewards = np.array(rewards)
-        episode_return = np.sum(rewards[rewards != None])
-        episode_returns.append(episode_return)
-        episode_highest_reward = np.max(rewards)
-        highest_rewards.append(episode_highest_reward)
-        print(
-            f"Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward == env_max_reward}"
-        )
-
-    success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
-    avg_return = np.mean(episode_returns)
-    summary_str = f"\nSuccess rate: {success_rate}\nAverage return: {avg_return}\n\n"
-    for r in range(env_max_reward + 1):
-        more_or_equal_r = (np.array(highest_rewards) >= r).sum()
-        more_or_equal_r_rate = more_or_equal_r / num_rollouts
-        summary_str += f"Reward >= {r}: {more_or_equal_r}/{num_rollouts} = {more_or_equal_r_rate * 100}%\n"
-
-    print(summary_str)
-
-    # save success rate to txt
-    result_file_name = "result_" + ckpt_name.split(".")[0] + ".txt"
-    with open(os.path.join(ckpt_dir, result_file_name), "w") as f:
-        f.write(summary_str)
-        f.write(repr(episode_returns))
-        f.write("\n\n")
-        f.write(repr(highest_rewards))
-
-    return success_rate, avg_return
-
-
-# TODO: replace image_data with game_data
 def forward_pass(data, policy):
     state_data, qpos_data, action_data, is_pad = data
     state_data, qpos_data, action_data, is_pad = (
@@ -258,17 +84,18 @@ def forward_pass(data, policy):
     return policy(qpos_data, state_data, action_data, is_pad)  # TODO remove None
 
 
-def train_bc(train_dataloader, val_dataloader, config):
-    num_epochs = config["num_epochs"]
-    ckpt_dir = config["ckpt_dir"]
-    seed = config["seed"]
-    policy_class = config["policy_class"]
-    policy_config = config["policy_config"]
-    resume_path = config.get("resume", None)
+def train_bc(train_dataloader, val_dataloader, cfg):
+    num_epochs = cfg.imitation.num_epochs
+    ckpt_dir = cfg.imitation.ckpt_dir
+    seed = cfg.imitation.seed
+    policy_class = cfg.model.policy_class
+    resume_path = cfg.imitation.resume_path
+    if not resume_path:
+        resume_path = None
 
     set_seed(seed)
 
-    policy = make_policy(policy_class, policy_config)
+    policy = make_policy(policy_class, cfg.imitation)
     policy.cuda()
     optimizer = make_optimizer(policy_class, policy)
 
@@ -381,9 +208,9 @@ def train_bc(train_dataloader, val_dataloader, config):
         optimizer.zero_grad()
         current_epoch_train = []
         for batch_idx, data in enumerate(train_dataloader):
-            image, qpos, action, is_pad, audio = data
-            image, qpos, action, is_pad = (
-                image.cuda(),
+            state, qpos, action, is_pad, audio = data
+            state, qpos, action, is_pad = (
+                state.cuda(),
                 qpos.cuda(),
                 action.cuda(),
                 is_pad.cuda(),
@@ -392,11 +219,11 @@ def train_bc(train_dataloader, val_dataloader, config):
 
             if batch_idx == 0:
                 print(
-                    f"[Train] Batch shapes - Image: {image.shape}, Qpos: {qpos.shape}, Action: {action.shape}, Audio: {audio.shape}"
+                    f"[Train] Batch shapes - state: {state.shape}, Qpos: {qpos.shape}, Action: {action.shape}, Audio: {audio.shape}"
                 )
 
             optimizer.zero_grad()
-            loss_dict = policy(qpos, image, action, is_pad, audio)
+            loss_dict = policy(qpos, state, action, is_pad, audio)
             loss = loss_dict["loss"]
             loss.backward()
             optimizer.step()
@@ -418,7 +245,7 @@ def train_bc(train_dataloader, val_dataloader, config):
         #     print(f"Visited sample indices (head): {head} ... (tail): {tail}")
 
         # Save checkpoint: every epoch when training with StepDataset; otherwise every 500 epochs
-        if isinstance(train_dataloader.dataset, StepDataset) or (epoch % 500 == 0):
+        if epoch % 500 == 0:
             ckpt_path = os.path.join(ckpt_dir, f"policy_epoch_{epoch}_seed_{seed}.ckpt")
             torch.save(policy.state_dict(), ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
@@ -476,5 +303,6 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
     print(f"Saved plots to {ckpt_dir}")
 
 
-cfg = OmegaConf.structured(RootConfig)
-main(cfg)
+if __name__ == "__main__":
+    cfg = OmegaConf.structured(RootConfig)
+    main(cfg)

@@ -26,8 +26,8 @@ def build_ACT_model_and_optimizer(cfg):
     ]
     optimizer = torch.optim.AdamW(
         param_dicts,
-        lr=cfg.model.learning_rate,
-        weight_decay=cfg.model.weight_decay,
+        lr=cfg.learning_rate,
+        weight_decay=cfg.weight_decay,
     )
 
     return model, optimizer
