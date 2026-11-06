@@ -77,14 +77,14 @@ def make_optimizer(policy_class, policy):
 
 
 def forward_pass(data, policy):
-    state_data, qpos_data, action_data, is_pad = data
-    state_data, qpos_data, action_data, is_pad = (
-        state_data.cuda(),
+    metadata, obstacle_data, qpos_data, action_data, obstacle_padding = data
+    metadata, obstacle_data, qpos_data, action_data = (
+        metadata.cuda(),
+        obstacle_data.cuda(),
         qpos_data.cuda(),
         action_data.cuda(),
-        is_pad.cuda(),
     )
-    return policy(qpos_data, state_data, action_data, is_pad)
+    return policy(metadata, obstacle_data, qpos_data, action_data, obstacle_padding)
 
 
 def evaluate_bc_loss(dataloader, config, ckpt_path=None):

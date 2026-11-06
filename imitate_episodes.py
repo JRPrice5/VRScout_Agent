@@ -83,7 +83,7 @@ def forward_pass(data, policy):
 
 
 def train_bc(train_dataloader, val_dataloader, cfg):
-    num_epochs = cfg.training.num_epochs
+    num_epochs = cfg.training.epochs
     ckpt_dir = cfg.training.checkpoint_dir
     seed = cfg.training.seed
     policy_class = cfg.model.policy_class

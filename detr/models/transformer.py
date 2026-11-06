@@ -64,7 +64,6 @@ class Transformer(nn.Module):
     def forward(
         self,
         src,
-        mask,
         query_embed,
         pos_embed,
         latent_input=None,
@@ -78,11 +77,10 @@ class Transformer(nn.Module):
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
 
         tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+        memory = self.encoder(src, pos=pos_embed)
         hs = self.decoder(
             tgt,
             memory,
-            memory_key_padding_mask=mask,
             pos=pos_embed,
             query_pos=query_embed,
         )

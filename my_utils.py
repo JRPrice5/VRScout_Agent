@@ -1,4 +1,6 @@
 import numpy as np
+from tqdm import tqdm
+import random
 import re
 import torch
 import os
@@ -39,24 +41,35 @@ class EpisodicDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         episode_id = self.episode_ids[index]
         dataset_path = os.path.join(self.dataset_dir, self.episodes[episode_id])
-        metadata, obstacles, qpos, action = read_replay(dataset_path)
+        metadata, obstacles, qpos, actions = read_replay(dataset_path)
+        njs = metadata[0] * 30
+        jd = metadata[1] * 30
 
-        # Restrict to fixed window length = num_queries to match policy needs
-        # Slice available part and pad to window_len if needed
-        slice_len = min(self.cfg.model.chunk_size, self.num_queries)
+        window_len = self.cfg.model.chunk_size
+        frame_count = actions.shape[0]
+
+        frame_id = 0
         action_window = np.zeros(
-            (self.num_queries, self.cfg.data.action_length), dtype=np.float32
+            (window_len, self.cfg.data.action_length), dtype=np.float32
         )
-        if slice_len > 0:
-            action_window[:slice_len] = action[:slice_len]
-        # is_pad marks padded timesteps within this fixed window
-        is_pad = np.ones((self.num_queries,), dtype=np.bool_)
-        is_pad[:slice_len] = 0
 
-        qpos_data = torch.from_numpy(qpos).float()
+        while not self._is_contiguous_actions(action_window) or np.all(
+            action_window == 0
+        ):
+            # Pick random frame within replay
+            frame_id = random.choice(frame_count - window_len)
+
+            # Populate action window
+            for i in window_len:
+                action_window[i] = actions[frame_id + i]
+
+        obstacle_window, obstacle_padding = self._get_obs_window(
+            obstacles, frame_id, jd, njs
+        )
+
+        qpos_data = torch.from_numpy(qpos[frame_id]).float()
         action_data = torch.from_numpy(action_window).float()
-        obstacle_data = torch.from_numpy(obstacles).float()
-        is_pad = torch.from_numpy(is_pad).bool()
+        obstacle_data = torch.from_numpy(obstacle_window).float()
 
         # Convert numpy arrays to torch tensors and ensure float32 dtype
         action_mean = torch.tensor(self.norm_stats["action_mean"], dtype=torch.float32)
@@ -70,33 +83,62 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
         qpos_data = (qpos_data - qpos_mean) / qpos_std
 
-        # TODO: Don't normalise one hot dims:
-        obstacle_mean = torch.tensor(
-            self.norm_stats["obstacle_mean"], dtype=torch.float32
-        )
-        obstacle_std = torch.tensor(
-            self.norm_stats["obstacle_std"], dtype=torch.float32
-        )
-        obstacle_data = (obstacle_data - obstacle_mean) / obstacle_std
+        return metadata, obstacle_data, qpos_data, action_data, obstacle_padding
 
-        return metadata, obstacle_data, qpos_data, action_data, is_pad
+    def _is_contiguous_actions(self, actions):
+        """Checks whether each action timestamp are within x of each other"""
+        return np.all(
+            np.diff(actions[:, 0]) > 0
+            and np.diff(actions[:, 0] < 2 / self.cfg.model.sample_rate)
+        )
+
+    def _get_obs_window(self, obstacles, frame_id, jd, njs):
+        window = []
+
+        anchor_t = self.actions[frame_id][self.cfg.data.action_t_idx]
+        spawn_t = anchor_t + jd / (2 * njs)
+
+        for i in range(0, len(obstacles), 1):
+            obstacle = obstacles[i]
+            start_t = obstacle[self.cfg.data.obs_t_idx]
+            end_t = obstacle[27]
+
+            if start_t > spawn_t:
+                return np.array([])
+
+            if end_t >= anchor_t or start_t >= anchor_t:
+                window.append(obstacle)
+
+        if len(window) > self.cfg.data.max_obstacles:
+            raise ValueError("number of obstacles in window exceeded arbitrary limit")
+
+        padded_window = np.zeros(
+            (self.cfg.data.max_obstacles, self.cfg.data.obstacle_length)
+        )
+
+        padded_window[: len(window), :] = np.array(window)
+        padded_indices = len(padded_window) - len(window)
+        return padded_window, padded_indices
 
 
 def read_replay(replay_path):
     with h5py.File(replay_path, "r") as root:
         replay_dset = root["/actions"]
         qpos = np.zeros(
-            (len(replay_dset), cfg.data.episode_length, cfg.data.action_length)
+            (len(replay_dset), cfg.data.episode_length, cfg.data.action_length - 1)
         )
         action = np.zeros(
             (len(replay_dset), cfg.data.episode_length, cfg.data.action_length)
         )
         for i, episode in enumerate(replay_dset.values()):
             if i != len(replay_dset) - 1:
-                qpos[i, :, :] = episode[:, :1]
+                qpos[i, 1:, :] = episode[:-1, 1:]
             action[i, :, :] = episode[:, :]
         obstacles = root["/obstacles"][:]
         metadata = root["/metadata"][:]
+
+    qpos = np.reshape(-1, cfg.data.action_length - 1)
+    action = np.reshape(-1, cfg.data.action_length)
     return metadata, obstacles, qpos, action
 
 
@@ -117,7 +159,11 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     all_action_data = []
     all_obstacle_data = []
     for episode_idx in ids:
-        replay_name = os.listdir(dataset_dir)[episode_idx]
+        replay_name = [
+            filename
+            for filename in os.listdir(dataset_dir)
+            if filename.endswith(".hdf5")
+        ][episode_idx]
         replay_path = os.path.join(dataset_dir, replay_name)
         _, obstacles, qpos, action = read_replay(replay_path)
         all_obstacle_data.append(torch.from_numpy(obstacles))
@@ -139,18 +185,11 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     qpos_std = all_qpos_data.std(dim=0, keepdim=True)
     qpos_std = torch.clip(qpos_std, 1e-2, np.inf)  # clipping
 
-    # normalize obstacle data
-    obstacle_mean = all_obstacle_data.mean(dim=0, keepdim=True)
-    obstacle_std = all_obstacle_data.std(dim=0, keepdim=True)
-    obstacle_std = torch.clip(obstacle_std, 1e-2, np.inf)  # clipping
-
     stats = {
         "action_mean": action_mean.numpy().squeeze(),
         "action_std": action_std.numpy().squeeze(),
         "qpos_mean": qpos_mean.numpy().squeeze(),
         "qpos_std": qpos_std.numpy().squeeze(),
-        "obstacle_mean": obstacle_mean.numpy().squeeze(),
-        "obstacle_std": obstacle_std.numpy().squeeze(),
     }
 
     return stats

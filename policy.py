@@ -28,27 +28,28 @@ class ACTPolicy(nn.Module):
         # Value head
         self.value_head = nn.Linear(hidden_dim, 1)
 
-    # TODO: wire environment state into the model
-    def __call__(self, qpos, game_state, actions=None, is_pad=None, audio=None):
+    def __call__(
+        self,
+        metadata,
+        obstacle_data,
+        qpos,
+        actions=None,
+        obstacle_padding=None,
+    ):
         # Convert inputs to float32 to match model weights
         qpos = qpos.float()
-        if audio is not None:
-            audio = audio.float()
-
         if actions is not None:  # training time
             actions = actions[:, : self.model.num_queries].float()
-            is_pad = is_pad[:, : self.model.num_queries]
 
-            # TODO: Remove controller inputs and xr origin position from model (indices 21:31)
             # TODO: Adjust for image->game_state
-            a_hat, is_pad_hat, (mu, logvar, prior_mu, prior_logvar) = self.model(
-                qpos, game_state, actions, is_pad, audio=audio
+            a_hat, (mu, logvar, prior_mu, prior_logvar) = self.model(
+                metadata, obstacle_data, qpos, actions, obstacle_padding
             )
             total_kld, dim_wise_kld, mean_kld = kl_divergence(
                 mu, logvar, prior_mu, prior_logvar
             )
 
-            continuous_loss = compute_continuous_loss(a_hat, actions, is_pad)
+            continuous_loss = compute_continuous_loss(a_hat, actions)
 
             loss_dict = dict()
             loss_dict["continuous_l1"] = continuous_loss
@@ -58,15 +59,18 @@ class ACTPolicy(nn.Module):
             return loss_dict
         else:  # inference time
             a_hat, _, stats = self.model(
-                qpos, game_state, audio=audio
+                metadata, obstacle_data, qpos
             )  # no action, sample from prior
+
             return a_hat
 
     def forward(
         self,
+        metadata,
+        obstacle_data,
         qpos,
-        game_state=None,
-        audio=None,
+        actions,
+        obstacle_padding=None,
         out_mode: str = "dist",
     ):
         """
@@ -76,13 +80,10 @@ class ACTPolicy(nn.Module):
         Shapes:
           h: [B, T, H], mean/log_std: [B, T, Cc], value: [B, T]
         """
-        qpos = qpos.float()
-        if audio is not None:
-            audio = audio.float()
-
         # Compute hidden states h using the backbone/transformer
-        # TODO: Adjust for image->game_state
-        h = self.encode_to_hidden(qpos, game_state, audio=audio)  # [B, T, H]
+        h = self.encode_to_hidden(
+            metadata, obstacle_data, qpos, actions, obstacle_padding
+        )  # [B, T, H]
         try:
             print("[DBG][FWD] h", tuple(h.shape))
         except Exception:
@@ -161,9 +162,11 @@ class ACTPolicy(nn.Module):
 
     def encode_to_hidden(
         self,
+        metadata,
+        obstacle_data,
         qpos,
-        game_state=None,
-        audio=None,
+        actions,
+        obstacle_padding,
         microbatch: Optional[int] = None,
     ):
         """
@@ -179,22 +182,19 @@ class ACTPolicy(nn.Module):
             for s in range(0, B, mb):
                 e = min(B, s + mb)
                 q_mb = qpos[s:e]
-                audio_mb = audio[s:e] if audio is not None else None
 
                 # Move to device lazily per chunk
                 q_mb = q_mb.to(device, non_blocking=True).float()
-                if audio_mb is not None:
-                    audio_mb = audio_mb.to(device, non_blocking=True).float()
-
                 with autocast(enabled=True):
-                    qpos_proj = self.model.input_proj_robot_state(q_mb)
+                    qpos_proj = self.model.input_proj_qpos(q_mb)
+                    # TODO: Mask obstacle data
+                    game_state = torch.cat([metadata, obstacle_data])
                     env_proj = self.model.input_proj_game_state(game_state)
 
                     transformer_input = torch.cat([qpos_proj, env_proj], dim=1)
 
                     hs_mb = self.model.decoder(
                         transformer_input,
-                        None,
                         self.model.query_embed.weight,
                         self.model.pos.weight,
                     )[0]

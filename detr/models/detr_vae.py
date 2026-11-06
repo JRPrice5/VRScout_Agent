@@ -93,11 +93,14 @@ class DETRVAE(nn.Module):
             2, self.hidden_dim
         )  # learned position embedding for proprio, latent
 
-    def forward(self, qpos, game_state, actions=None, is_pad=None):
+    def forward(
+        self, metadata, obstacle_data, qpos, actions=None, obstacle_padding=None
+    ):
         """
+        metadata: batch, state
+        obstacle_data: batch, obs_window, obstacle_dim
         qpos: batch, qpos_dim
-        game_state: batch, frames, state
-        actions: batch, window, action_dim
+        actions: batch, chunk, action_dim
         """
         is_training = actions is not None  # train or val
         batch_size, _ = qpos.shape
@@ -124,16 +127,12 @@ class DETRVAE(nn.Module):
                 1, 0, 2
             )  # (seq+1, bs, self.hidden_dim)
             # do not mask cls token
-            cls_joint_is_pad = torch.full((batch_size, 2), False).to(
-                qpos.device
-            )  # False: not a padding
-            is_pad = torch.cat([cls_joint_is_pad, is_pad], dim=1)  # (bs, seq+1)
             # obtain position embedding
             pos_embed = self.pos_table.clone().detach()
             pos_embed = pos_embed.permute(1, 0, 2)  # (seq+1, 1, hidden_dim)
             # query model
             encoder_output = self.encoder(
-                encoder_input, pos=pos_embed, src_key_padding_mask=is_pad
+                encoder_input, pos=pos_embed
             )
             encoder_output = encoder_output[0]  # take cls output only
             latent_info = self.latent_proj(encoder_output)
@@ -150,9 +149,12 @@ class DETRVAE(nn.Module):
         # proprioception features
         proprio_input = self.input_proj_robot_state(qpos)
 
+        obstacle_mask = 
+
         hidden_state = self.decoder(
-            game_state,
-            mask,
+            metadata,
+            obstacle_data
+            obstacle_mask,
             self.query_embed.weight,
             self.pos.weight,
             latent_input,
