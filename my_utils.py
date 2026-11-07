@@ -121,26 +121,19 @@ class EpisodicDataset(torch.utils.data.Dataset):
 def read_replay(replay_path):
     with h5py.File(replay_path, "r") as root:
         replay_dset = dict(sorted(root["/actions"].items(), key=lambda x: int(x[0])))
-        qpos = np.zeros(
-            (len(replay_dset), cfg.data.episode_length, cfg.data.action_length - 1)
-        )
         action = np.zeros(
             (len(replay_dset), cfg.data.episode_length, cfg.data.action_length)
         )
         for i, action_episode in enumerate(replay_dset.values()):
-            # Set initial qpos of next episode (it overlaps with prev episode)
-            if i != len(replay_dset) - 1:
-                qpos[i + 1, 0, 1:] = replay_dset.values()[i + 1][-1, 1:-1]
-            qpos[i, :-1, 1:] = action_episode[1:-1, 1:]
             action[i, :, :] = action_episode[:, :]
-
-        qpos[0, 0, :] = qpos[0, 1, :]  # WARN: fills missing 1st qpos w/ 2nd
 
         obstacles = root["/obstacles"][:]
         metadata = root["/metadata"][:]
 
-    qpos = np.reshape(qpos, (-1, cfg.data.action_length - 1))
     action = np.reshape(action, (-1, cfg.data.action_length))
+    qpos = np.zeros((action.shape[0], action.shape[1] - 1))
+    qpos[1:, :] = action[:-1, 1:]
+    qpos[0, :] = qpos[1, :]  # WARN: fills missing 1st qpos w/ 2nd
     return metadata, obstacles, qpos, action
 
 
