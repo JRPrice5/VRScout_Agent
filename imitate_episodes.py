@@ -174,17 +174,16 @@ def train_bc(train_dataloader, val_dataloader, cfg):
             policy.eval()
             epoch_dicts = []
             for batch_idx, data in enumerate(val_dataloader):
-                image, qpos, action, is_pad, audio = data
-                image, qpos, action, is_pad = (
-                    image.cuda(),
+                metadata, obstacle_data, qpos, action, obstacle_mask = data
+                metadata, obstacle_data, qpos, action, obstacle_mask = (
+                    metadata.cuda(),
+                    obstacle_data.cuda(),
                     qpos.cuda(),
                     action.cuda(),
-                    is_pad.cuda(),
+                    obstacle_mask.cuda(),
                 )
-                audio = audio.cuda()
 
-                # TODO: pass game state into policy
-                loss_dict = policy(qpos, game_state, action, is_pad, audio)
+                loss_dict = policy(metadata, obstacle_data, qpos, action, obstacle_mask)
                 epoch_dicts.append(loss_dict)
             epoch_summary = compute_dict_mean(epoch_dicts)
             validation_history.append(epoch_summary)
@@ -199,29 +198,26 @@ def train_bc(train_dataloader, val_dataloader, cfg):
             summary_string += f"{k}: {v.item():.3f} "
         print(summary_string)
 
-        # TODO: image -> game state once episode dataset is converted
-
         # training
         policy.train()
         optimizer.zero_grad()
         current_epoch_train = []
         for batch_idx, data in enumerate(train_dataloader):
-            state, qpos, action, is_pad, audio = data
-            state, qpos, action, is_pad = (
-                state.cuda(),
+            metadata, obstacle_data, qpos, action, obstacle_mask = data
+            metadata, obstacle_data, qpos, action, obstacle_mask = (
+                metadata.cuda(),
+                obstacle_data.cuda(),
                 qpos.cuda(),
                 action.cuda(),
-                is_pad.cuda(),
+                obstacle_mask.cuda(),
             )
-            audio = audio.cuda()
-
             if batch_idx == 0:
                 print(
-                    f"[Train] Batch shapes - state: {state.shape}, Qpos: {qpos.shape}, Action: {action.shape}, Audio: {audio.shape}"
+                    f"[Train] Batch shapes - metadata: {metadata.shape}, obstacles: {obstacle_data}, Qpos: {qpos.shape}, Action: {action.shape}"
                 )
 
             optimizer.zero_grad()
-            loss_dict = policy(qpos, state, action, is_pad, audio)
+            loss_dict = policy(metadata, obstacle_data, qpos, action, obstacle_mask)
             loss = loss_dict["loss"]
             loss.backward()
             optimizer.step()
@@ -254,8 +250,8 @@ def train_bc(train_dataloader, val_dataloader, cfg):
                 "optimizer_state_dict": optimizer.state_dict(),
                 "seed": seed,
                 "min_val_loss": float(min_val_loss),
-                "policy_class": policy_class,
-                "policy_config": policy_config,
+                "policy_class": cfg.model.policy_class,
+                "policy_config": cfg,
             }
             torch.save(full_state, os.path.join(ckpt_dir, "training_state.ckpt"))
 

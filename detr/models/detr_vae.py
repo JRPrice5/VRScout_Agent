@@ -61,7 +61,7 @@ class DETRVAE(nn.Module):
         self.query_embed = nn.Embedding(num_queries, self.hidden_dim)
 
         self.input_proj = nn.LazyLinear(self.hidden_dim)
-        self.input_proj_robot_state = nn.Linear(action_dim, self.hidden_dim)
+        self.input_proj_qpos = nn.Linear(action_dim, self.hidden_dim)
         self.input_proj_game_state = nn.Linear(state_dim, self.hidden_dim)
         self.pos = torch.nn.Embedding(2, self.hidden_dim)
 
@@ -93,9 +93,7 @@ class DETRVAE(nn.Module):
             2, self.hidden_dim
         )  # learned position embedding for proprio, latent
 
-    def forward(
-        self, metadata, obstacle_data, qpos, actions=None, obstacle_padding=None
-    ):
+    def forward(self, metadata, obstacle_data, qpos, actions=None, obstacle_padding=0):
         """
         metadata: batch, state
         obstacle_data: batch, obs_window, obstacle_dim
@@ -131,9 +129,7 @@ class DETRVAE(nn.Module):
             pos_embed = self.pos_table.clone().detach()
             pos_embed = pos_embed.permute(1, 0, 2)  # (seq+1, 1, hidden_dim)
             # query model
-            encoder_output = self.encoder(
-                encoder_input, pos=pos_embed
-            )
+            encoder_output = self.encoder(encoder_input, pos=pos_embed)
             encoder_output = encoder_output[0]  # take cls output only
             latent_info = self.latent_proj(encoder_output)
             mean = latent_info[:, : self.latent_dim]
@@ -149,11 +145,9 @@ class DETRVAE(nn.Module):
         # proprioception features
         proprio_input = self.input_proj_robot_state(qpos)
 
-        obstacle_mask = 
-
         hidden_state = self.decoder(
             metadata,
-            obstacle_data
+            obstacle_data,
             obstacle_mask,
             self.query_embed.weight,
             self.pos.weight,

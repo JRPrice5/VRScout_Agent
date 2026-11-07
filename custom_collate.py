@@ -1,4 +1,6 @@
 import torch
+import numpy as np
+from torch.nn.utils.rnn import pad_sequence
 
 
 def custom_collate_fn(batch):
@@ -12,13 +14,16 @@ def custom_collate_fn(batch):
         Batched tensors with proper padding
     """
     # Separate the batch components
-    state_data, qpos_data, action_data, is_pad = zip(*batch)
+    image_data, qpos_data, action_data, is_pad, audio_data = zip(*batch)
 
-    # Stack state - these should all be the same size
-    state_data = torch.stack(state_data, dim=0)
+    # Stack images - these should all be the same size
+    image_data = torch.stack(image_data, dim=0)
 
     # Stack qpos - these should all be the same size
     qpos_data = torch.stack(qpos_data, dim=0)
+
+    # Stack audio - these should all be the same size
+    audio_data = torch.stack(audio_data, dim=0)
 
     # For action_data which has variable lengths, we need to pad
     # First determine the max length
@@ -53,4 +58,4 @@ def custom_collate_fn(batch):
     # Stack the padded is_pad
     is_pad = torch.stack(padded_is_pad, dim=0)
 
-    return state_data, qpos_data, action_data, is_pad
+    return image_data, qpos_data, action_data, is_pad, audio_data

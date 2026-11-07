@@ -34,7 +34,7 @@ class ACTPolicy(nn.Module):
         obstacle_data,
         qpos,
         actions=None,
-        obstacle_padding=None,
+        obstacle_mask=None,
     ):
         # Convert inputs to float32 to match model weights
         qpos = qpos.float()
@@ -43,7 +43,7 @@ class ACTPolicy(nn.Module):
 
             # TODO: Adjust for image->game_state
             a_hat, (mu, logvar, prior_mu, prior_logvar) = self.model(
-                metadata, obstacle_data, qpos, actions, obstacle_padding
+                metadata, obstacle_data, qpos, actions, obstacle_mask
             )
             total_kld, dim_wise_kld, mean_kld = kl_divergence(
                 mu, logvar, prior_mu, prior_logvar
@@ -70,7 +70,7 @@ class ACTPolicy(nn.Module):
         obstacle_data,
         qpos,
         actions,
-        obstacle_padding=None,
+        obstacle_mask=None,
         out_mode: str = "dist",
     ):
         """
@@ -82,7 +82,7 @@ class ACTPolicy(nn.Module):
         """
         # Compute hidden states h using the backbone/transformer
         h = self.encode_to_hidden(
-            metadata, obstacle_data, qpos, actions, obstacle_padding
+            metadata, obstacle_data, qpos, actions, obstacle_mask
         )  # [B, T, H]
         try:
             print("[DBG][FWD] h", tuple(h.shape))
@@ -166,7 +166,7 @@ class ACTPolicy(nn.Module):
         obstacle_data,
         qpos,
         actions,
-        obstacle_padding,
+        obstacle_mask,
         microbatch: Optional[int] = None,
     ):
         """

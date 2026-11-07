@@ -1,5 +1,4 @@
 import numpy as np
-from tqdm import tqdm
 import random
 import re
 import torch
@@ -57,19 +56,22 @@ class EpisodicDataset(torch.utils.data.Dataset):
             action_window == 0
         ):
             # Pick random frame within replay
-            frame_id = random.choice(frame_count - window_len)
+            frame_id = random.randint(0, frame_count - window_len)
 
             # Populate action window
             for i in window_len:
                 action_window[i] = actions[frame_id + i]
 
-        obstacle_window, obstacle_padding = self._get_obs_window(
-            obstacles, frame_id, jd, njs
+        anchor_t = action_window[0, self.cfg.data.action_t_idx]
+        obstacle_window, obstacle_mask = self._get_obs_window(
+            obstacles, jd, njs, anchor_t
         )
 
+        metadata = torch.from_numpy(metadata).float()
         qpos_data = torch.from_numpy(qpos[frame_id]).float()
         action_data = torch.from_numpy(action_window).float()
         obstacle_data = torch.from_numpy(obstacle_window).float()
+        obstacle_data = torch.from_numpy(obstacle_mask).float()
 
         # Convert numpy arrays to torch tensors and ensure float32 dtype
         action_mean = torch.tensor(self.norm_stats["action_mean"], dtype=torch.float32)
@@ -83,20 +85,19 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_std = torch.tensor(self.norm_stats["qpos_std"], dtype=torch.float32)
         qpos_data = (qpos_data - qpos_mean) / qpos_std
 
-        return metadata, obstacle_data, qpos_data, action_data, obstacle_padding
+        return metadata, obstacle_data, qpos_data, action_data, obstacle_mask
 
     def _is_contiguous_actions(self, actions):
         """Checks whether each action timestamp are within x of each other"""
-        return np.all(
-            np.diff(actions[:, 0]) > 0
-            and np.diff(actions[:, 0] < 2 / self.cfg.model.sample_rate)
+        return np.all(np.diff(actions[:, 0]) > 0) and np.all(
+            np.diff(actions[:, 0]) < (2 / self.cfg.model.sample_rate)
         )
 
-    def _get_obs_window(self, obstacles, frame_id, jd, njs):
+    def _get_obs_window(self, obstacles, jd, njs, anchor_t):
         window = []
-
-        anchor_t = self.actions[frame_id][self.cfg.data.action_t_idx]
         spawn_t = anchor_t + jd / (2 * njs)
+        max_obs = self.cfg.data.max_obstacles
+        padded_window = np.zeros((max_obs, self.cfg.data.obstacle_length))
 
         for i in range(0, len(obstacles), 1):
             obstacle = obstacles[i]
@@ -104,21 +105,18 @@ class EpisodicDataset(torch.utils.data.Dataset):
             end_t = obstacle[27]
 
             if start_t > spawn_t:
-                return np.array([])
+                return padded_window
 
             if end_t >= anchor_t or start_t >= anchor_t:
                 window.append(obstacle)
 
-        if len(window) > self.cfg.data.max_obstacles:
-            raise ValueError("number of obstacles in window exceeded arbitrary limit")
-
-        padded_window = np.zeros(
-            (self.cfg.data.max_obstacles, self.cfg.data.obstacle_length)
-        )
+        if len(window) > max_obs:
+            raise ValueError(f"number of obstacles in window exceeded {max_obs}")
 
         padded_window[: len(window), :] = np.array(window)
-        padded_indices = len(padded_window) - len(window)
-        return padded_window, padded_indices
+        mask = np.ones((len(padded_window)))
+        mask[len(window) :] = 0
+        return padded_window, mask
 
 
 def read_replay(replay_path):
@@ -130,15 +128,17 @@ def read_replay(replay_path):
         action = np.zeros(
             (len(replay_dset), cfg.data.episode_length, cfg.data.action_length)
         )
-        for i, episode in enumerate(replay_dset.values()):
+        for i, action_episode in enumerate(replay_dset.values()):
+            # Set initial qpos of next episode (it overlaps with prev episode)
             if i != len(replay_dset) - 1:
-                qpos[i, 1:, :] = episode[:-1, 1:]
-            action[i, :, :] = episode[:, :]
+                qpos[i + 1, 0, 1:] = action_episode[-1, 1:]
+            qpos[i, 1:-1, 1:] = action_episode[:-1, 1:]
+            action[i, :, :] = action_episode[:, :]
         obstacles = root["/obstacles"][:]
         metadata = root["/metadata"][:]
 
-    qpos = np.reshape(-1, cfg.data.action_length - 1)
-    action = np.reshape(-1, cfg.data.action_length)
+    qpos = np.reshape(qpos, (-1, cfg.data.action_length - 1))
+    action = np.reshape(action, (-1, cfg.data.action_length))
     return metadata, obstacles, qpos, action
 
 
@@ -195,8 +195,6 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     return stats
 
 
-# TODO: convert data loaders to game state shards
-## Determine the size of data point to train/eval on
 def load_data(
     dataset_dir,
     num_episodes,
@@ -219,9 +217,6 @@ def load_data(
 
     # obtain normalization stats from TRAIN EPISODES ONLY
     norm_stats = get_norm_stats(dataset_dir, episode_ids=train_indices.tolist())
-
-    # import custom collate function
-    from custom_collate import custom_collate_fn
 
     # construct datasets (fixed window length = num_queries)
     train_dataset = EpisodicDataset(
@@ -251,7 +246,6 @@ def load_data(
         pin_memory=True,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
-        collate_fn=custom_collate_fn,
         persistent_workers=True,
     )
     val_dataloader = DataLoader(
@@ -261,7 +255,6 @@ def load_data(
         pin_memory=True,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
-        collate_fn=custom_collate_fn,
         persistent_workers=True,
     )
 
