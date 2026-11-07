@@ -59,7 +59,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
             frame_id = random.randint(0, frame_count - window_len)
 
             # Populate action window
-            for i in window_len:
+            for i in range(window_len):
                 action_window[i] = actions[frame_id + i]
 
         anchor_t = action_window[0, self.cfg.data.action_t_idx]
@@ -121,7 +121,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
 def read_replay(replay_path):
     with h5py.File(replay_path, "r") as root:
-        replay_dset = root["/actions"]
+        replay_dset = dict(sorted(root["/actions"], key=int))
         qpos = np.zeros(
             (len(replay_dset), cfg.data.episode_length, cfg.data.action_length - 1)
         )
@@ -131,8 +131,8 @@ def read_replay(replay_path):
         for i, action_episode in enumerate(replay_dset.values()):
             # Set initial qpos of next episode (it overlaps with prev episode)
             if i != len(replay_dset) - 1:
-                qpos[i + 1, 0, 1:] = action_episode[-1, 1:]
-            qpos[i, 1:-1, 1:] = action_episode[:-1, 1:]
+                qpos[i + 1, 0, 1:] = action_episode[-1, 1:-1]
+            qpos[i, 1:-1, 1:] = action_episode[:-1, 1:-1]
             action[i, :, :] = action_episode[:, :]
         obstacles = root["/obstacles"][:]
         metadata = root["/metadata"][:]
