@@ -10,29 +10,30 @@ Usage:
     python unity_vr_inference.py --ckpt_path path/to/policy_best.ckpt --stats_path path/to/dataset_stats.pkl
 """
 
-import os
-import sys
-import time
-import json
-import socket
 import argparse
-import threading
-import numpy as np
-import torch
-import pickle
-from collections import deque
-from PIL import Image
-import io
 import base64
-import torchaudio
+import io
+import json
+import os
+import pickle
+import socket
+import sys
+import threading
+import time
+from collections import deque
+
+import numpy as np
 import tensorflow_hub as hub
+import torch
+import torchaudio
+from PIL import Image
 
 # Add the current directory to path to import ACT modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import ACT modules
+from action_io import postprocess_action_to_env, preprocess_qpos
 from policy import ACTPolicy
-from action_io import preprocess_qpos, postprocess_action_to_env
 
 
 # TODO: Eliminate non-pose inputs
@@ -257,7 +258,7 @@ class UnityVRInterface:
         self.target_window_history_size = target_window_history_size
 
         # Load dataset statistics
-        stats_path = os.path.join(self.ckpt_dir, f"dataset_stats.pkl")
+        stats_path = os.path.join(self.ckpt_dir, "dataset_stats.pkl")
         with open(stats_path, "rb") as f:
             self.stats = pickle.load(f)
 
@@ -939,7 +940,7 @@ class UnityVRInterface:
                     client_thread.daemon = True
                     client_thread.start()
                     client_thread.join()
-                except socket.timeout:
+                except TimeoutError:
                     # This is expected, just continue the loop to check if we should still be running
                     continue
                 except Exception as e:
@@ -1079,7 +1080,7 @@ class UnityVRInterface:
                             print("Error decoding JSON from Unity")
                         except Exception as e:
                             print(f"Error processing state data: {e}")
-                except socket.timeout:
+                except TimeoutError:
                     # This is expected with the timeout, just continue
                     continue
                 except ConnectionResetError:

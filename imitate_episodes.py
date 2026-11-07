@@ -1,17 +1,21 @@
-import torch
-import numpy as np
 import os
 import pickle
 import re
-import matplotlib.pyplot as plt
 from copy import deepcopy
-from tqdm import tqdm
-from omegaconf import OmegaConf
-from act_bs.config.root import RootConfig
 
-from my_utils import load_data  # data functions
-from my_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from act_bs.config.root import RootConfig
+from my_utils import (  # helper functions
+    compute_dict_mean,
+    detach_dict,
+    load_data,  # data functions
+    set_seed,
+)
+from omegaconf import OmegaConf
 from policy import ACTPolicy
+from tqdm import tqdm
 
 
 def main(cfg):
@@ -42,7 +46,7 @@ def main(cfg):
     # save dataset stats
     if not os.path.isdir(ckpt_dir):
         os.makedirs(ckpt_dir)
-    stats_path = os.path.join(ckpt_dir, f"dataset_stats.pkl")
+    stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
     with open(stats_path, "wb") as f:
         pickle.dump(stats, f)
 
@@ -50,7 +54,7 @@ def main(cfg):
     best_epoch, min_val_loss, best_state_dict = best_ckpt_info
 
     # save best checkpoint
-    ckpt_path = os.path.join(ckpt_dir, f"policy_best.ckpt")
+    ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
     torch.save(best_state_dict, ckpt_path)
     print(f"Best ckpt, val loss {min_val_loss:.6f} @ epoch{best_epoch}")
 
@@ -255,7 +259,7 @@ def train_bc(train_dataloader, val_dataloader, cfg):
             }
             torch.save(full_state, os.path.join(ckpt_dir, "training_state.ckpt"))
 
-    ckpt_path = os.path.join(ckpt_dir, f"policy_last.ckpt")
+    ckpt_path = os.path.join(ckpt_dir, "policy_last.ckpt")
     torch.save(policy.state_dict(), ckpt_path)
 
     best_epoch, min_val_loss, best_state_dict = best_ckpt_info

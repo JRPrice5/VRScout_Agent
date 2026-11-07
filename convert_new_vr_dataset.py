@@ -19,21 +19,22 @@ Usage:
     python convert_new_vr_dataset.py --csv_file path/to/data.csv --image_dir path/to/images --output_dir path/to/output --episode_length 100
 """
 
+import argparse
 import os
+import re
+from datetime import datetime
+
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import argparse
-from PIL import Image
-from tqdm import tqdm
-from pyquaternion import Quaternion
-from datetime import datetime
-import matplotlib.pyplot as plt
-import re
-import torch
-import torchaudio
 import tensorflow as tf
 import tensorflow_hub as hub
+import torch
+import torchaudio
+from PIL import Image
+from pyquaternion import Quaternion
+from tqdm import tqdm
 
 
 def calculate_quaternion_delta(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
@@ -963,7 +964,7 @@ def main():
 
     # Get episode length from first episode
     if num_episodes > 0:
-        first_episode = os.path.join(args.output_dir, f"episode_0.hdf5")
+        first_episode = os.path.join(args.output_dir, "episode_0.hdf5")
         with h5py.File(first_episode, "r") as f:
             episode_len = f["/action"].shape[0]
     else:
@@ -978,7 +979,7 @@ def main():
             episode_len,
             args.constants_file,
         )
-        print(f"\nTo train with this dataset, run:")
+        print("\nTo train with this dataset, run:")
         print(
             f"python imitate_episodes.py --ckpt_dir ./ckpts/{args.task_name} --policy_class ACT --task_name {args.task_name} --batch_size 16 --seed 0 --num_epochs 500 --lr 1e-5 --kl_weight 5 --chunk_size 64 --hidden_dim 512 --dim_feedforward 2048"
         )

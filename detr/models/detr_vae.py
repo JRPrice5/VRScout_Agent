@@ -3,14 +3,12 @@
 DETR model and criterion classes.
 """
 
-from act_bs.config.root import ModelConfig
-from omegaconf import OmegaConf
+import numpy as np
 import torch
 from torch import nn
 from torch.autograd import Variable
-from .transformer import build_transformer, TransformerEncoder, TransformerEncoderLayer
 
-import numpy as np
+from .transformer import TransformerEncoder, TransformerEncoderLayer, build_transformer
 
 
 def reparametrize(mu, logvar):

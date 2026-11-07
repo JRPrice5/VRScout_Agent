@@ -1,14 +1,13 @@
-import numpy as np
+import os
 import random
 import re
-import torch
-import os
-import h5py
-from torch.utils.data import DataLoader
-from typing import Optional
-from omegaconf import OmegaConf
-from act_bs.config.root import RootConfig
 
+import h5py
+import numpy as np
+import torch
+from act_bs.config.root import RootConfig
+from omegaconf import OmegaConf
+from torch.utils.data import DataLoader
 
 cfg = OmegaConf.structured(RootConfig)
 
@@ -20,7 +19,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         dataset_dir,
         norm_stats,
         num_queries,
-        tail_clip: Optional[int] = None,
+        tail_clip: int | None = None,
         audio_history_len: int = 1,
     ):
         super(EpisodicDataset).__init__()
@@ -114,14 +113,14 @@ class EpisodicDataset(torch.utils.data.Dataset):
             raise ValueError(f"number of obstacles in window exceeded {max_obs}")
 
         padded_window[: len(window), :] = np.array(window)
-        mask = np.ones((len(padded_window)))
+        mask = np.ones(len(padded_window))
         mask[len(window) :] = 0
         return padded_window, mask
 
 
 def read_replay(replay_path):
     with h5py.File(replay_path, "r") as root:
-        replay_dset = dict(sorted(root["/actions"], key=int))
+        replay_dset = dict(sorted(root["/actions"].items(), key=lambda x: int(x[0])))
         qpos = np.zeros(
             (len(replay_dset), cfg.data.episode_length, cfg.data.action_length - 1)
         )
@@ -131,9 +130,12 @@ def read_replay(replay_path):
         for i, action_episode in enumerate(replay_dset.values()):
             # Set initial qpos of next episode (it overlaps with prev episode)
             if i != len(replay_dset) - 1:
-                qpos[i + 1, 0, 1:] = action_episode[-1, 1:-1]
-            qpos[i, 1:-1, 1:] = action_episode[:-1, 1:-1]
+                qpos[i + 1, 0, 1:] = replay_dset.values()[i + 1][-1, 1:-1]
+            qpos[i, :-1, 1:] = action_episode[1:-1, 1:]
             action[i, :, :] = action_episode[:, :]
+
+        qpos[0, 0, :] = qpos[0, 1, :]  # WARN: fills missing 1st qpos w/ 2nd
+
         obstacles = root["/obstacles"][:]
         metadata = root["/metadata"][:]
 

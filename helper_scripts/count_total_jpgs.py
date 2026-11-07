@@ -1,5 +1,6 @@
 import os
 
+
 def count_jpgs(root_dir):
     jpg_count = 0
     for root, dirs, files in os.walk(root_dir):

@@ -1,6 +1,7 @@
 import os
 import shutil
 
+
 def collect_pngs(src_root, dst_root):
     """
     Copies all PNG images from subfolders in src_root to dst_root,

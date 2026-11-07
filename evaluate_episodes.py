@@ -1,16 +1,19 @@
-import torch
-import numpy as np
 import os
 import pickle
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-from omegaconf import OmegaConf
-from act_bs.config.root import RootConfig
 
-from constants import DT
-from my_utils import load_data  # data functions
-from my_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from act_bs.config.root import RootConfig
+from my_utils import (  # helper functions
+    compute_dict_mean,
+    detach_dict,
+    load_data,  # data functions
+    set_seed,
+)
+from omegaconf import OmegaConf
 from policy import ACTPolicy
+from tqdm import tqdm
 
 
 def main(cfg):
@@ -36,7 +39,7 @@ def main(cfg):
     # save dataset stats
     if not os.path.isdir(ckpt_dir):
         os.makedirs(ckpt_dir)
-    stats_path = os.path.join(ckpt_dir, f"dataset_stats.pkl")
+    stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
     with open(stats_path, "wb") as f:
         pickle.dump(stats, f)
 
@@ -55,7 +58,7 @@ def main(cfg):
         val_dataloader, cfg.imitation, pretrained_ckpt_path
     )
 
-    print(f"\nEvaluation complete.")
+    print("\nEvaluation complete.")
     print(f"Train loss: {train_loss_summary['loss']:.6f}")
     print(f"Validation loss: {val_loss_summary['loss']:.6f}")
 
@@ -125,7 +128,7 @@ def evaluate_bc_loss(dataloader, config, ckpt_path=None):
     loss_summary = compute_dict_mean(all_dicts)
 
     # Print results
-    print(f"\nEvaluation Results:")
+    print("\nEvaluation Results:")
     print(f"Total loss: {loss_summary['loss']:.5f}")
     summary_string = ""
     for k, v in loss_summary.items():

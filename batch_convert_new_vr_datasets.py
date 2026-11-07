@@ -11,12 +11,12 @@ Usage:
     python batch_convert_vr_datasets.py --input_dir path/to/datasets --output_dir path/to/output --episode_length 100
 """
 
-import os
 import argparse
 import glob
-from pathlib import Path
-from tqdm import tqdm
+import os
+
 from convert_new_vr_dataset import convert_vr_dataset_to_hdf5, update_constants_file
+from tqdm import tqdm
 
 
 def find_dataset_folders(input_dir):
@@ -162,7 +162,7 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
             print(f"  Audio file: {audio_file}")
             print(f"  Audio CSV: {audio_csv}")
         else:
-            print(f"  Audio: None")
+            print("  Audio: None")
         print(f"  Output directory: {output_dir}")
         print(f"  Starting from episode index: {start_episode_idx + total_episodes}")
         
@@ -214,7 +214,7 @@ def batch_convert_vr_datasets(input_dir, output_dir, episode_length=None, update
         # Update constants.py with the maximum episode length
         update_constants_file(output_dir, task_name, total_episodes, max_episode_len)
         
-        print(f"\nTo train with this dataset, run:")
+        print("\nTo train with this dataset, run:")
         print(f"python imitate_episodes.py --ckpt_dir ./ckpts/{task_name} --policy_class ACT --task_name {task_name} --batch_size 16 --seed 0 --num_epochs 500 --lr 1e-5 --kl_weight 5 --chunk_size 64 --hidden_dim 512 --dim_feedforward 2048")
     
     print(f"\nAll datasets processed successfully. Output saved to {output_dir}")

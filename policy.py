@@ -1,11 +1,10 @@
-import torch
-import torch.nn as nn
-from torch.cuda.amp import autocast
-from typing import Optional
 
-from detr.main import build_ACT_model_and_optimizer
+import torch
 from action_utils import compute_continuous_loss
+from detr.main import build_ACT_model_and_optimizer
 from distributions import TanhDiagNormal
+from torch import nn
+from torch.cuda.amp import autocast
 
 
 class ACTPolicy(nn.Module):
@@ -167,7 +166,7 @@ class ACTPolicy(nn.Module):
         qpos,
         actions,
         obstacle_mask,
-        microbatch: Optional[int] = None,
+        microbatch: int | None = None,
     ):
         """
         Expose per-step hidden features h_t without refactoring the backbone.

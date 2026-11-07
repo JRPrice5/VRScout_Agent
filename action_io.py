@@ -1,6 +1,6 @@
+
 import numpy as np
 import torch
-from typing import Union
 
 
 def preprocess_qpos(qpos_np: np.ndarray, stats: dict) -> torch.Tensor:
@@ -15,7 +15,7 @@ def preprocess_qpos(qpos_np: np.ndarray, stats: dict) -> torch.Tensor:
 
 
 def postprocess_action_to_env(
-    action_norm: Union[torch.Tensor, np.ndarray],
+    action_norm: torch.Tensor | np.ndarray,
     stats: dict,
 ) -> np.ndarray:
     """

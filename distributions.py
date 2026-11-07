@@ -1,9 +1,8 @@
 import math
-from typing import Optional
 
 import torch
-from torch.distributions import Distribution
 import torch.nn.functional as F
+from torch.distributions import Distribution
 
 
 class TanhDiagNormal(Distribution):
@@ -66,7 +65,7 @@ class BernoulliMulti(Distribution): #TODO check whether it fit our boolean state
     has_rsample = False
     arg_constraints = {}
 
-    def __init__(self, logits: Optional[torch.Tensor] = None, probs: Optional[torch.Tensor] = None):
+    def __init__(self, logits: torch.Tensor | None = None, probs: torch.Tensor | None = None):
         assert (logits is None) ^ (probs is None), "Specify exactly one of logits or probs"
         if logits is not None:
             self.logits = logits
