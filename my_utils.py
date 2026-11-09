@@ -119,6 +119,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
 
 def read_replay(replay_path):
+    print(f"reading from {replay_path}")
     with h5py.File(replay_path, "r") as root:
         replay_dset = dict(sorted(root["/actions"].items(), key=lambda x: int(x[0])))
         action = np.zeros(
@@ -152,7 +153,6 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 
     all_qpos_data = []
     all_action_data = []
-    all_obstacle_data = []
     for episode_idx in ids:
         replay_name = [
             filename
@@ -160,15 +160,13 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
             if filename.endswith(".hdf5")
         ][episode_idx]
         replay_path = os.path.join(dataset_dir, replay_name)
-        _, obstacles, qpos, action = read_replay(replay_path)
-        all_obstacle_data.append(torch.from_numpy(obstacles))
+        _, _, qpos, action = read_replay(replay_path)
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))
 
     # Concatenate instead of stack to handle different episode lengths
     all_qpos_data = torch.cat(all_qpos_data, dim=0)
     all_action_data = torch.cat(all_action_data, dim=0)
-    all_obstacle_data = torch.cat(all_obstacle_data, dim=0)
 
     # normalize action data
     action_mean = all_action_data.mean(dim=0, keepdim=True)
