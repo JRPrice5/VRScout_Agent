@@ -1,6 +1,5 @@
-
 import torch
-from action_utils import compute_continuous_loss
+from act_bs.agent.action_utils import compute_continuous_loss
 from detr.main import build_ACT_model_and_optimizer
 from distributions import TanhDiagNormal
 from torch import nn
@@ -40,7 +39,6 @@ class ACTPolicy(nn.Module):
         if actions is not None:  # training time
             actions = actions[:, : self.model.num_queries].float()
 
-            # TODO: Adjust for image->game_state
             a_hat, (mu, logvar, prior_mu, prior_logvar) = self.model(
                 metadata, obstacle_data, qpos, actions, obstacle_mask
             )
@@ -63,6 +61,7 @@ class ACTPolicy(nn.Module):
 
             return a_hat
 
+    # TODO: reformat model input intuitively
     def forward(
         self,
         metadata,
@@ -159,6 +158,22 @@ class ACTPolicy(nn.Module):
                 "value": value,
             }
 
+    def concat_metadata_and_obstacles(
+        self,
+        metadata,
+        obstacle_data,
+    ):
+        # Dupe metadata W times to allow concat w/ obstacles
+        W = obstacle_data.shape[1]
+        metadata_duped = metadata.repeat(1, W, 1)
+        assert metadata_duped.shape == (
+            metadata.shape[0],
+            W,
+            metadata.shape[1],
+        )
+
+        return torch.cat([metadata_duped, obstacle_data], dim=2)
+
     def encode_to_hidden(
         self,
         metadata,
@@ -171,6 +186,10 @@ class ACTPolicy(nn.Module):
         """
         Expose per-step hidden features h_t without refactoring the backbone.
         Returns h of shape [B, T, H].
+        metadata: B, m
+        obstacle_data & obstacle_mask: B, W, o
+        qpos: B, F, q
+        actions: B, F, a
         """
         self.model.eval()  # feature extraction is inference-like
         device = "cuda"
@@ -186,12 +205,15 @@ class ACTPolicy(nn.Module):
                 q_mb = q_mb.to(device, non_blocking=True).float()
                 with autocast(enabled=True):
                     qpos_proj = self.model.input_proj_qpos(q_mb)
-                    # TODO: Mask obstacle data
-                    game_state = torch.cat([metadata, obstacle_data])
+
+                    game_state = self.concat_metadata_and_obstacles(
+                        metadata, obstacle_data
+                    )
                     env_proj = self.model.input_proj_game_state(game_state)
 
                     transformer_input = torch.cat([qpos_proj, env_proj], dim=1)
 
+                    # TODO: Mask obstacle data
                     hs_mb = self.model.decoder(
                         transformer_input,
                         self.model.query_embed.weight,
