@@ -10,6 +10,7 @@ from my_utils import (  # helper functions
     detach_dict,
     load_data,  # data functions
     set_seed,
+    # count_action_episodes,
 )
 from omegaconf import OmegaConf
 from policy import ACTPolicy
@@ -22,10 +23,23 @@ def main(cfg):
     batch_size_train = cfg.evaluation.batch_size
     batch_size_val = cfg.evaluation.batch_size
     dataset_dir = cfg.data.hdf5.dataset_dir
+    # num_episodes = (
+    #     cfg.evaluation.num_episodes
+    #     if cfg.evaluation.num_episodes != -1
+    #     else sum(
+    #         [
+    #             count_action_episodes(dataset_dir, replay)
+    #             for replay in os.listdir(dataset_dir)
+    #             if replay.endswith(".hdf5")
+    #         ]
+    #     )
+    # ) # Use this instead if episodes are smaller than replays
     num_episodes = (
         cfg.evaluation.num_episodes
         if cfg.evaluation.num_episodes != -1
-        else len(os.listdir(dataset_dir))
+        else len(
+            [replay for replay in os.listdir(dataset_dir) if replay.endswith(".hdf5")]
+        )
     )
 
     train_dataloader, val_dataloader, stats = load_data(

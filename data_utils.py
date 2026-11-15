@@ -1,6 +1,8 @@
 import os
+from tqdm import tqdm
 import random
 import re
+import logging
 
 import h5py
 import numpy as np
@@ -19,22 +21,33 @@ class EpisodicDataset(torch.utils.data.Dataset):
         dataset_dir,
         norm_stats,
         num_queries,
-        tail_clip: int | None = None,
-        audio_history_len: int = 1,
     ):
         super(EpisodicDataset).__init__()
         self.cfg = OmegaConf.structured(RootConfig)
+        self.episodes = self._read_episodes()
         self.episode_ids = episode_ids
-        pattern = re.compile(r"\.hdf5$")
         self.dataset_dir = dataset_dir
-        self.episodes = [
-            file for file in os.listdir(self.dataset_dir) if pattern.search(file)
-        ]
         self.norm_stats = norm_stats
         self.num_queries = int(num_queries)
 
     def __len__(self):
         return len(self.episode_ids)
+
+    def _read_episodes(self):
+        episodes = []
+        count = 0
+
+        for file in os.listdir(self.dataset_dir):
+            fits = fits_replay_schema(self.dataset_dir, file)
+            if file.endswith(".hdf5") and fits:
+                episodes.append(file)
+            elif not fits:
+                count += 1
+
+        if count:
+            logging.exception(f"{count} episodes were missing key fields")
+
+        return episodes
 
     def __getitem__(self, index):
         episode_id = self.episode_ids[index]
@@ -43,31 +56,14 @@ class EpisodicDataset(torch.utils.data.Dataset):
         njs = metadata[0] * 30
         jd = metadata[1] * 30
 
-        window_len = self.cfg.model.chunk_size
-        frame_count = actions.shape[0]
-
-        frame_id = 0
-        action_window = np.zeros(
-            (window_len, self.cfg.data.action_length), dtype=np.float32
-        )
-
-        while not self._is_contiguous_actions(action_window) or np.all(
-            action_window == 0
-        ):
-            # Pick random frame within replay
-            frame_id = random.randint(0, frame_count - window_len)
-
-            # Populate action window
-            for i in range(window_len):
-                action_window[i] = actions[frame_id + i]
-
+        action_window, action_id = self._get_random_action_window(actions)
         anchor_t = action_window[0, self.cfg.data.action_t_idx]
         obstacle_window, obstacle_mask = self._get_obs_window(
             obstacles, jd, njs, anchor_t
         )
 
         metadata = torch.from_numpy(metadata).float()
-        qpos_data = torch.from_numpy(qpos[frame_id]).float()
+        qpos_data = torch.from_numpy(qpos[action_id]).float()
         action_data = torch.from_numpy(action_window).float()
         obstacle_data = torch.from_numpy(obstacle_window).float()
         obstacle_data = torch.from_numpy(obstacle_mask).float()
@@ -92,13 +88,33 @@ class EpisodicDataset(torch.utils.data.Dataset):
             np.diff(actions[:, 0]) < (2 / self.cfg.model.sample_rate)
         )
 
+    def _get_random_action_window(self, actions):
+        window_len = self.cfg.model.chunk_size
+        frame_count = actions.shape[0]
+
+        frame_id = 0
+        action_window = np.zeros(
+            (window_len, self.cfg.data.action_length), dtype=np.float32
+        )
+
+        while not self._is_contiguous_actions(action_window) or np.all(
+            action_window == 0
+        ):
+            # Pick random frame within replay
+            frame_id = random.randint(0, frame_count - window_len)
+
+            # Populate action window
+            for i in range(window_len):
+                action_window[i] = actions[frame_id + i]
+        return action_window, frame_id
+
     def _get_obs_window(self, obstacles, jd, njs, anchor_t):
         window = []
         spawn_t = anchor_t + jd / (2 * njs)
         max_obs = self.cfg.data.max_obstacles
         padded_window = np.zeros((max_obs, self.cfg.data.obstacle_length))
 
-        for i in range(0, len(obstacles), 1):
+        for i in tqdm(range(0, len(obstacles), 1)):
             obstacle = obstacles[i]
             start_t = obstacle[self.cfg.data.obs_t_idx]
             end_t = obstacle[27]
@@ -119,23 +135,16 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
 
 def read_replay(replay_path):
-    print(f"reading from {replay_path}")
     with h5py.File(replay_path, "r") as root:
-        replay_dset = dict(sorted(root["/actions"].items(), key=lambda x: int(x[0])))
-        action = np.zeros(
-            (len(replay_dset), cfg.data.episode_length, cfg.data.action_length)
-        )
-        for i, action_episode in enumerate(replay_dset.values()):
-            action[i, :, :] = action_episode[:, :]
-
+        actions = root["/actions"][:]
         obstacles = root["/obstacles"][:]
         metadata = root["/metadata"][:]
 
-    action = np.reshape(action, (-1, cfg.data.action_length))
-    qpos = np.zeros((action.shape[0], action.shape[1] - 1))
+    action = np.reshape(actions, (-1, cfg.data.action_length))
+    qpos = np.zeros((actions.shape[0], actions.shape[1] - 1))
     qpos[1:, :] = action[:-1, 1:]
     qpos[0, :] = qpos[1, :]  # WARN: fills missing 1st qpos w/ 2nd
-    return metadata, obstacles, qpos, action
+    return metadata, obstacles, qpos, actions
 
 
 def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
@@ -157,7 +166,7 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
         replay_name = [
             filename
             for filename in os.listdir(dataset_dir)
-            if filename.endswith(".hdf5")
+            if filename.endswith(".hdf5") and fits_replay_schema(dataset_dir, filename)
         ][episode_idx]
         replay_path = os.path.join(dataset_dir, replay_name)
         _, _, qpos, action = read_replay(replay_path)
@@ -186,6 +195,16 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     }
 
     return stats
+
+
+def fits_replay_schema(dataset_dir, filepath):
+    """
+    Returns whether the hdf5 file associated with the filepath in dataset dir contains
+    the appropriate replay fields
+    """
+    with h5py.File(os.path.join(dataset_dir, filepath), "r") as f:
+        k = f.keys()
+        return "actions" in k and "obstacles" in k and "metadata" in k
 
 
 def load_data(
@@ -278,3 +297,18 @@ def detach_dict(d):
 def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+
+def get_hdf5_filenames(dataset_dir):
+    return [
+        filename
+        for filename in os.listdir(dataset_dir)
+        if filename.endswith(".hdf5") and fits_replay_schema(dataset_dir, filename)
+    ]
+
+
+# def count_action_episodes(dataset_dir, replay):
+#     with h5py.File(os.path.join(dataset_dir, replay), "r") as f:
+#         if "actions" not in f:
+#             raise FileNotFoundError
+#         return len(f["/actions"])
