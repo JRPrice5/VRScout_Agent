@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-# TODO: Generate architecture diagrams
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -63,23 +62,23 @@ class Transformer(nn.Module):
     def forward(
         self,
         src,
+        mask,
         query_embed,
         pos_embed,
-        latent_input=None,
-        proprio_input=None,
-        additional_pos_embed=None,
     ):
+        # Src is (B, no_obs + 2) i.e. batch of concatenated obs list + metadata + qpos
         assert len(src.shape) == 3
-        bs, x, c = src.shape
+        bs, _, _ = src.shape
         src = src.permute(1, 0, 2)
         pos_embed = pos_embed.unsqueeze(1).repeat(1, bs, 1)
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
 
         tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src, pos=pos_embed)
+        memory = self.encoder(src, mask, pos_embed)
         hs = self.decoder(
             tgt,
             memory,
+            mask,
             pos=pos_embed,
             query_pos=query_embed,
         )
@@ -98,7 +97,6 @@ class TransformerEncoder(nn.Module):
         self,
         src,
         mask: Tensor | None = None,
-        src_key_padding_mask: Tensor | None = None,
         pos: Tensor | None = None,
     ):
         output = src
@@ -106,8 +104,7 @@ class TransformerEncoder(nn.Module):
         for layer in self.layers:
             output = layer(
                 output,
-                src_mask=mask,
-                src_key_padding_mask=src_key_padding_mask,
+                src_key_padding_mask=mask,
                 pos=pos,
             )
 
@@ -129,10 +126,7 @@ class TransformerDecoder(nn.Module):
         self,
         tgt,
         memory,
-        tgt_mask: Tensor | None = None,
-        memory_mask: Tensor | None = None,
-        tgt_key_padding_mask: Tensor | None = None,
-        memory_key_padding_mask: Tensor | None = None,
+        memory_mask,
         pos: Tensor | None = None,
         query_pos: Tensor | None = None,
     ):
@@ -144,10 +138,7 @@ class TransformerDecoder(nn.Module):
             output = layer(
                 output,
                 memory,
-                tgt_mask=tgt_mask,
-                memory_mask=memory_mask,
-                tgt_key_padding_mask=tgt_key_padding_mask,
-                memory_key_padding_mask=memory_key_padding_mask,
+                memory_key_padding_mask=memory_mask,
                 pos=pos,
                 query_pos=query_pos,
             )
@@ -200,14 +191,11 @@ class TransformerEncoderLayer(nn.Module):
     def forward_post(
         self,
         src,
-        src_mask: Tensor | None = None,
         src_key_padding_mask: Tensor | None = None,
         pos: Tensor | None = None,
     ):
         q = k = self.with_pos_embed(src, pos)
-        src2 = self.self_attn(
-            q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask
-        )[0]
+        src2 = self.self_attn(q, k, value=src, key_padding_mask=src_key_padding_mask)[0]
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         # Apply feedforward with gated activation support
@@ -249,8 +237,8 @@ class TransformerEncoderLayer(nn.Module):
         pos: Tensor | None = None,
     ):
         if self.normalize_before:
-            return self.forward_pre(src, src_mask, src_key_padding_mask, pos)
-        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+            return self.forward_pre(src, src_key_padding_mask, pos)
+        return self.forward_post(src, src_key_padding_mask, pos)
 
 
 class TransformerDecoderLayer(nn.Module):

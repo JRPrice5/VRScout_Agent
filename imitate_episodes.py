@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from act_bs.config.root import RootConfig
-from my_utils import (  # helper functions
+from act_bs.agent.data_utils import (  # helper functions
     compute_dict_mean,
     detach_dict,
     load_data,  # data functions
@@ -83,7 +83,7 @@ def forward_pass(data, policy):
         action_data.cuda(),
         is_pad.cuda(),
     )
-    return policy(qpos_data, state_data, action_data, is_pad)  # TODO remove None
+    return policy(qpos_data, state_data, action_data, is_pad)
 
 
 def train_bc(train_dataloader, val_dataloader, cfg):

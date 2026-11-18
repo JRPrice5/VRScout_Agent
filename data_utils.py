@@ -24,9 +24,9 @@ class EpisodicDataset(torch.utils.data.Dataset):
     ):
         super(EpisodicDataset).__init__()
         self.cfg = OmegaConf.structured(RootConfig)
+        self.dataset_dir = dataset_dir
         self.episodes = self._read_episodes()
         self.episode_ids = episode_ids
-        self.dataset_dir = dataset_dir
         self.norm_stats = norm_stats
         self.num_queries = int(num_queries)
 
@@ -38,11 +38,11 @@ class EpisodicDataset(torch.utils.data.Dataset):
         count = 0
 
         for file in os.listdir(self.dataset_dir):
-            fits = fits_replay_schema(self.dataset_dir, file)
-            if file.endswith(".hdf5") and fits:
-                episodes.append(file)
-            elif not fits:
-                count += 1
+            if file.endswith(".hdf5"):
+                if fits_replay_schema(self.dataset_dir, file):
+                    episodes.append(file)
+                else:
+                    count += 1
 
         if count:
             logging.exception(f"{count} episodes were missing key fields")
@@ -66,7 +66,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_data = torch.from_numpy(qpos[action_id]).float()
         action_data = torch.from_numpy(action_window).float()
         obstacle_data = torch.from_numpy(obstacle_window).float()
-        obstacle_data = torch.from_numpy(obstacle_mask).float()
+        obstacle_mask = torch.from_numpy(obstacle_mask).bool()
 
         # Convert numpy arrays to torch tensors and ensure float32 dtype
         action_mean = torch.tensor(self.norm_stats["action_mean"], dtype=torch.float32)
@@ -113,6 +113,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         spawn_t = anchor_t + jd / (2 * njs)
         max_obs = self.cfg.data.max_obstacles
         padded_window = np.zeros((max_obs, self.cfg.data.obstacle_length))
+        mask = np.zeros(len(padded_window))
 
         for i in tqdm(range(0, len(obstacles), 1)):
             obstacle = obstacles[i]
@@ -120,18 +121,24 @@ class EpisodicDataset(torch.utils.data.Dataset):
             end_t = obstacle[27]
 
             if start_t > spawn_t:
-                return padded_window
+                continue
 
-            if end_t >= anchor_t or start_t >= anchor_t:
+            if (
+                (anchor_t <= start_t <= spawn_t)
+                or (anchor_t <= end_t <= spawn_t)
+                or (start_t <= anchor_t and end_t >= spawn_t)
+            ):
                 window.append(obstacle)
 
         if len(window) > max_obs:
             raise ValueError(f"number of obstacles in window exceeded {max_obs}")
 
-        padded_window[: len(window), :] = np.array(window)
-        mask = np.ones(len(padded_window))
-        mask[len(window) :] = 0
-        return padded_window, mask
+        if len(window) == 0:
+            return padded_window, np.ones(len(padded_window), dtype=bool)
+        else:
+            mask[len(window) :] = 1
+            padded_window[: len(window), :] = np.array(window)
+            return padded_window, mask.astype(bool)
 
 
 def read_replay(replay_path):
@@ -168,6 +175,7 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
             for filename in os.listdir(dataset_dir)
             if filename.endswith(".hdf5") and fits_replay_schema(dataset_dir, filename)
         ][episode_idx]
+        print(replay_name)
         replay_path = os.path.join(dataset_dir, replay_name)
         _, _, qpos, action = read_replay(replay_path)
         all_qpos_data.append(torch.from_numpy(qpos))
@@ -197,12 +205,12 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     return stats
 
 
-def fits_replay_schema(dataset_dir, filepath):
+def fits_replay_schema(dataset_dir, filename):
     """
-    Returns whether the hdf5 file associated with the filepath in dataset dir contains
+    Returns whether the hdf5 file associated with the filename in dataset dir contains
     the appropriate replay fields
     """
-    with h5py.File(os.path.join(dataset_dir, filepath), "r") as f:
+    with h5py.File(os.path.join(dataset_dir, filename), "r") as f:
         k = f.keys()
         return "actions" in k and "obstacles" in k and "metadata" in k
 

@@ -8,7 +8,11 @@ import torch
 from torch import nn
 from torch.autograd import Variable
 
-from .transformer import TransformerEncoder, TransformerEncoderLayer, build_transformer
+from .transformer import (
+    TransformerEncoder,
+    TransformerEncoderLayer,
+    build_transformer,
+)
 
 
 def reparametrize(mu, logvar):
@@ -33,12 +37,20 @@ def get_sinusoid_encoding_table(n_position, d_hid):
     return torch.FloatTensor(sinusoid_table).unsqueeze(0)
 
 
-# TODO: determine what is being positionally embedded - probably action sequence
-# Determine what needs to be positionally embedded - probably action sequence and maybe obstacles
+# Determine what needs to be positionally embedded - action sequence
 class DETRVAE(nn.Module):
     """This is the DETR module that performs object detection"""
 
-    def __init__(self, decoder, encoder, action_dim, state_dim, num_queries):
+    def __init__(
+        self,
+        decoder,
+        encoder,
+        action_dim,
+        obstacle_dim,
+        metadata_dim,
+        num_queries,
+        max_obs,
+    ):
         """Initializes the model.
         Parameters:
             game_state_mlp: game_state_encoder.
@@ -53,25 +65,24 @@ class DETRVAE(nn.Module):
         self.decoder = decoder
         self.encoder = encoder
         self.action_dim = action_dim  # Store action dimension for consistent use
+        self.obstacle_dim = obstacle_dim
+        self.metadata = metadata_dim
         self.hidden_dim = decoder.d_model
         self.action_head = nn.Linear(self.hidden_dim, action_dim)
-        self.is_pad_head = nn.Linear(self.hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, self.hidden_dim)
 
         self.input_proj = nn.LazyLinear(self.hidden_dim)
-        self.input_proj_qpos = nn.Linear(action_dim, self.hidden_dim)
-        self.input_proj_game_state = nn.Linear(state_dim, self.hidden_dim)
-        self.pos = torch.nn.Embedding(2, self.hidden_dim)
+        self.qpos_proj = nn.Linear(action_dim, self.hidden_dim)
+        self.obstacle_proj = nn.Linear(obstacle_dim, self.hidden_dim)
+        self.metadata_proj = nn.Linear(metadata_dim, self.hidden_dim)
+        self.pos = torch.nn.Embedding(max_obs + 3, self.hidden_dim)
 
         # encoder extra parameters
-        self.latent_dim = 32  # final size of latent z # TODO: tune
+        self.latent_dim = 32  # final size of latent z
         self.cls_embed = nn.Embedding(1, self.hidden_dim)  # extra cls token embedding
         self.encoder_action_proj = nn.Linear(
             action_dim, self.hidden_dim
         )  # project action to embedding
-        self.encoder_joint_proj = nn.Linear(
-            action_dim, self.hidden_dim
-        )  # project qpos to embedding
         self.latent_proj = nn.Linear(
             self.hidden_dim, self.latent_dim * 2
         )  # project hidden state to latent std, var
@@ -91,7 +102,7 @@ class DETRVAE(nn.Module):
             2, self.hidden_dim
         )  # learned position embedding for proprio, latent
 
-    def forward(self, metadata, obstacle_data, qpos, actions=None, obstacle_padding=0):
+    def forward(self, metadata, obstacles, qpos, actions=None, obstacle_mask=None):
         """
         metadata: batch, state
         obstacle_data: batch, obs_window, obstacle_dim
@@ -104,14 +115,14 @@ class DETRVAE(nn.Module):
         prior_mean = torch.zeros((batch_size, self.latent_dim), device=qpos.device)
         prior_logvar = torch.zeros((batch_size, self.latent_dim), device=qpos.device)
 
+        qpos_embed = self.qpos_proj(qpos)  # (bs, self.hidden_dim)
+        qpos_embed = torch.unsqueeze(qpos_embed, dim=1)  # (bs, 1, self.hidden_dim)
         ### Obtain latent z from action sequence
         if is_training:
             # project action sequence to embedding dim, and concat with a CLS token
             action_embed = self.encoder_action_proj(
                 actions
             )  # (bs, seq, self.hidden_dim)
-            qpos_embed = self.encoder_joint_proj(qpos)  # (bs, self.hidden_dim)
-            qpos_embed = torch.unsqueeze(qpos_embed, dim=1)  # (bs, 1, self.hidden_dim)
             cls_embed = self.cls_embed.weight  # (1, self.hidden_dim)
             cls_embed = torch.unsqueeze(cls_embed, dim=0).repeat(
                 batch_size, 1, 1
@@ -140,25 +151,37 @@ class DETRVAE(nn.Module):
             latent_sample = prior_mean
             latent_input = self.latent_out_proj(latent_sample)
 
-        # proprioception features
-        proprio_input = self.input_proj_robot_state(qpos)
+        metadata_embed = self.metadata_proj(metadata)
+        obstacles_embed = self.obstacle_proj(obstacles)
+
+        decoder_input = torch.cat(
+            [
+                obstacles_embed,
+                torch.unsqueeze(metadata_embed, 1),
+                qpos_embed,
+                torch.unsqueeze(latent_input, 1),
+            ],
+            axis=1,
+        )
+        obstacle_mask = torch.cat(
+            [
+                obstacle_mask,
+                torch.zeros((batch_size, 3), device="cuda", dtype=bool),
+            ],
+            axis=1,
+        )
 
         hidden_state = self.decoder(
-            metadata,
-            obstacle_data,
+            decoder_input,
             obstacle_mask,
             self.query_embed.weight,
             self.pos.weight,
-            latent_input,
-            proprio_input,
-            self.additional_pos_embed.weight,
         )[
             0
         ]  # src,mask,query_embed,pos_embed,latent_input,proprio_input,additional_pos_embed
 
         a_hat = self.action_head(hidden_state)
-        is_pad_hat = self.is_pad_head(hidden_state)
-        return a_hat, is_pad_hat, [mean, logvar, prior_mean, prior_logvar]
+        return a_hat, [mean, logvar, prior_mean, prior_logvar]
 
 
 def build_encoder(cfg):
@@ -166,7 +189,7 @@ def build_encoder(cfg):
     dropout = cfg.model.dropout  # 0.1
     nhead = cfg.model.nheads  # 8
     dim_feedforward = cfg.model.dim_feedforward  # 2048
-    num_encoder_layers = cfg.model.enc_layers  # 4 # TODO: share with VAE decoder
+    num_encoder_layers = cfg.model.enc_layers  # 4
     normalize_before = cfg.model.pre_norm  # False
     activation = "relu"
 
@@ -188,8 +211,10 @@ def build(cfg):
         decoder,
         encoder,
         action_dim=cfg.data.action_length,
-        state_dim=cfg.data.episode_length + cfg.data.metadata_length,
+        obstacle_dim=cfg.data.obstacle_length,
+        metadata_dim=cfg.data.metadata_length,
         num_queries=cfg.model.chunk_size,
+        max_obs=cfg.data.max_obstacles,
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)

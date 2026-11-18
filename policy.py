@@ -10,7 +10,7 @@ class ACTPolicy(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         model, optimizer = build_ACT_model_and_optimizer(cfg)
-        self.model = model  # CVAE decoder
+        self.model = model
         self.optimizer = optimizer
         self.kl_weight = cfg.training.kl_weight
         print(f"KL Weight {self.kl_weight}")
@@ -36,7 +36,7 @@ class ACTPolicy(nn.Module):
     ):
         # Convert inputs to float32 to match model weights
         qpos = qpos.float()
-        if actions is not None:  # training time
+        if isinstance(actions, torch.Tensor):  # training time
             actions = actions[:, : self.model.num_queries].float()
 
             a_hat, (mu, logvar, prior_mu, prior_logvar) = self.model(
@@ -55,13 +55,12 @@ class ACTPolicy(nn.Module):
             loss_dict["loss"] = continuous_loss + loss_dict["kl"] * self.kl_weight
             return loss_dict
         else:  # inference time
-            a_hat, _, stats = self.model(
+            a_hat, stats = self.model(
                 metadata, obstacle_data, qpos
             )  # no action, sample from prior
 
             return a_hat
 
-    # TODO: reformat model input intuitively
     def forward(
         self,
         metadata,
@@ -79,9 +78,7 @@ class ACTPolicy(nn.Module):
           h: [B, T, H], mean/log_std: [B, T, Cc], value: [B, T]
         """
         # Compute hidden states h using the backbone/transformer
-        h = self.encode_to_hidden(
-            metadata, obstacle_data, qpos, actions, obstacle_mask
-        )  # [B, T, H]
+        h = self.encode_to_hidden(qpos, actions)  # [B, T, H]
         try:
             print("[DBG][FWD] h", tuple(h.shape))
         except Exception:
@@ -150,101 +147,6 @@ class ACTPolicy(nn.Module):
             }
         else:
             # For unsquashed Gaussian, the mean is raw mu
-            mean = mu
-            return {
-                "a_hat": a_hat,
-                "h": h,
-                "mean": mean,
-                "value": value,
-            }
-
-    def concat_metadata_and_obstacles(
-        self,
-        metadata,
-        obstacle_data,
-    ):
-        # Dupe metadata W times to allow concat w/ obstacles
-        W = obstacle_data.shape[1]
-        metadata_duped = metadata.repeat(1, W, 1)
-        assert metadata_duped.shape == (
-            metadata.shape[0],
-            W,
-            metadata.shape[1],
-        )
-
-        return torch.cat([metadata_duped, obstacle_data], dim=2)
-
-    def encode_to_hidden(
-        self,
-        metadata,
-        obstacle_data,
-        qpos,
-        actions,
-        obstacle_mask,
-        microbatch: int | None = None,
-    ):
-        """
-        Expose per-step hidden features h_t without refactoring the backbone.
-        Returns h of shape [B, T, H].
-        metadata: B, m
-        obstacle_data & obstacle_mask: B, W, o
-        qpos: B, F, q
-        actions: B, F, a
-        """
-        self.model.eval()  # feature extraction is inference-like
-        device = "cuda"
-        B = qpos.shape[0]
-        mb = int(microbatch) if (microbatch is not None and microbatch > 0) else B
-        outs = []
-        with torch.no_grad():
-            for s in range(0, B, mb):
-                e = min(B, s + mb)
-                q_mb = qpos[s:e]
-
-                # Move to device lazily per chunk
-                q_mb = q_mb.to(device, non_blocking=True).float()
-                with autocast(enabled=True):
-                    qpos_proj = self.model.input_proj_qpos(q_mb)
-
-                    game_state = self.concat_metadata_and_obstacles(
-                        metadata, obstacle_data
-                    )
-                    env_proj = self.model.input_proj_game_state(game_state)
-
-                    transformer_input = torch.cat([qpos_proj, env_proj], dim=1)
-
-                    # TODO: Mask obstacle data
-                    hs_mb = self.model.decoder(
-                        transformer_input,
-                        self.model.query_embed.weight,
-                        self.model.pos.weight,
-                    )[0]
-
-                outs.append(hs_mb)
-        hidden_state = torch.cat(outs, dim=0) if len(outs) > 1 else outs[0]
-        # hs is [B, T, H]
-        return hidden_state
-
-    def heads_from_h(self, h, out_mode: str = "dist"):
-        """
-        Run only stochastic/action/value heads from precomputed hidden h.
-        h: [B, T, H]
-        """
-        h_f32 = h.float()
-        mu = self.mu_head(h_f32)
-        log_std = self.log_std_head(h_f32).clamp(min=-2.5, max=-0.3)
-        value = self.value_head(h_f32).squeeze(-1)
-        a_hat = self.model.action_head(h)  # keep model native dtype
-
-        if out_mode in ("dist", "distribution"):
-            dist = TanhDiagNormal(mu, log_std, min_log_std=-2.5, max_log_std=-0.3)
-            return {
-                "a_hat": a_hat,
-                "h": h,
-                "dist": dist,
-                "value": value,
-            }
-        else:
             mean = mu
             return {
                 "a_hat": a_hat,
