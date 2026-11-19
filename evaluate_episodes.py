@@ -95,13 +95,14 @@ def make_optimizer(policy_class, policy):
 
 def forward_pass(data, policy):
     metadata, obstacle_data, qpos_data, action_data, obstacle_mask = data
-    metadata, obstacle_data, qpos_data, action_data, obstacle_mask = (
-        metadata.cuda(),
-        obstacle_data.cuda(),
-        qpos_data.cuda(),
-        action_data.cuda(),
-        obstacle_mask.cuda(),
-    )
+    if torch.cuda.is_available():
+        metadata, obstacle_data, qpos_data, action_data, obstacle_mask = (
+            metadata.cuda(),
+            obstacle_data.cuda(),
+            qpos_data.cuda(),
+            action_data.cuda(),
+            obstacle_mask.cuda(),
+        )
     return policy(metadata, obstacle_data, qpos_data, action_data, obstacle_mask)
 
 
@@ -119,7 +120,8 @@ def evaluate_bc_loss(dataloader, config, ckpt_path=None):
     """
     # Create policy
     policy = make_policy("ACT", config)
-    policy.cuda()
+    if torch.cuda.is_available():
+        policy.cuda()
 
     # Load pretrained weights if provided
     if ckpt_path is not None:

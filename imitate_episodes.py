@@ -77,12 +77,13 @@ def make_optimizer(policy_class, policy):
 
 def forward_pass(data, policy):
     state_data, qpos_data, action_data, is_pad = data
-    state_data, qpos_data, action_data, is_pad = (
-        state_data.cuda(),
-        qpos_data.cuda(),
-        action_data.cuda(),
-        is_pad.cuda(),
-    )
+    if torch.cuda.is_available():
+        state_data, qpos_data, action_data, is_pad = (
+            state_data.cuda(),
+            qpos_data.cuda(),
+            action_data.cuda(),
+            is_pad.cuda(),
+        )
     return policy(qpos_data, state_data, action_data, is_pad)
 
 
@@ -98,7 +99,8 @@ def train_bc(train_dataloader, val_dataloader, cfg):
     set_seed(seed)
 
     policy = make_policy(policy_class, cfg)
-    policy.cuda()
+    if torch.cuda.is_available():
+        policy.cuda()
     optimizer = make_optimizer(policy_class, policy)
 
     # Initialize tracking and best state
@@ -179,13 +181,14 @@ def train_bc(train_dataloader, val_dataloader, cfg):
             epoch_dicts = []
             for batch_idx, data in enumerate(val_dataloader):
                 metadata, obstacle_data, qpos, action, obstacle_mask = data
-                metadata, obstacle_data, qpos, action, obstacle_mask = (
-                    metadata.cuda(),
-                    obstacle_data.cuda(),
-                    qpos.cuda(),
-                    action.cuda(),
-                    obstacle_mask.cuda(),
-                )
+                if torch.cuda.is_available():
+                    metadata, obstacle_data, qpos, action, obstacle_mask = (
+                        metadata.cuda(),
+                        obstacle_data.cuda(),
+                        qpos.cuda(),
+                        action.cuda(),
+                        obstacle_mask.cuda(),
+                    )
 
                 loss_dict = policy(metadata, obstacle_data, qpos, action, obstacle_mask)
                 epoch_dicts.append(loss_dict)
@@ -208,13 +211,14 @@ def train_bc(train_dataloader, val_dataloader, cfg):
         current_epoch_train = []
         for batch_idx, data in enumerate(train_dataloader):
             metadata, obstacle_data, qpos, action, obstacle_mask = data
-            metadata, obstacle_data, qpos, action, obstacle_mask = (
-                metadata.cuda(),
-                obstacle_data.cuda(),
-                qpos.cuda(),
-                action.cuda(),
-                obstacle_mask.cuda(),
-            )
+            if torch.cuda.is_available():
+                metadata, obstacle_data, qpos, action, obstacle_mask = (
+                    metadata.cuda(),
+                    obstacle_data.cuda(),
+                    qpos.cuda(),
+                    action.cuda(),
+                    obstacle_mask.cuda(),
+                )
             if batch_idx == 0:
                 print(
                     f"[Train] Batch shapes - metadata: {metadata.shape}, obstacles: {obstacle_data}, Qpos: {qpos.shape}, Action: {action.shape}"

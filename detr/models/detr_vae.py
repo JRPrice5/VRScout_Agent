@@ -72,8 +72,7 @@ class DETRVAE(nn.Module):
         self.action_head = nn.Linear(self.hidden_dim, action_dim)
         self.query_embed = nn.Embedding(num_queries, self.hidden_dim)
 
-        self.input_proj = nn.LazyLinear(self.hidden_dim)
-        self.qpos_proj = nn.Linear(action_dim, self.hidden_dim)
+        self.qpos_proj = nn.Linear(action_dim - 1, self.hidden_dim)
         self.obstacle_proj = nn.Linear(obstacle_dim, self.hidden_dim)
         self.metadata_proj = nn.Linear(metadata_dim, self.hidden_dim)
         self.pos = torch.nn.Embedding(max_obs + 3, self.hidden_dim)
@@ -164,10 +163,13 @@ class DETRVAE(nn.Module):
             ],
             axis=1,
         )
+        device = "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
         obstacle_mask = torch.cat(
             [
                 obstacle_mask,
-                torch.zeros((batch_size, 3), device="cuda", dtype=bool),
+                torch.zeros((batch_size, 3), device=device, dtype=bool),
             ],
             axis=1,
         )
@@ -228,15 +230,15 @@ def build(cfg):
 
     dummy = next(iter(train_dataloader))
     metadata, obstacle_data, qpos, action, obstacle_mask = dummy
-    metadata, obstacle_data, qpos, action, obstacle_mask = (
-        metadata.cuda(),
-        obstacle_data.cuda(),
-        qpos.cuda(),
-        action.cuda(),
-        obstacle_mask.cuda(),
-    )
-    with torch.no_grad():
-        model(metadata, obstacle_data, qpos, action, obstacle_mask)
+    if torch.cuda.is_available():
+        metadata, obstacle_data, qpos, action, obstacle_mask = (
+            metadata.cuda(),
+            obstacle_data.cuda(),
+            qpos.cuda(),
+            action.cuda(),
+            obstacle_mask.cuda(),
+        )
+    model(metadata, obstacle_data, qpos, action, obstacle_mask)
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of parameters: %.2fM" % (n_parameters / 1e6,))

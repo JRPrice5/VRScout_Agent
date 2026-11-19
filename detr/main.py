@@ -6,7 +6,8 @@ from .models import build_ACT_model
 
 def build_ACT_model_and_optimizer(cfg):
     model = build_ACT_model(cfg)
-    model.cuda()
+    if torch.cuda.is_available():
+        model.cuda()
 
     param_dicts = [
         {
