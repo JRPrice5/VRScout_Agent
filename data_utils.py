@@ -10,44 +10,23 @@ import torch
 from act_bs.config.root import RootConfig
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
+from sklearn.preprocessing import StandardScaler
 
 cfg = OmegaConf.structured(RootConfig)
 
 
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        episode_ids,
-        dataset_dir,
-        norm_stats,
-        num_queries,
-    ):
+    def __init__(self, episode_ids, dataset_dir, norm_stats, num_queries, episodes):
         super(EpisodicDataset).__init__()
         self.cfg = OmegaConf.structured(RootConfig)
         self.dataset_dir = dataset_dir
-        self.episodes = self._read_episodes()
+        self.episodes = episodes
         self.episode_ids = episode_ids
         self.norm_stats = norm_stats
         self.num_queries = int(num_queries)
 
     def __len__(self):
         return len(self.episode_ids)
-
-    def _read_episodes(self):
-        episodes = []
-        count = 0
-
-        for file in os.listdir(self.dataset_dir):
-            if file.endswith(".hdf5"):
-                if fits_replay_schema(self.dataset_dir, file):
-                    episodes.append(file)
-                else:
-                    count += 1
-
-        if count:
-            logging.exception(f"{count} episodes were missing key fields")
-
-        return episodes
 
     def __getitem__(self, index):
         episode_id = self.episode_ids[index]
@@ -141,6 +120,13 @@ class EpisodicDataset(torch.utils.data.Dataset):
             return padded_window, mask.astype(bool)
 
 
+def read_actions(replay_path):
+    with h5py.File(replay_path, "r") as root:
+        actions = root["/actions"][:]
+
+    return actions
+
+
 def read_replay(replay_path):
     with h5py.File(replay_path, "r") as root:
         metadata = root["/metadata"][:]
@@ -156,7 +142,7 @@ def read_replay(replay_path):
     )
 
 
-def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
+def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None, episodes=None):
     """Compute normalization stats over specified episodes.
 
     Backward compatible: if episode_ids is None, falls back to range(num_episodes).
@@ -169,43 +155,24 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
     else:
         ids = list(episode_ids)
 
-    all_qpos_data = []
-    all_action_data = []
-    replays = [
-        filename
-        for filename in os.listdir(dataset_dir)
-        if filename.endswith(".hdf5") and fits_replay_schema(dataset_dir, filename)
-    ]
-    for episode_idx in ids:
-        replay_name = replays[episode_idx]
-        replay_path = os.path.join(dataset_dir, replay_name)
-        _, _, qpos, action = read_replay(replay_path)
-        all_qpos_data.append(torch.from_numpy(qpos))
-        all_action_data.append(torch.from_numpy(action))
-
-    # Concatenate instead of stack to handle different episode lengths
-    try:
-        all_qpos_data = torch.cat(all_qpos_data, dim=0)
-    except ValueError:
-        print(f"num_episodes: {num_episodes}")
-        print(f"ids: {ids}")
-    all_action_data = torch.cat(all_action_data, dim=0)
+    scaler = StandardScaler()
+    for episode_idx in tqdm(ids, desc="getting norm stats", total=len(ids)):
+        path = os.path.join(dataset_dir, episodes[episode_idx])
+        scaler.partial_fit(read_actions(path))
 
     # normalize action data
-    action_mean = all_action_data.mean(dim=0, keepdim=True)
-    action_std = all_action_data.std(dim=0, keepdim=True)
-    action_std = torch.clip(action_std, 1e-2, np.inf)  # clipping
+    action_mean = scaler.mean_
+    n = scaler.n_samples_seen_
+    action_std = np.maximum(np.sqrt(scaler.var_ * n / (n - 1)), 1e-2)
 
-    # normalize qpos data
-    qpos_mean = all_qpos_data.mean(dim=0, keepdim=True)
-    qpos_std = all_qpos_data.std(dim=0, keepdim=True)
-    qpos_std = torch.clip(qpos_std, 1e-2, np.inf)  # clipping
+    qpos_mean = action_mean[1:]
+    qpos_std = action_std[1:]
 
     stats = {
-        "action_mean": action_mean.numpy().squeeze(),
-        "action_std": action_std.numpy().squeeze(),
-        "qpos_mean": qpos_mean.numpy().squeeze(),
-        "qpos_std": qpos_std.numpy().squeeze(),
+        "action_mean": action_mean.squeeze(),
+        "action_std": action_std.squeeze(),
+        "qpos_mean": qpos_mean.squeeze(),
+        "qpos_std": qpos_std.squeeze(),
     }
 
     return stats
@@ -240,24 +207,22 @@ def load_data(
     shuffled_indices = np.random.permutation(num_episodes)
     train_indices = shuffled_indices[: int(train_ratio * num_episodes)]
     val_indices = shuffled_indices[int(train_ratio * num_episodes) :]
+    episodes = get_hdf5_filenames(dataset_dir)
 
     # obtain normalization stats from TRAIN EPISODES ONLY
     norm_stats = get_norm_stats(
-        dataset_dir, num_episodes=num_episodes, episode_ids=train_indices.tolist()
+        dataset_dir,
+        num_episodes=num_episodes,
+        episode_ids=train_indices.tolist(),
+        episodes=episodes,
     )
 
     # construct datasets (fixed window length = num_queries)
     train_dataset = EpisodicDataset(
-        train_indices,
-        dataset_dir,
-        norm_stats,
-        num_queries,
+        train_indices, dataset_dir, norm_stats, num_queries, episodes
     )
     val_dataset = EpisodicDataset(
-        val_indices,
-        dataset_dir,
-        norm_stats,
-        num_queries,
+        val_indices, dataset_dir, norm_stats, num_queries, episodes
     )
 
     # DataLoader configuration
@@ -316,11 +281,20 @@ def set_seed(seed):
 
 
 def get_hdf5_filenames(dataset_dir):
-    return [
-        filename
-        for filename in os.listdir(dataset_dir)
-        if filename.endswith(".hdf5") and fits_replay_schema(dataset_dir, filename)
-    ]
+    episodes = []
+    count = 0
+
+    for file in os.listdir(dataset_dir):
+        if file.endswith(".hdf5"):
+            if fits_replay_schema(dataset_dir, file):
+                episodes.append(file)
+            else:
+                count += 1
+
+    if count:
+        logging.exception(f"{count} episodes were missing key fields")
+
+    return episodes
 
 
 # def count_action_episodes(dataset_dir, replay):
