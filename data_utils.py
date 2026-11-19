@@ -94,7 +94,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         padded_window = np.zeros((max_obs, self.cfg.data.obstacle_length))
         mask = np.zeros(len(padded_window))
 
-        for i in tqdm(range(0, len(obstacles), 1)):
+        for i in range(0, len(obstacles), 1):
             obstacle = obstacles[i]
             start_t = obstacle[self.cfg.data.obs_t_idx]
             end_t = obstacle[27]
