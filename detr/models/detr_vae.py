@@ -231,6 +231,7 @@ def build(cfg):
     dummy = next(iter(train_dataloader))
     metadata, obstacle_data, qpos, action, obstacle_mask = dummy
     if torch.cuda.is_available():
+        model.cuda()
         metadata, obstacle_data, qpos, action, obstacle_mask = (
             metadata.cuda(),
             obstacle_data.cuda(),
