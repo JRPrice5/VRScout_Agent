@@ -12,6 +12,7 @@ from act_bs.agent.data_utils import (  # helper functions
     detach_dict,
     load_data,  # data functions
     set_seed,
+    fits_replay_schema,
 )
 from omegaconf import OmegaConf
 from policy import ACTPolicy
@@ -28,11 +29,16 @@ def main(cfg):
 
     # task_config = TASK_CONFIGS[task_name]
     dataset_dir = cfg.data.hdf5_dir
-    pattern = re.compile(r"\.hdf5$")
     num_episodes = (
         cfg.training.num_episodes
         if cfg.training.num_episodes != -1
-        else len([file for file in os.listdir(dataset_dir) if pattern.search(file)])
+        else len(
+            [
+                file
+                for file in os.listdir(dataset_dir)
+                if file.endswith(".hdf5") and fits_replay_schema(dataset_dir, file)
+            ]
+        )
     )
 
     train_dataloader, val_dataloader, stats = load_data(
@@ -221,7 +227,7 @@ def train_bc(train_dataloader, val_dataloader, cfg):
                 )
             if batch_idx == 0:
                 print(
-                    f"[Train] Batch shapes - metadata: {metadata.shape}, obstacles: {obstacle_data}, Qpos: {qpos.shape}, Action: {action.shape}"
+                    f"[Train] Batch shapes - metadata: {metadata.shape}, obstacles: {obstacle_data.shape}, Qpos: {qpos.shape}, Action: {action.shape}"
                 )
 
             optimizer.zero_grad()
