@@ -35,10 +35,8 @@ class EpisodicDataset(torch.utils.data.Dataset):
         njs = metadata[0] * 30
         jd = metadata[1] * 30
 
-        action_window, action_id = self._get_random_action_window(actions)
-        anchor_t = action_window[0, self.cfg.data.action_t_idx]
-        obstacle_window, obstacle_mask = self._get_obs_window(
-            obstacles, jd, njs, anchor_t
+        action_window, action_id, obstacle_window, obstacle_mask = (
+            self._get_random_sample(actions, obstacles, jd, njs)
         )
 
         metadata = torch.from_numpy(metadata).float()
@@ -67,7 +65,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
             np.diff(actions[:, 0]) < (2 / self.cfg.model.sample_rate)
         )
 
-    def _get_random_action_window(self, actions):
+    def _get_random_sample(self, actions, obstacles, jd, njs):
         window_len = self.cfg.model.chunk_size
         frame_count = actions.shape[0]
 
@@ -76,16 +74,28 @@ class EpisodicDataset(torch.utils.data.Dataset):
             (window_len, self.cfg.data.action_length), dtype=np.float32
         )
 
+        obstacle_window = None
+        obstacle_mask = None
         while not self._is_contiguous_actions(action_window) or np.all(
             action_window == 0
         ):
+            try:
+                anchor_t = action_window[0, self.cfg.data.action_t_idx]
+                obstacle_window, obstacle_mask = self._get_obs_window(
+                    obstacles, jd, njs, anchor_t
+                )
+            except ValueError:
+                continue
             # Pick random frame within replay
             frame_id = random.randint(0, frame_count - window_len)
 
             # Populate action window
             for i in range(window_len):
                 action_window[i] = actions[frame_id + i]
-        return action_window, frame_id
+
+        if not obstacle_window or not obstacle_mask:
+            raise ValueError("no valid sample found")
+        return action_window, frame_id, obstacle_window, obstacle_mask
 
     def _get_obs_window(self, obstacles, jd, njs, anchor_t):
         window = []
