@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.autograd import Variable
+from act_bs.agent.data_utils import load_data
 
 from .transformer import (
     TransformerEncoder,
@@ -216,6 +217,18 @@ def build(cfg):
         num_queries=cfg.model.chunk_size,
         max_obs=cfg.data.max_obstacles,
     )
+
+    train_dataloader, _, _ = load_data(
+        cfg.data.hdf5_dir,
+        1,
+        1,
+        1,
+        cfg.model.chunk_size,
+    )
+
+    dummy = next(iter(train_dataloader))
+    with torch.no_grad():
+        model(dummy)
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of parameters: %.2fM" % (n_parameters / 1e6,))

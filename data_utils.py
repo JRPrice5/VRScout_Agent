@@ -253,10 +253,10 @@ def load_data(
     )
 
     # DataLoader configuration
-    num_workers = min(4, os.cpu_count())  # Use multiple workers but not too many
+    n_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", cfg.data.cores))
     prefetch_factor = 4  # Prefetch more batches to keep GPU busy
     print(
-        f"DataLoader config: num_workers={num_workers}, prefetch_factor={prefetch_factor}"
+        f"DataLoader config: num_workers={n_workers}, prefetch_factor={prefetch_factor}"
     )
 
     train_dataloader = DataLoader(
@@ -264,7 +264,7 @@ def load_data(
         batch_size=batch_size_train,
         shuffle=True,
         pin_memory=True,
-        num_workers=num_workers,
+        num_workers=n_workers,
         prefetch_factor=prefetch_factor,
         persistent_workers=True,
     )
@@ -273,7 +273,7 @@ def load_data(
         batch_size=batch_size_val,
         shuffle=True,
         pin_memory=True,
-        num_workers=num_workers,
+        num_workers=n_workers,
         prefetch_factor=prefetch_factor,
         persistent_workers=True,
     )
