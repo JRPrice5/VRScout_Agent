@@ -143,15 +143,17 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
 def read_replay(replay_path):
     with h5py.File(replay_path, "r") as root:
-        actions = root["/actions"][:]
-        obstacles = root["/obstacles"][:]
         metadata = root["/metadata"][:]
+        obstacles = root["/obstacles"][:]
+        actions = root["/actions"][:]
+        qpos = np.vstack((actions[0, 1:][None, ...], actions[0:, 1:]))
 
-    action = np.reshape(actions, (-1, cfg.data.action_length))
-    qpos = np.zeros((actions.shape[0], actions.shape[1] - 1))
-    qpos[1:, :] = action[:-1, 1:]
-    qpos[0, :] = qpos[1, :]  # WARN: fills missing 1st qpos w/ 2nd
-    return metadata, obstacles, qpos, actions
+    return (
+        metadata,
+        obstacles,
+        qpos,
+        actions,
+    )
 
 
 def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
@@ -169,20 +171,24 @@ def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 
     all_qpos_data = []
     all_action_data = []
+    replays = [
+        filename
+        for filename in os.listdir(dataset_dir)
+        if filename.endswith(".hdf5") and fits_replay_schema(dataset_dir, filename)
+    ]
     for episode_idx in ids:
-        replay_name = [
-            filename
-            for filename in os.listdir(dataset_dir)
-            if filename.endswith(".hdf5") and fits_replay_schema(dataset_dir, filename)
-        ][episode_idx]
-        print(replay_name)
+        replay_name = replays[episode_idx]
         replay_path = os.path.join(dataset_dir, replay_name)
         _, _, qpos, action = read_replay(replay_path)
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))
 
     # Concatenate instead of stack to handle different episode lengths
-    all_qpos_data = torch.cat(all_qpos_data, dim=0)
+    try:
+        all_qpos_data = torch.cat(all_qpos_data, dim=0)
+    except ValueError:
+        print(f"num_episodes: {num_episodes}")
+        print(f"ids: {ids}")
     all_action_data = torch.cat(all_action_data, dim=0)
 
     # normalize action data
@@ -236,7 +242,9 @@ def load_data(
     val_indices = shuffled_indices[int(train_ratio * num_episodes) :]
 
     # obtain normalization stats from TRAIN EPISODES ONLY
-    norm_stats = get_norm_stats(dataset_dir, episode_ids=train_indices.tolist())
+    norm_stats = get_norm_stats(
+        dataset_dir, num_episodes=num_episodes, episode_ids=train_indices.tolist()
+    )
 
     # construct datasets (fixed window length = num_queries)
     train_dataset = EpisodicDataset(

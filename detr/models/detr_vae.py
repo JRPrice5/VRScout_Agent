@@ -220,15 +220,23 @@ def build(cfg):
 
     train_dataloader, _, _ = load_data(
         cfg.data.hdf5_dir,
-        1,
-        1,
-        1,
+        10,
+        2,
+        2,
         cfg.model.chunk_size,
     )
 
     dummy = next(iter(train_dataloader))
+    metadata, obstacle_data, qpos, action, obstacle_mask = dummy
+    metadata, obstacle_data, qpos, action, obstacle_mask = (
+        metadata.cuda(),
+        obstacle_data.cuda(),
+        qpos.cuda(),
+        action.cuda(),
+        obstacle_mask.cuda(),
+    )
     with torch.no_grad():
-        model(dummy)
+        model(metadata, obstacle_data, qpos, action, obstacle_mask)
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of parameters: %.2fM" % (n_parameters / 1e6,))
