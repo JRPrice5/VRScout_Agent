@@ -76,16 +76,13 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
         obstacle_window = None
         obstacle_mask = None
-        while not self._is_contiguous_actions(action_window) or np.all(
-            action_window == 0
-        ):
-            try:
-                anchor_t = action_window[0, self.cfg.data.action_t_idx]
-                obstacle_window, obstacle_mask = self._get_obs_window(
-                    obstacles, jd, njs, anchor_t
-                )
-            except ValueError:
-                continue
+        valid_window = False
+        n_retries = 0
+        while (
+            not self._is_contiguous_actions(action_window)
+            or np.all(action_window == 0)
+            or not valid_window
+        ) and n_reties < 100:
             # Pick random frame within replay
             frame_id = random.randint(0, frame_count - window_len)
 
@@ -93,8 +90,19 @@ class EpisodicDataset(torch.utils.data.Dataset):
             for i in range(window_len):
                 action_window[i] = actions[frame_id + i]
 
-        if not obstacle_window or not obstacle_mask:
-            raise ValueError("no valid sample found")
+            try:
+                anchor_t = action_window[0, self.cfg.data.action_t_idx]
+                obstacle_window, obstacle_mask = self._get_obs_window(
+                    obstacles, jd, njs, anchor_t
+                )
+                valid_window = True
+            except ValueError:
+                valid_window = False
+            n_retries += 1
+
+        if n_retries == 100:
+            raise RuntimeError("Exceeded get item retries")
+
         return action_window, frame_id, obstacle_window, obstacle_mask
 
     def _get_obs_window(self, obstacles, jd, njs, anchor_t):
