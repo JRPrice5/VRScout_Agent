@@ -82,7 +82,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
             not self._is_contiguous_actions(action_window)
             or np.all(action_window == 0)
             or not valid_window
-        ) and n_reties < 100:
+        ) and n_retries < 100:
             # Pick random frame within replay
             frame_id = random.randint(0, frame_count - window_len)
 
